@@ -173,9 +173,19 @@ class HQMString:
             return b""
         if not self.changed and len(self.raw) <= max_len:
             return self.raw
-        raw, truncated = encode_hqm_string(self.text, max_len, self.encoding)
+        output_encoding = _select_hqm_output_encoding(self.text, self.encoding)
+        raw, truncated = encode_hqm_string(self.text, max_len, output_encoding)
         self.truncated = truncated
         return raw
+
+def _contains_hangul(text: str) -> bool:
+    return any("\uac00" <= ch <= "\ud7a3" or "\u1100" <= ch <= "\u11ff" or "\u3130" <= ch <= "\u318f" for ch in text)
+
+def _select_hqm_output_encoding(text: str, source_encoding: str) -> str:
+    if _contains_hangul(text):
+        if source_encoding in ("utf-8", "ascii", "iso-8859-1", "cp932"):
+            return "cp949"
+    return source_encoding
 
 
 @dataclass
