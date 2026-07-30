@@ -185,7 +185,6 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
     if not unresolved_raw:
         return resolved
 
-    # Reduce token usage by sending only unique unresolved strings once.
     unique_unresolved = []
     unique_map = {}
     unresolved_to_unique = []
@@ -196,10 +195,6 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
             unique_map[text] = pos
             unique_unresolved.append(text)
         unresolved_to_unique.append(pos)
-
-    if log_callback and len(unique_unresolved) < len(unresolved_raw):
-        saved = len(unresolved_raw) - len(unique_unresolved)
-        log_callback(f"💡 Gemini 요청 최적화: 중복 문장 {saved}개를 재사용해 토큰 사용량을 줄였습니다.")
 
     if genai is None:
         return [item if item is not None else text for item, text in zip(resolved, text_list)]
