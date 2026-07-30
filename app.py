@@ -272,7 +272,7 @@ if ctk is not None and TkinterDnD is not None:
             log_scrollbar.config(command=self.log_textbox.yview)
             self.log_textbox.configure(state="disabled")
 
-            # ... 앞부분 코드 생략 (def _setup_ui 내부 마지막 부분) ...
+            # ... 앞부분 코드 생략 (def _asetup_ui 내부 마지막 부분) ...
 
             self.log("💡 [안내] FTB 및 HQM 퀘스트 언어 파일(.snbt / .json / .hqm) 완벽 지원이 적용되었습니다.")
             

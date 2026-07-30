@@ -20,6 +20,9 @@ _google_translator = None
 _google_translator_lock = threading.Lock()
 _google_cache = {}
 _GOOGLE_CACHE_MAX = 4000
+_gemini_cache = {}
+_gemini_cache_lock = threading.Lock()
+_GEMINI_CACHE_MAX = 8000
 
 
 class QuotaExceededError(Exception):
@@ -162,31 +165,54 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
         return []
 
     resolved = []
-    unresolved = []
+    unresolved_indices = []
+    unresolved_raw = []
+
     for text in text_list:
         cached = get_reference_translation(text, reference_map)
         if cached is not None:
             resolved.append(cached)
         else:
-            resolved.append(None)
-            unresolved.append(text)
+            with _gemini_cache_lock:
+                gemini_cached = _gemini_cache.get(text)
+            if gemini_cached is not None:
+                resolved.append(gemini_cached)
+            else:
+                resolved.append(None)
+                unresolved_indices.append(len(resolved) - 1)
+                unresolved_raw.append(text)
 
-    if not unresolved:
+    if not unresolved_raw:
         return resolved
+
+    # Reduce token usage by sending only unique unresolved strings once.
+    unique_unresolved = []
+    unique_map = {}
+    unresolved_to_unique = []
+    for text in unresolved_raw:
+        pos = unique_map.get(text)
+        if pos is None:
+            pos = len(unique_unresolved)
+            unique_map[text] = pos
+            unique_unresolved.append(text)
+        unresolved_to_unique.append(pos)
+
+    if log_callback and len(unique_unresolved) < len(unresolved_raw):
+        saved = len(unresolved_raw) - len(unique_unresolved)
+        log_callback(f"💡 Gemini 요청 최적화: 중복 문장 {saved}개를 재사용해 토큰 사용량을 줄였습니다.")
 
     if genai is None:
         return [item if item is not None else text for item, text in zip(resolved, text_list)]
 
     max_retries = 3
     client = genai.Client(api_key=api_key)
-    input_json = json.dumps(unresolved, ensure_ascii=False)
+    input_json = json.dumps(unique_unresolved, ensure_ascii=False)
     prompt = (
-        "You are a professional Minecraft quest translator.\n"
-        "Translate the JSON array of English strings below into natural Korean.\n"
-        "Requirements:\n"
-        "1. Preserve all Minecraft formatting and color codes (e.g., &a, §c, {color:...}) exactly as they are.\n"
-        "2. Keep the exact same structure and size of the JSON array.\n"
-        "3. Output strictly ONLY a valid JSON array of translated strings with no commentary, markdown fences, or extra text.\n\n"
+        "Translate the input JSON array from English to natural Korean for Minecraft quests.\n"
+        "Rules:\n"
+        "- Return ONLY a valid JSON array (no explanation, no markdown).\n"
+        "- Keep array order and length exactly the same.\n"
+        "- Preserve formatting/placeholders exactly (&a, §c, {color:...}, %s, {0}, <...>).\n"
         f"Input JSON: {input_json}"
     )
 
@@ -204,13 +230,17 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
             if match:
                 raw_text = match.group(0)
             translated_array = json.loads(raw_text)
-            if isinstance(translated_array, list) and len(translated_array) == len(unresolved):
+            if isinstance(translated_array, list) and len(translated_array) == len(unique_unresolved):
+                with _gemini_cache_lock:
+                    if len(_gemini_cache) >= _GEMINI_CACHE_MAX:
+                        _gemini_cache.clear()
+                    for src, dst in zip(unique_unresolved, translated_array):
+                        _gemini_cache[src] = str(dst)
+
                 merged = list(resolved)
-                unresolved_idx = 0
-                for idx, value in enumerate(merged):
-                    if value is None:
-                        merged[idx] = translated_array[unresolved_idx]
-                        unresolved_idx += 1
+                for original_pos, resolved_idx in enumerate(unresolved_indices):
+                    unique_pos = unresolved_to_unique[original_pos]
+                    merged[resolved_idx] = translated_array[unique_pos]
                 return merged
             return [item if item is not None else text for item, text in zip(resolved, text_list)]
 
