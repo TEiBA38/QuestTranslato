@@ -1,0 +1,5 @@
+customtkinter>=6.0.0
+tkinterdnd2>=0.6.2
+deep-translator>=1.11.4
+google-genai>=2.15.0
+requests>=2.34.2
