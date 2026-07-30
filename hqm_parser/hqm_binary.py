@@ -119,19 +119,22 @@ def bit_max(bit: Bits, version: int) -> int:
     return (1 << count) - 1
 
 
-def decode_hqm_string(raw: bytes) -> str:
+def decode_hqm_string(raw: bytes) -> Tuple[str, str]:
     # HQM 本体は charset 未指定の String.getBytes/new String を使う。
-    # Python 側では実用上 UTF-8 を優先し、古い日本語環境向けに CP932 も試す。
-    for encoding in ("utf-8", "cp932", "iso-8859-1"):
+    # まず UTF-8 を試し、次に韓国語向けの CP949、古い日本語環境向けの CP932 を試す。
+    for encoding in ("utf-8", "cp949", "cp932", "iso-8859-1"):
         try:
-            return raw.decode(encoding)
+            return raw.decode(encoding), encoding
         except UnicodeDecodeError:
             continue
-    return raw.decode("iso-8859-1", errors="replace")
+    return raw.decode("iso-8859-1", errors="replace"), "iso-8859-1"
 
 
-def encode_hqm_string(text: str, max_len: int) -> Tuple[bytes, bool]:
-    encoded = text.encode("utf-8")
+def encode_hqm_string(text: str, max_len: int, encoding: str = "utf-8") -> Tuple[bytes, bool]:
+    try:
+        encoded = text.encode(encoding)
+    except UnicodeEncodeError:
+        encoded = text.encode("utf-8", errors="ignore")
     if len(encoded) <= max_len:
         return encoded, False
 
@@ -149,14 +152,16 @@ def encode_hqm_string(text: str, max_len: int) -> Tuple[bytes, bool]:
 class HQMString:
     text: Optional[str]
     raw: bytes = b""
+    encoding: str = "utf-8"
     changed: bool = False
     truncated: bool = False
 
     @classmethod
     def from_raw(cls, raw: Optional[bytes]) -> "HQMString":
         if raw is None:
-            return cls(None, b"")
-        return cls(decode_hqm_string(raw), raw)
+            return cls(None, b"", "utf-8")
+        text, encoding = decode_hqm_string(raw)
+        return cls(text, raw, encoding)
 
     def set(self, value: Optional[str]) -> None:
         if value != self.text:
@@ -168,7 +173,7 @@ class HQMString:
             return b""
         if not self.changed and len(self.raw) <= max_len:
             return self.raw
-        raw, truncated = encode_hqm_string(self.text, max_len)
+        raw, truncated = encode_hqm_string(self.text, max_len, self.encoding)
         self.truncated = truncated
         return raw
 
