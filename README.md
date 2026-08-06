@@ -19,6 +19,7 @@ betterquesting 경우
 D:\MODE\Instances\MeatballCraft Dimensional Ascension\config\betterquesting
 <img width="1057" height="239" alt="image" src="https://github.com/user-attachments/assets/b059d6cd-6b30-4942-ae72-ad9479ac3885" />
 DefaultQuests 파일 전체를 압축해서 번역 하는 것을 추천합니다(파일 구조 유지됨)
+
 퀘스트 폴더 안에 DefaultQuests.json이 있는 경우 DefaultQuests.json 만 번역하면 됩니다
 
 ftb quest 경우
