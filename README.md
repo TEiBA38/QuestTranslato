@@ -1,6 +1,4 @@
-# QuestTranslato 배포 안내
-
-이 문서는 배포본 사용자용 사용법과 주의사항을 설명합니다.
+# QuestTranslato 사용법 및 주의사항
 
 ## 1) 실행 방법
 
