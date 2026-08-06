@@ -14,7 +14,9 @@
 4. 퀘스트 압축파일 및 단일 퀘스트 파일을 드래그인 드롭 하거나 선택 번역 버튼을 눌러 선택해서 번역합니다
 5. 번역 완료 후 저장 폴더를 선택하면 결과 파일이 저장됩니다.
 
-ex)퀘스트 파일 위치 예시
+ex)퀘스트 파일 위치
+
+
 betterquesting 경우 
 D:\MODE\Instances\MeatballCraft Dimensional Ascension\config\betterquesting
 <img width="1057" height="239" alt="image" src="https://github.com/user-attachments/assets/b059d6cd-6b30-4942-ae72-ad9479ac3885" />
