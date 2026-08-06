@@ -27,6 +27,7 @@ D:\MODE\Instances\Journey Beyond the Abyss\config\ftbquests\normal
 chapters 파일을 압축해서 번역하면 됩니다
 만약 en_us.snbt  en_us.json 파일이 kubejs 폴더 안에 있거나 ftbquest 폴더 안에 있다면 en_us.json을 번역하면 됩니다
 ex)D:\MODE\Instances\FTB StoneBlock 4\config\ftbquests\quests\lang
+<img width="620" height="37" alt="image" src="https://github.com/user-attachments/assets/0f4b8b2f-ffc2-439e-9d6b-11e3e30e2603" />
 
 HQM 경우
 D:\MODE\Instances\Journey to the Core\config\hqm
@@ -38,7 +39,7 @@ quests.hqm 을 찾아서 번역해주면 됩니다
 
 1. HQM 포맷에는 필드 길이 제한이 있습니다.
 2. 번역문이 길이 제한을 넘으면 잘린 문장 대신 원문을 유지하도록 처리됩니다.
-<img width="620" height="37" alt="image" src="https://github.com/user-attachments/assets/0f4b8b2f-ffc2-439e-9d6b-11e3e30e2603" />
+3.번역을 적용 하기 전 모드팩을 먼저 실행해 퀘스트북을 한번 열고난후 마크 언어를 한글로 바꾼뒤에 적용 시켜야 합니다
 
 
 
