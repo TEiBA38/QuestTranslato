@@ -24,14 +24,22 @@ DefaultQuests 파일 전체를 압축해서 번역 하는 것을 추천합니다
 ftb quest 경우
 D:\MODE\Instances\Journey Beyond the Abyss\config\ftbquests\normal
 <img width="648" height="141" alt="image" src="https://github.com/user-attachments/assets/bf23034a-92df-4377-b6bd-459fc3459440" />
+
 chapters 파일을 압축해서 번역하면 됩니다
+
 만약 en_us.snbt  en_us.json 파일이 kubejs 폴더 안에 있거나 ftbquest 폴더 안에 있다면 en_us.json을 번역하면 됩니다
+
 ex)D:\MODE\Instances\FTB StoneBlock 4\config\ftbquests\quests\lang
 <img width="620" height="37" alt="image" src="https://github.com/user-attachments/assets/0f4b8b2f-ffc2-439e-9d6b-11e3e30e2603" />
 
+
 HQM 경우
+
 D:\MODE\Instances\Journey to the Core\config\hqm
+
+
 quests.hqm 을 찾아서 번역해주면 됩니다
+
 
 
 
