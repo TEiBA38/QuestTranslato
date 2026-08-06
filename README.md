@@ -11,14 +11,36 @@
 1. 번역 엔진을 선택합니다.
 2. Google Translate는 API 키 없이 사용 가능합니다.
 3. Gemini / OpenAI / DeepL은 앱의 API 키 입력칸에 키를 입력합니다.
-4. `파일 선택 번역` 또는 `ZIP 선택 번역`으로 대상 파일을 선택합니다.
+4. 퀘스트 압축파일 및 단일 퀘스트 파일을 드래그인 드롭 하거나 선택 번역 버튼을 눌러 선택해서 번역합니다
 5. 번역 완료 후 저장 폴더를 선택하면 결과 파일이 저장됩니다.
+
+ex)퀘스트 파일 위치 예시
+betterquesting 경우 
+D:\MODE\Instances\MeatballCraft Dimensional Ascension\config\betterquesting
+<img width="1057" height="239" alt="image" src="https://github.com/user-attachments/assets/b059d6cd-6b30-4942-ae72-ad9479ac3885" />
+DefaultQuests 파일 전체를 압축해서 번역 하는 것을 추천합니다(파일 구조 유지됨)
+퀘스트 폴더 안에 DefaultQuests.json이 있는 경우 DefaultQuests.json 만 번역하면 됩니다
+
+ftb quest 경우
+D:\MODE\Instances\Journey Beyond the Abyss\config\ftbquests\normal
+<img width="648" height="141" alt="image" src="https://github.com/user-attachments/assets/bf23034a-92df-4377-b6bd-459fc3459440" />
+chapters 파일을 압축해서 번역하면 됩니다
+만약 en_us.snbt  en_us.json 파일이 kubejs 폴더 안에 있거나 ftbquest 폴더 안에 있다면 en_us.json을 번역하면 됩니다
+ex)D:\MODE\Instances\FTB StoneBlock 4\config\ftbquests\quests\lang
+
+HQM 경우
+D:\MODE\Instances\Journey to the Core\config\hqm
+quests.hqm 을 찾아서 번역해주면 됩니다
+
+
 
 ## 3) HQM 번역 관련 주의사항
 
 1. HQM 포맷에는 필드 길이 제한이 있습니다.
 2. 번역문이 길이 제한을 넘으면 잘린 문장 대신 원문을 유지하도록 처리됩니다.
-3. 이 정책은 문장 자연스러움을 우선하기 위한 안전 장치입니다.
+<img width="620" height="37" alt="image" src="https://github.com/user-attachments/assets/0f4b8b2f-ffc2-439e-9d6b-11e3e30e2603" />
+
+
 
 ## 4) 검수 리포트
 
@@ -35,17 +57,3 @@
 2. 압축 파일 안에서 바로 실행하지 말고, 반드시 압축 해제 후 실행하세요.
 3. 실행 파일과 `_internal` 폴더는 같은 위치에 있어야 합니다.
 
-## 6) 문제 해결
-
-1. 앱이 실행되지 않으면 압축을 다시 풀고 실행 파일 위치를 확인하세요.
-2. 드래그 앤 드롭이 동작하지 않으면 관리자 권한 실행 여부를 확인하세요.
-3. API 오류가 나면 엔진 선택, API 키, 사용량 한도를 먼저 확인하세요.
-
-## 7) 권장 배포 구조
-
-압축 해제 후 아래 구조를 그대로 유지하세요.
-
-- `QuestTranslato.exe`
-- `_internal/`
-  - `base_library.zip`
-  - 기타 런타임 파일
