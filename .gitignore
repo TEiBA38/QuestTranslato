@@ -21,3 +21,9 @@ Thumbs.db
 
 # Optional runtime outputs
 translated/
+
+# Copilot workspace skills (local only)
+.github/skills/
+
+# Backup files
+app_backup.py
