@@ -226,21 +226,21 @@ if ctk is not None and TkinterDnD is not None:
             self.cards_scroller = ctk.CTkScrollableFrame(self.select_screen, height=380, fg_color="#0f1116")
             self.cards_scroller.grid(row=3, column=0, sticky="nsew", padx=14, pady=(0, 8))
 
-            # 숨겨진 선택 상태 (번역 화면에서 참조용)
+            # 선택 상태 + 다음 버튼
             footer = ctk.CTkFrame(self.select_screen, fg_color="transparent")
-            footer.grid(row=4, column=0, sticky="ew", padx=14, pady=(0, 2))
+            footer.grid(row=4, column=0, sticky="ew", padx=14, pady=(0, 10))
             footer.grid_columnconfigure(0, weight=1)
 
             self.selected_modpack_label = ctk.CTkLabel(footer, text="선택된 모드팩: 없음",
                                                        font=ctk.CTkFont(family=FONT_NAME, size=11),
                                                        text_color="#fdba74")
-            self.selected_modpack_label.grid_remove()
+            self.selected_modpack_label.grid(row=0, column=0, sticky="w")
 
-            self.btn_go_translate = ctk.CTkButton(footer, text="다음: 번역 설정", width=170, height=34,
+            self.btn_go_translate = ctk.CTkButton(footer, text="다음: 번역 설정  →", width=170, height=34,
                                                   fg_color="#ea580c", hover_color="#c2410c",
                                                   font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                                                   command=self.show_translate_screen, state="disabled")
-            self.btn_go_translate.grid_remove()
+            self.btn_go_translate.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
         def _build_quick_translate_screen(self):
             self.quick_translate_screen.grid_rowconfigure(1, weight=1)
