@@ -33,7 +33,7 @@
 
 ---
 
-## 3) 📁 모드별 퀘스트 파일 위치 및 팁
+## B-1) 📁 모드별 퀘스트 파일 위치 및 팁
 
 ### 🔹 Better Questing
 경로: "D:\MODE\Instances\[모드팩 이름]\config\betterquesting"
