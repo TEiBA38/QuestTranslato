@@ -120,7 +120,7 @@ def extract_snbt_targets(content):
                 targets.append((idx, prefix, orig_text, suffix))
             continue
 
-        if stripped.startswith(("text: [", "description: [")):
+        if stripped.startswith(("text: [", "description: [", "hover: [")):
             in_text_block = True
             match = single_line_array_pattern.search(line)
             if match:
