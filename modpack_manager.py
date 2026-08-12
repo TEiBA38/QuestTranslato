@@ -44,22 +44,26 @@ class ModpackMixin:
         for root, dirs, files_list in os.walk(base_dir):
             dirs[:] = [d for d in dirs if d.lower() not in SCAN_IGNORE_DIRS]
             for filename in files_list:
-                if filename.lower().endswith(TARGET_EXTENSIONS):
-                    count += 1
-                    if not already_translated and sample_scanned < 30:
-                        is_quest_file = filename.lower().endswith(('.snbt', '.hqm')) or 'quest' in root.lower() or 'hqm' in root.lower()
-                        if is_quest_file:
-                            try:
-                                with open(os.path.join(root, filename), 'r', encoding='utf-8', errors='ignore') as f:
-                                    content = f.read(8192)
-                                    for ch in content:
-                                        code = ord(ch)
-                                        if (0xAC00 <= code <= 0xD7A3) or (0x3040 <= code <= 0x30FF) or (0x4E00 <= code <= 0x9FFF) or (0x0400 <= code <= 0x04FF):
-                                            already_translated = True
-                                            break
-                                sample_scanned += 1
-                            except Exception:
-                                pass
+                if filename.lower().endswith(TARGET_EXTENSIONS) or filename.lower().endswith('.lang'):
+                    if filename.lower().endswith(TARGET_EXTENSIONS):
+                        count += 1
+                    if not already_translated:
+                        if filename.lower() in ["ko_kr.json", "ko_kr.lang"]:
+                            already_translated = True
+                        elif sample_scanned < 30:
+                            is_quest_file = filename.lower().endswith(('.snbt', '.hqm')) or 'quest' in root.lower() or 'hqm' in root.lower()
+                            if is_quest_file:
+                                try:
+                                    with open(os.path.join(root, filename), 'r', encoding='utf-8', errors='ignore') as f:
+                                        content = f.read(8192)
+                                        for ch in content:
+                                            code = ord(ch)
+                                            if (0xAC00 <= code <= 0xD7A3) or (0x3040 <= code <= 0x30FF) or (0x4E00 <= code <= 0x9FFF) or (0x0400 <= code <= 0x04FF):
+                                                already_translated = True
+                                                break
+                                    sample_scanned += 1
+                                except Exception:
+                                    pass
         return count, already_translated
 
     def _scan_modpack_candidates(self, instance_root):
