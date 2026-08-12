@@ -131,7 +131,7 @@ class ModpackMixin:
             self.log("⚠️ 번역 가능한 모드팩을 찾지 못했습니다.")
 
     def _handle_scan_error(self, exc):
-        self.scan_thread_active = False
+        self.app_state.scan_thread_active = False
         self._hide_scan_loading()
         self.log(f"❌ 모드팩 스캔 중 오류가 발생했습니다: {exc}")
         messagebox.showerror("오류", f"모드팩 스캔 중 오류가 발생했습니다.\n{exc}")
