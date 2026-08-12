@@ -55,6 +55,20 @@ if ctk is not None and TkinterDnD is not None:
             self.minsize(760, 560)
             self.resizable(True, True)
             self.configure(fg_color="#0b0b0f")
+            
+            import sys
+            import os
+            try:
+                base_path = sys._MEIPASS
+            except Exception:
+                base_path = os.path.abspath(".")
+            icon_path = os.path.join(base_path, "icon.ico")
+            if os.path.exists(icon_path):
+                try:
+                    self.iconbitmap(icon_path)
+                except Exception:
+                    pass
+
             self.settings_path = self._get_settings_path()
 
             self.cancel_requested = False
