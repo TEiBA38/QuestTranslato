@@ -282,21 +282,17 @@ class ModpackMixin:
             if selected:
                 self.selected_card_widget = card
 
-            # [잔상 방지 패치] bg_color를 부모(card)의 fg_color와 동일하게 지정
             thumbnail_wrap = ctk.CTkFrame(
                 card, 
-                fg_color="#16161b",
-                bg_color="#25252b", # 부모(card) 배경색
-                corner_radius=8
+                fg_color="transparent",
+                bg_color="transparent"
             )
-            thumbnail_wrap.pack(fill="x", padx=8, pady=(8, 6))
-            thumbnail_wrap.configure(height=84)
-            thumbnail_wrap.pack_propagate(False)
+            thumbnail_wrap.pack(fill="x", padx=8, pady=(8, 4))
 
             thumb_label = ctk.CTkLabel(thumbnail_wrap, text="⏳", justify="center",
                                        font=ctk.CTkFont(family=FONT_NAME, size=14),
                                        text_color="#a1a1aa")
-            thumb_label.pack(expand=True)
+            thumb_label.pack(expand=True, pady=4)
 
             self._load_thumbnail_async(path, thumb_label)
 
@@ -346,12 +342,17 @@ class ModpackMixin:
     # 썸네일 & 이미지 로직 (사용자님의 유연한 로직 100% 통합)
     # ====================================================================
 
-    def _load_thumbnail_async(self, modpack_dir, label_widget):
+    def _load_thumbnail_async(self, path, thumb_label):
         def worker():
-            thumb_path = self._get_thumbnail_path(modpack_dir)
-            image = self._load_thumbnail_image(thumb_path, max_size=140)
-            # 메인 스레드에서 UI 업데이트
-            self.after(0, lambda: self._apply_thumbnail(label_widget, image))
+            cache_val = self._get_thumbnail_path(path)
+            if cache_val:
+                img = self._load_thumbnail_image(cache_val, max_size=140)
+                if img:
+                    self.after(0, lambda: thumb_label.configure(image=img, text=""))
+                else:
+                    self.after(0, lambda: thumb_label.configure(text="No Image"))
+            else:
+                self.after(0, lambda: thumb_label.configure(text="No Image"))
         threading.Thread(target=worker, daemon=True).start()
 
     def _apply_thumbnail(self, label_widget, image):
@@ -541,7 +542,11 @@ class ModpackMixin:
             try:
                 pil_image = Image.open(image_path).convert("RGBA")
                 resample_mode = getattr(Image, "Resampling", Image).LANCZOS
-                pil_image.thumbnail((max_size, max_size), resample_mode)
+                try:
+                    ImageOps = importlib.import_module("PIL.ImageOps")
+                    pil_image = ImageOps.fit(pil_image, (max_size, max_size), method=resample_mode)
+                except Exception:
+                    pil_image.thumbnail((max_size, max_size), resample_mode)
                 return ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=pil_image.size)
             except Exception:
                 pass
