@@ -272,10 +272,8 @@ class TranslationMixin:
 
                 if review_reports:
                     report_text = render_review_report("번역 검수 리포트", review_reports)
-                    report_path = os.path.join(save_dir, f"{os.path.splitext(file_name)[0]}_review.txt")
-                    with open(report_path, 'w', encoding='utf-8', newline='\n') as rf:
-                        rf.write(report_text)
-                    self.log(f"🧪 검수 리포트 저장: {report_path}")
+                    self.show_review_report(report_text)
+                    self.log("🧪 검수 리포트가 결과창으로 표시되었습니다.")
 
                 self.log(f"💾 저장 성공: {out_path}")
                 self.show_messagebox("info", "완료", f"성공적으로 번역되어 저장되었습니다!\n\n저장 위치:\n{out_path}")
@@ -891,10 +889,8 @@ class TranslationMixin:
 
                 if review_items:
                     report_text = render_review_report("ZIP 번역 검수 리포트", review_items)
-                    report_path = os.path.join(save_dir, f"{os.path.splitext(base_zip_name)[0]}_review.txt")
-                    with open(report_path, 'w', encoding='utf-8', newline='\n') as rf:
-                        rf.write(report_text)
-                    self.log(f"🧪 검수 리포트 저장: {report_path}")
+                    self.show_review_report(report_text)
+                    self.log("🧪 검수 리포트가 결과창으로 표시되었습니다.")
 
                 self.log(f"💾 압축 저장 완료: {out_zip_path}")
                 

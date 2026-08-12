@@ -284,6 +284,48 @@ class UIScreensMixin:
         else:
             func(title, message)
 
+    def show_review_report(self, report_text):
+        if threading.current_thread() is not threading.main_thread():
+            self.after(0, lambda: self.show_review_report(report_text))
+            return
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("🧪 번역 검수 리포트")
+        dialog.geometry("620x520")
+        dialog.minsize(500, 400)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        dialog.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - 620) // 2
+        y = self.winfo_y() + (self.winfo_height() - 520) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        header = ctk.CTkFrame(dialog, fg_color="#18181d", corner_radius=12)
+        header.pack(fill="x", padx=12, pady=(12, 6))
+
+        ctk.CTkLabel(header, text="🧪 번역 검수 리포트",
+                     font=ctk.CTkFont(family=FONT_NAME, size=16, weight="bold"),
+                     text_color="#f8fafc").pack(anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(header, text="번역 품질을 자동으로 분석한 결과입니다.",
+                     font=ctk.CTkFont(family=FONT_NAME, size=11),
+                     text_color="#a1a1aa").pack(anchor="w", padx=12, pady=(0, 10))
+
+        textbox = ctk.CTkTextbox(dialog, font=ctk.CTkFont(family="Consolas", size=11),
+                                 fg_color="#0f0f14", text_color="#e4e4e7",
+                                 corner_radius=10, border_width=1, border_color="#27272a")
+        textbox.pack(fill="both", expand=True, padx=12, pady=6)
+        textbox.insert("1.0", report_text)
+        textbox.configure(state="disabled")
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=12, pady=(4, 12))
+
+        ctk.CTkButton(btn_frame, text="닫기", command=dialog.destroy,
+                      fg_color="#3f3f46", hover_color="#52525b",
+                      font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                      width=100).pack(side="right")
+
     # ====================================================================
     # 설정 & 입력 검증
     # ====================================================================
