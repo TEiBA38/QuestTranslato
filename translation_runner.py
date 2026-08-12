@@ -203,6 +203,7 @@ class TranslationMixin:
 
     def _process_single_file(self, file_path, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)"):
         self.app_state.cancel_requested = False
+        self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
         self.toggle_buttons(False)
         self.update_progress(0)
 
@@ -589,6 +590,7 @@ class TranslationMixin:
 
     def _process_zip_file(self, zip_path, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", modpack_path=None):
         self.app_state.cancel_requested = False
+        self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
         self.toggle_buttons(False)
         self.update_progress(0)
 

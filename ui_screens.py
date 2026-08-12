@@ -51,8 +51,8 @@ class UIScreensMixin:
         self.quick_translate_screen.grid()
         self._apply_responsive_layout()
 
-    def show_translate_screen(self):
-        if not self.selected_modpack_path:
+    def show_translate_screen(self, force=False):
+        if not force and not self.selected_modpack_path:
             messagebox.showwarning("경고", "먼저 모드팩을 선택해주세요.")
             return
         self.phase_label.configure(text="STEP 2/2 · 번역 설정 및 진행")
