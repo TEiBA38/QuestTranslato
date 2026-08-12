@@ -50,7 +50,7 @@ class ModpackMixin:
                     if not already_translated:
                         is_quest_file = filename.lower().endswith(('.snbt', '.hqm')) or 'quest' in root.lower() or 'hqm' in root.lower()
                         if is_quest_file:
-                            if filename.lower() in ["ko_kr.json", "ko_kr.lang"]:
+                            if filename.lower() in ["ko_kr.json", "ko_kr.lang", "ko_kr.snbt"]:
                                 already_translated = True
                             elif sample_scanned < 30:
                                 try:

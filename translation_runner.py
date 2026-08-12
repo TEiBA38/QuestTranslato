@@ -107,7 +107,7 @@ class TranslationMixin:
                 dirs[:] = [d for d in dirs if d.lower() not in SCAN_IGNORE_DIRS]
                 
                 for filename in files_list:
-                    if not filename.lower().endswith(TARGET_EXTENSIONS):
+                    if not (filename.lower().endswith(TARGET_EXTENSIONS) or filename.lower().endswith('.lang')):
                         continue
                         
                     full_path = os.path.join(root, filename)
