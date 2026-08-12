@@ -26,13 +26,8 @@ except Exception:
     Image = None
     ImageTk = None
 
-FONT_NAME = "Malgun Gothic"
-TARGET_EXTENSIONS = ('.snbt', '.json', '.lang', '.hqm')
-SCAN_IGNORE_DIRS = {
-    '.git', '.venv', '__pycache__',
-    'logs', 'saves', 'resourcepacks', 'shaderpacks',
-    'screenshots', 'crash-reports', 'backups',
-}
+from constants import FONT_NAME, TARGET_EXTENSIONS, SCAN_IGNORE_DIRS
+
 SCAN_EXCLUDE_CANDIDATE_DIRS = {'translation_output', 'install'}
 THUMBNAIL_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico")
 
@@ -44,12 +39,28 @@ class ModpackMixin:
 
     def _count_translatable_files(self, base_dir):
         count = 0
-        for _, dirs, files_list in os.walk(base_dir):
+        already_translated = False
+        sample_scanned = 0
+        for root, dirs, files_list in os.walk(base_dir):
             dirs[:] = [d for d in dirs if d.lower() not in SCAN_IGNORE_DIRS]
             for filename in files_list:
                 if filename.lower().endswith(TARGET_EXTENSIONS):
                     count += 1
-        return count
+                    if not already_translated and sample_scanned < 30:
+                        is_quest_file = filename.lower().endswith(('.snbt', '.hqm')) or 'quest' in root.lower() or 'hqm' in root.lower()
+                        if is_quest_file:
+                            try:
+                                with open(os.path.join(root, filename), 'r', encoding='utf-8', errors='ignore') as f:
+                                    content = f.read(8192)
+                                    for ch in content:
+                                        code = ord(ch)
+                                        if (0xAC00 <= code <= 0xD7A3) or (0x3040 <= code <= 0x30FF) or (0x4E00 <= code <= 0x9FFF) or (0x0400 <= code <= 0x04FF):
+                                            already_translated = True
+                                            break
+                                sample_scanned += 1
+                            except Exception:
+                                pass
+        return count, already_translated
 
     def _scan_modpack_candidates(self, instance_root):
         candidates = []
@@ -59,9 +70,9 @@ class ModpackMixin:
             name_lower = entry.name.lower()
             if name_lower in SCAN_IGNORE_DIRS or name_lower in SCAN_EXCLUDE_CANDIDATE_DIRS:
                 continue
-            file_count = self._count_translatable_files(entry.path)
+            file_count, already_translated = self._count_translatable_files(entry.path)
             if file_count > 0:
-                candidates.append((entry.name, entry.path, file_count))
+                candidates.append((entry.name, entry.path, file_count, already_translated))
         candidates.sort(key=lambda item: (-item[2], item[0].lower()))
         return candidates
 
@@ -73,7 +84,8 @@ class ModpackMixin:
         if not candidates:
             self.render_modpack_cards([])
             return
-        for name, path, file_count in candidates:
+        for cand in candidates:
+            name, path, file_count = cand[0], cand[1], cand[2]
             self.detected_modpacks[path] = (name, file_count)
         self.render_modpack_cards(candidates)
 
@@ -82,7 +94,7 @@ class ModpackMixin:
         if not instance_root or not os.path.isdir(instance_root):
             messagebox.showwarning("경고", "유효한 인스턴스 루트 폴더를 먼저 선택해주세요.")
             return
-        if self.scan_thread_active:
+        if getattr(self, "scan_thread_active", False):
             self.log("🔄 이미 모드팩 스캔이 진행 중입니다.")
             return
 
@@ -179,7 +191,7 @@ class ModpackMixin:
         self.scan_progress_bar = None
 
     # ====================================================================
-    # 모드팩 선택 & 검색
+    # 모드팩 선택 & 렌더링
     # ====================================================================
 
     def _get_card_columns(self):
@@ -193,8 +205,8 @@ class ModpackMixin:
     def _on_modpack_search_change(self, event=None):
         search_text = self.modpack_search_entry.get().strip().lower()
         filtered = [
-            (name, path, count) for name, path, count in self.modpack_entries
-            if search_text in name.lower() or search_text in path.lower()
+            cand for cand in self.modpack_entries
+            if search_text in cand[0].lower() or search_text in cand[1].lower()
         ] if search_text else self.modpack_entries
         self.render_modpack_cards(filtered)
 
@@ -213,8 +225,16 @@ class ModpackMixin:
             self.btn_go_translate.configure(state="disabled")
 
     def render_modpack_cards(self, candidates):
+        # 1. [잔상 방지 패치] 스크롤러 내부 캔버스 배경색 강제 지정
+        try:
+            self.cards_scroller._parent_canvas.configure(bg="#12121a")
+        except Exception:
+            pass
+
+        # 2. 위젯 초기화
         for child in self.cards_scroller.winfo_children():
             child.destroy()
+
         self.modpack_thumbnail_cache = []
         self.selected_card_widget = None
         self.modpack_cards_by_path = {}
@@ -226,17 +246,26 @@ class ModpackMixin:
         if not candidates:
             ctk.CTkLabel(
                 self.cards_scroller,
-                text="감지된 모드팩이 없습니다. 1단계에서 경로를 지정하고 탐지하세요.",
+                text="감지된 모드팩이 없습니다.",
                 font=ctk.CTkFont(family=FONT_NAME, size=12),
                 text_color="#a1a1aa"
             ).grid(row=0, column=0, columnspan=columns, sticky="w", padx=8, pady=8)
             return
 
-        for idx, (name, path, file_count) in enumerate(candidates):
+        for idx, candidate in enumerate(candidates):
+            name = candidate[0]
+            path = candidate[1]
+            file_count = candidate[2]
+            already_translated = candidate[3] if len(candidate) > 3 else False
+
             selected = (self.selected_modpack_path == path)
+            
+            # [잔상 방지 패치] bg_color를 부모 배경색과 동일하게 지정
             card = ctk.CTkFrame(
                 self.cards_scroller,
-                fg_color="#25252b", corner_radius=10,
+                fg_color="#25252b",
+                bg_color="#12121a", # 부모(스크롤러) 배경색
+                corner_radius=10,
                 border_width=2 if selected else 1,
                 border_color="#f97316" if selected else "#3f3f46"
             )
@@ -245,33 +274,48 @@ class ModpackMixin:
             if selected:
                 self.selected_card_widget = card
 
-            thumbnail_wrap = ctk.CTkFrame(card, fg_color="#16161b", corner_radius=8)
+            # [잔상 방지 패치] bg_color를 부모(card)의 fg_color와 동일하게 지정
+            thumbnail_wrap = ctk.CTkFrame(
+                card, 
+                fg_color="#16161b",
+                bg_color="#25252b", # 부모(card) 배경색
+                corner_radius=8
+            )
             thumbnail_wrap.pack(fill="x", padx=8, pady=(8, 6))
             thumbnail_wrap.configure(height=84)
             thumbnail_wrap.pack_propagate(False)
 
-            thumb_path = self._get_thumbnail_path(path)
-            image = self._load_thumbnail_image(thumb_path, max_size=140)
-            if image is not None:
-                self.modpack_thumbnail_cache.append(image)
-                tk.Label(thumbnail_wrap, image=image, text="", bg="#16161b", bd=0, highlightthickness=0).pack(expand=True)
-            else:
-                ctk.CTkLabel(thumbnail_wrap, text="NO\nTHUMB", justify="center",
-                             font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
-                             text_color="#fb923c").pack(expand=True)
+            thumb_label = ctk.CTkLabel(thumbnail_wrap, text="⏳", justify="center",
+                                       font=ctk.CTkFont(family=FONT_NAME, size=14),
+                                       text_color="#a1a1aa")
+            thumb_label.pack(expand=True)
+
+            self._load_thumbnail_async(path, thumb_label)
 
             ctk.CTkLabel(thumbnail_wrap, text=f"{file_count} FILES",
                          font=ctk.CTkFont(family=FONT_NAME, size=9, weight="bold"),
                          fg_color="#ea580c", text_color="#fff7ed",
                          corner_radius=6, padx=6, pady=1).place(relx=0.98, rely=0.08, anchor="ne")
 
+            if already_translated or path in getattr(self, 'translated_history', {}):
+                history_time = getattr(self, 'translated_history', {}).get(path, "원본")
+                ctk.CTkLabel(thumbnail_wrap, text="번역됨" if history_time == "원본" else "한글화됨",
+                             font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
+                             fg_color="#16a34a", text_color="#f0fdf4",
+                             corner_radius=6, padx=6, pady=1).place(relx=0.02, rely=0.08, anchor="nw")
+                subtitle_text = f"번역됨: {history_time}" if history_time != "원본" else "이미 번역이 포함된 팩입니다"
+                subtitle_color = "#34d399"
+            else:
+                subtitle_text = "My Modpack Instance"
+                subtitle_color = "#9ca3af"
+
             ctk.CTkLabel(card,
                          text=(name[:22] + "...") if len(name) > 22 else name,
                          anchor="w", font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold")
                          ).pack(fill="x", padx=8)
-            ctk.CTkLabel(card, text="My Modpack Instance", anchor="w",
+            ctk.CTkLabel(card, text=subtitle_text, anchor="w",
                          font=ctk.CTkFont(family=FONT_NAME, size=9),
-                         text_color="#9ca3af").pack(fill="x", padx=8, pady=(1, 0))
+                         text_color=subtitle_color).pack(fill="x", padx=8, pady=(1, 0))
 
             def select_this(p=path, n=name):
                 if self.selected_card_widget is not None:
@@ -290,18 +334,47 @@ class ModpackMixin:
                           fg_color="#ea580c", hover_color="#c2410c",
                           font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
                           command=select_this).pack(anchor="e", padx=8, pady=(6, 8))
+    # ====================================================================
+    # 썸네일 & 이미지 로직 (사용자님의 유연한 로직 100% 통합)
+    # ====================================================================
 
-    # ====================================================================
-    # 썸네일 & 이미지
-    # ====================================================================
+    def _load_thumbnail_async(self, modpack_dir, label_widget):
+        def worker():
+            thumb_path = self._get_thumbnail_path(modpack_dir)
+            image = self._load_thumbnail_image(thumb_path, max_size=140)
+            # 메인 스레드에서 UI 업데이트
+            self.after(0, lambda: self._apply_thumbnail(label_widget, image))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_thumbnail(self, label_widget, image):
+        if not label_widget.winfo_exists():
+            return
+        if image is not None:
+            self.modpack_thumbnail_cache.append(image)
+            label_widget.configure(text="", image=image)
+        else:
+            label_widget.configure(text="NO\nTHUMB",
+                                   font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
+                                   text_color="#fb923c")
 
     def _get_thumbnail_path(self, modpack_dir):
+        if not hasattr(self, "thumbnail_path_cache"):
+            self.thumbnail_path_cache = {}
+            
         cached = self.thumbnail_path_cache.get(modpack_dir)
         if cached:
             if os.path.isfile(cached):
                 return cached
             self.thumbnail_path_cache.pop(modpack_dir, None)
 
+        # 1. 직관적인 기본 파일명 탐색 (사용자님의 기존 로직)
+        for possible_icon in ["icon.png", "folder.png", "modpack.png"]:
+            p = os.path.join(modpack_dir, possible_icon)
+            if os.path.exists(p):
+                self.thumbnail_path_cache[modpack_dir] = p
+                return p
+
+        # 2. 다양한 하위 디렉토리 탐색
         base_names = ("thumbnail", "icon", "pack", "logo", "profile")
         candidate_dirs = [
             modpack_dir,
@@ -319,6 +392,7 @@ class ModpackMixin:
                         self.thumbnail_path_cache[modpack_dir] = full_path
                         return full_path
 
+        # 3. Prism/MultiMC 공용 아이콘 키 폴더 탐색
         icon_key = self._read_instance_icon_key(modpack_dir)
         if icon_key:
             icons_dir = os.path.normpath(os.path.join(modpack_dir, "..", "icons"))
@@ -328,11 +402,13 @@ class ModpackMixin:
                     self.thumbnail_path_cache[modpack_dir] = full_path
                     return full_path
 
+        # 4. JSON 메타데이터 내부 깊은 탐색 (사용자님의 강력한 재귀 탐색 로직)
         metadata_thumb = self._get_thumbnail_from_metadata(modpack_dir)
         if metadata_thumb:
             self.thumbnail_path_cache[modpack_dir] = metadata_thumb
             return metadata_thumb
 
+        # 5. 최후의 수단: 폴더 내 이미지 파일 무작위 탐색
         for base_dir in candidate_dirs:
             if not os.path.isdir(base_dir):
                 continue
@@ -357,18 +433,21 @@ class ModpackMixin:
                     data = json.load(mf)
             except Exception:
                 continue
+                
             candidates = []
-            self._collect_thumbnail_candidates(data, candidates)
+            self._collect_thumbnail_candidates(data, candidates) # 재귀 파싱 호출
+            
             for candidate in candidates:
                 resolved = self._resolve_thumbnail_candidate(candidate, modpack_dir)
                 if resolved:
                     return resolved
         return None
 
+    # 사용자님의 원본 재귀 파싱 함수 (매우 뛰어난 로직!)
     def _collect_thumbnail_candidates(self, value, out):
         if isinstance(value, dict):
             for key, child in value.items():
-                if isinstance(child, str) and any(t in str(key).lower() for t in ("thumbnail", "icon", "image", "logo")):
+                if isinstance(child, str) and any(t in str(key).lower() for t in ("thumbnail", "icon", "image", "logo", "customImageSelection")):
                     out.append(child)
                 self._collect_thumbnail_candidates(child, out)
         elif isinstance(value, list):
@@ -399,18 +478,25 @@ class ModpackMixin:
         return None
 
     def _download_thumbnail_to_cache(self, url):
-        cache_dir = os.path.join(os.path.dirname(self.settings_path), "thumb_cache")
+        # User-Agent 헤더 추가 (API 서버 차단 방지)
+        cache_dir = os.path.join(os.path.dirname(getattr(self, "settings_path", "")), "thumb_cache")
+        if not cache_dir.strip(os.sep): cache_dir = "thumb_cache"
         os.makedirs(cache_dir, exist_ok=True)
+        
         parsed = urllib.parse.urlparse(url)
         ext = os.path.splitext(parsed.path)[1].lower()
         if ext not in THUMBNAIL_EXTENSIONS:
             ext = ".png"
+            
         cache_name = hashlib.sha1(url.encode("utf-8")).hexdigest() + ext
         cache_path = os.path.join(cache_dir, cache_name)
+        
         if os.path.isfile(cache_path):
             return cache_path
+            
         try:
-            with urllib.request.urlopen(url, timeout=8) as resp:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
                 data = resp.read()
             if not data:
                 return None
@@ -441,19 +527,25 @@ class ModpackMixin:
     def _load_thumbnail_image(self, image_path, max_size=92):
         if not image_path:
             return None
+            
+        # 1. PIL (Pillow) 렌더링 시도
         if Image is not None and ImageTk is not None:
             try:
-                pil_image = Image.open(image_path)
-                pil_image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-                return ImageTk.PhotoImage(pil_image)
+                pil_image = Image.open(image_path).convert("RGBA")
+                resample_mode = getattr(Image, "Resampling", Image).LANCZOS
+                pil_image.thumbnail((max_size, max_size), resample_mode)
+                return ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=pil_image.size)
             except Exception:
                 pass
+                
+        # 2. 사용자님의 Tkinter 기본 렌더링 폴백(Fallback)
         if not image_path.lower().endswith((".png", ".gif")):
             return None
         try:
             image = tk.PhotoImage(file=image_path)
         except Exception:
             return None
+            
         factor = max((image.width() + max_size - 1) // max_size,
                      (image.height() + max_size - 1) // max_size, 1)
         if factor > 1:

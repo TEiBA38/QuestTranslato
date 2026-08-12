@@ -16,6 +16,69 @@ from translation_engines import (
 )
 
 
+def _run_gemini_batch_jobs(items, text_extractor, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary=None, ai_model=None, target_lang="한국어 (Korean)", log_prefix="Gemini API 번역 진행 중"):
+    total = len(items)
+    translated_results = [None] * total
+
+    if is_paid:
+        batch_size = 50
+        chunks = [(i, items[i:i + batch_size]) for i in range(0, total, batch_size)]
+        completed_items = 0
+
+        def process_chunk(start_idx, chunk):
+            if cancel_checker and cancel_checker():
+                raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+            texts = [text_extractor(item) for item in chunk]
+            res = translate_gemini_batch(texts, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
+            return start_idx, chunk, res
+
+        with ThreadPoolExecutor(max_workers=min(8, len(chunks) or 1)) as executor:
+            futures = [executor.submit(process_chunk, idx, chunk) for idx, chunk in chunks]
+            for future in as_completed(futures):
+                if cancel_checker and cancel_checker():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+                start_idx, chunk, res_texts = future.result()
+                
+                for offset, res in enumerate(res_texts):
+                    translated_results[start_idx + offset] = res
+                
+                completed_items += len(chunk)
+                if progress_callback:
+                    progress_callback(completed_items, total)
+                if log_callback:
+                    log_callback(f"⏳ {log_prefix} (병렬) [{completed_items}/{total}]")
+    else:
+        batch_size = 5
+        sleep_sec = 6.5
+        for i in range(0, total, batch_size):
+            if cancel_checker and cancel_checker():
+                raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+
+            chunk = items[i:i + batch_size]
+            texts = [text_extractor(item) for item in chunk]
+            
+            current_count = min(i + len(chunk), total)
+            if log_callback:
+                log_callback(f"⏳ {log_prefix}... [{current_count}/{total}]")
+
+            res_texts = translate_gemini_batch(texts, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
+            
+            for offset, res in enumerate(res_texts):
+                translated_results[i + offset] = res
+
+            if progress_callback:
+                progress_callback(current_count, total)
+
+            if i + batch_size < total:
+                for _ in range(int(sleep_sec * 10)):
+                    if cancel_checker and cancel_checker():
+                        raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+                    time.sleep(0.1)
+
+    return translated_results
+
+
 def build_reference_translation_map(source_content, reference_content):
     if not source_content or not reference_content:
         return {}
@@ -106,7 +169,7 @@ def rebuild_snbt(lines, translated_map):
     return "\n".join(new_lines)
 
 
-def process_snbt_with_progress(content, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, verbose=True, reference_map=None):
+def process_snbt_with_progress(content, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, verbose=True, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
     if log_callback and verbose:
         log_callback("🔍 .snbt 퀘스트 구조 분석을 시작합니다...")
 
@@ -126,61 +189,15 @@ def process_snbt_with_progress(content, engine_key, api_key, is_paid=False, prog
     translated_map = {}
 
     if engine_key == "gemini_batch":
-        if is_paid:
-            batch_size = 50
-            chunks = [targets[i:i + batch_size] for i in range(0, len(targets), batch_size)]
-            completed_items = 0
-
-            def process_snbt_chunk(chunk):
-                if cancel_checker and cancel_checker():
-                    raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                texts_to_trans = [item[2].replace('\\"', '"') for item in chunk]
-                translated = translate_gemini_batch(texts_to_trans, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map)
-                return chunk, translated
-
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                futures = [executor.submit(process_snbt_chunk, chunk) for chunk in chunks]
-                for future in as_completed(futures):
-                    if cancel_checker and cancel_checker():
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                    chunk, translated_texts = future.result()
-                    for (line_idx, prefix, _, suffix), trans_text in zip(chunk, translated_texts):
-                        final_text = str(trans_text).replace('"', '\\"')
-                        translated_map[line_idx] = f'{prefix}"{final_text}"{suffix}'
-
-                    completed_items += len(chunk)
-                    if progress_callback:
-                        progress_callback(completed_items, len(targets))
-                    if log_callback:
-                        log_callback(f"⏳ 초고속 병렬 번역 진행 중... [{completed_items}/{len(targets)}]")
-        else:
-            batch_size = 5
-            sleep_sec = 6.5
-            for i in range(0, len(targets), batch_size):
-                if cancel_checker and cancel_checker():
-                    raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-
-                chunk = targets[i:i + batch_size]
-                texts_to_trans = [item[2].replace('\\"', '"') for item in chunk]
-
-                current_count = min(i + len(chunk), len(targets))
-                if log_callback:
-                    log_callback(f"⏳ Gemini API 번역 진행 중... [{current_count}/{len(targets)}]")
-
-                translated_texts = translate_gemini_batch(texts_to_trans, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map)
-
-                for (line_idx, prefix, _, suffix), trans_text in zip(chunk, translated_texts):
-                    final_text = str(trans_text).replace('"', '\\"')
-                    translated_map[line_idx] = f'{prefix}"{final_text}"{suffix}'
-
-                if progress_callback:
-                    progress_callback(current_count, len(targets))
-
-                for _ in range(int(sleep_sec * 10)):
-                    if cancel_checker and cancel_checker():
-                        raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                    time.sleep(0.1)
+        translated_texts = _run_gemini_batch_jobs(
+            targets,
+            lambda item: item[2].replace('\\"', '"'),
+            api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
+            log_prefix="초고속 SNBT 번역" if is_paid else "SNBT 번역"
+        )
+        for (line_idx, prefix, _, suffix), trans_text in zip(targets, translated_texts):
+            final_text = str(trans_text).replace('"', '\\"')
+            translated_map[line_idx] = f'{prefix}"{final_text}"{suffix}'
     else:
         for count, (line_idx, prefix, orig_text, suffix) in enumerate(targets, 1):
             if cancel_checker and cancel_checker():
@@ -189,11 +206,11 @@ def process_snbt_with_progress(content, engine_key, api_key, is_paid=False, prog
             raw_orig = orig_text.replace('\\"', '"')
 
             if engine_key == "deepl":
-                trans = translate_deepl(raw_orig, api_key, reference_map=reference_map)
+                trans = translate_deepl(raw_orig, api_key, reference_map=reference_map, target_lang=target_lang)
             elif engine_key == "openai":
-                trans = translate_openai(raw_orig, api_key, reference_map=reference_map)
+                trans = translate_openai(raw_orig, api_key, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
             else:
-                trans = translate_google(raw_orig, api_key, reference_map=reference_map)
+                trans = translate_google(raw_orig, api_key, reference_map=reference_map, target_lang=target_lang)
 
             final_text = str(trans if trans else raw_orig).replace('"', '\\"')
             translated_map[line_idx] = f'{prefix}"{final_text}"{suffix}'
@@ -225,7 +242,7 @@ def collect_json_targets(node, target_list):
                 collect_json_targets(item, target_list)
 
 
-def process_json_safely(node, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, verbose=True, reference_map=None):
+def process_json_safely(node, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, verbose=True, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
     if log_callback and verbose:
         log_callback("🔍 JSON/HQM 퀘스트 언어 파일 구조 분석을 시작합니다...")
 
@@ -246,70 +263,25 @@ def process_json_safely(node, engine_key, api_key, is_paid=False, progress_callb
         log_callback(f"✅ 분석 완료! 총 {len(targets)}개의 JSON 노드를 감지했습니다. 번역을 시작합니다...")
 
     if engine_key == "gemini_batch":
-        if is_paid:
-            batch_size = 50
-            chunks = [targets[i:i + batch_size] for i in range(0, len(targets), batch_size)]
-            completed_items = 0
-
-            def process_json_chunk(chunk):
-                if cancel_checker and cancel_checker():
-                    raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                texts_to_trans = [item[2] for item in chunk]
-                translated = translate_gemini_batch(texts_to_trans, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map)
-                return chunk, translated
-
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                futures = [executor.submit(process_json_chunk, chunk) for chunk in chunks]
-                for future in as_completed(futures):
-                    if cancel_checker and cancel_checker():
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                    chunk, translated_texts = future.result()
-                    for (parent_node, key, _), trans_text in zip(chunk, translated_texts):
-                        parent_node[key] = trans_text
-
-                    completed_items += len(chunk)
-                    if progress_callback:
-                        progress_callback(completed_items, len(targets))
-                    if log_callback:
-                        log_callback(f"⏳ 초고속 병렬 번역 진행 중... [{completed_items}/{len(targets)}]")
-        else:
-            batch_size = 5
-            sleep_sec = 6.5
-            for i in range(0, len(targets), batch_size):
-                if cancel_checker and cancel_checker():
-                    raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-
-                chunk = targets[i:i + batch_size]
-                texts_to_trans = [item[2] for item in chunk]
-
-                current_count = min(i + len(chunk), len(targets))
-                if log_callback:
-                    log_callback(f"⏳ Gemini API 번역 진행 중... [{current_count}/{len(targets)}]")
-
-                translated_texts = translate_gemini_batch(texts_to_trans, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map)
-
-                for (parent_node, key, _), trans_text in zip(chunk, translated_texts):
-                    parent_node[key] = trans_text
-
-                if progress_callback:
-                    progress_callback(current_count, len(targets))
-
-                for _ in range(int(sleep_sec * 10)):
-                    if cancel_checker and cancel_checker():
-                        raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                    time.sleep(0.1)
+        translated_texts = _run_gemini_batch_jobs(
+            targets,
+            lambda item: item[2],
+            api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
+            log_prefix="초고속 JSON 번역" if is_paid else "JSON 번역"
+        )
+        for (parent_node, key, _), trans_text in zip(targets, translated_texts):
+            parent_node[key] = trans_text
     else:
         for count, (parent_node, key, orig_text) in enumerate(targets, 1):
             if cancel_checker and cancel_checker():
                 raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
 
             if engine_key == "deepl":
-                trans = translate_deepl(orig_text, api_key, reference_map=reference_map)
+                trans = translate_deepl(orig_text, api_key, reference_map=reference_map, target_lang=target_lang)
             elif engine_key == "openai":
-                trans = translate_openai(orig_text, api_key, reference_map=reference_map)
+                trans = translate_openai(orig_text, api_key, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
             else:
-                trans = translate_google(orig_text, api_key, reference_map=reference_map)
+                trans = translate_google(orig_text, api_key, reference_map=reference_map, target_lang=target_lang)
             if trans:
                 parent_node[key] = trans
 
@@ -413,61 +385,20 @@ def extract_hqm_targets(content):
     return targets
 
 
-def _translate_hqm_texts(targets, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map=None):
+def _translate_hqm_texts(targets, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
     translated = []
     total = len(targets)
     if total == 0:
         return []
 
     if engine_key == "gemini_batch":
-        translated_map = {}
-        if is_paid:
-            batch_size = 50
-            chunks = [targets[i:i + batch_size] for i in range(0, total, batch_size)]
-            completed_items = 0
-
-            def process_hqm_chunk(chunk):
-                if cancel_checker and cancel_checker():
-                    raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                texts_to_trans = [item["text"] for item in chunk]
-                return chunk, translate_gemini_batch(texts_to_trans, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map)
-
-            with ThreadPoolExecutor(max_workers=min(8, len(chunks) or 1)) as executor:
-                futures = [executor.submit(process_hqm_chunk, chunk) for chunk in chunks]
-                for future in as_completed(futures):
-                    if cancel_checker and cancel_checker():
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                    chunk, res_texts = future.result()
-                    for item, res in zip(chunk, res_texts):
-                        translated_map[id(item)] = str(res or item["text"])
-                    completed_items += len(chunk)
-                    if progress_callback:
-                        progress_callback(completed_items, total)
-                    if log_callback:
-                        log_callback(f"⏳ HQM Gemini 병렬 번역 진행 중... [{completed_items}/{total}]")
-        else:
-            batch_size = 5
-            sleep_sec = 6.5
-            for i in range(0, total, batch_size):
-                if cancel_checker and cancel_checker():
-                    raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                chunk = targets[i:i + batch_size]
-                texts_to_trans = [item["text"] for item in chunk]
-                current_count = min(i + len(chunk), total)
-                if log_callback:
-                    log_callback(f"⏳ HQM Gemini 번역 진행 중... [{current_count}/{total}]")
-                res_texts = translate_gemini_batch(texts_to_trans, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map)
-                for item, res in zip(chunk, res_texts):
-                    translated_map[id(item)] = str(res or item["text"])
-                if progress_callback:
-                    progress_callback(current_count, total)
-                for _ in range(int(sleep_sec * 10)):
-                    if cancel_checker and cancel_checker():
-                        raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                    time.sleep(0.1)
-
-        translated = [translated_map.get(id(t), t["text"]) for t in targets]
+        res_texts = _run_gemini_batch_jobs(
+            targets,
+            lambda item: item["text"],
+            api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
+            log_prefix="초고속 HQM 번역" if is_paid else "HQM 번역"
+        )
+        translated = [str(res or item["text"]) for item, res in zip(targets, res_texts)]
     else:
         for count, target in enumerate(targets, 1):
             if cancel_checker and cancel_checker():
@@ -475,11 +406,11 @@ def _translate_hqm_texts(targets, engine_key, api_key, is_paid, progress_callbac
 
             source = target["text"]
             if engine_key == "deepl":
-                result = translate_deepl(source, api_key, reference_map=reference_map)
+                result = translate_deepl(source, api_key, reference_map=reference_map, target_lang=target_lang)
             elif engine_key == "openai":
-                result = translate_openai(source, api_key, reference_map=reference_map)
+                result = translate_openai(source, api_key, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
             else:
-                result = translate_google(source, api_key, reference_map=reference_map)
+                result = translate_google(source, api_key, reference_map=reference_map, target_lang=target_lang)
 
             translated.append(str(result or source))
             if progress_callback:
@@ -509,36 +440,20 @@ def _fit_utf8_exact_bytes(text, target_len):
     return b" " * target_len
 
 
-def _translate_hqm_texts_entries(entries, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map=None):
+def _translate_hqm_texts_entries(entries, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
     translated_texts = []
     total = len(entries)
     if total == 0:
         return translated_texts
 
     if engine_key == "gemini_batch":
-        batch_size = 50 if is_paid else 5
-        sleep_sec = 0 if is_paid else 6.5
-
-        for i in range(0, total, batch_size):
-            if cancel_checker and cancel_checker():
-                raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-
-            chunk = entries[i:i + batch_size]
-            texts = [entry.value for entry in chunk]
-            chunk_result = translate_gemini_batch(texts, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map)
-            translated_texts.extend(chunk_result)
-
-            current = len(translated_texts)
-            if progress_callback:
-                progress_callback(current, total)
-            if log_callback:
-                log_callback(f"⏳ HQM Gemini 번역 진행 중... [{current}/{total}]")
-
-            if sleep_sec > 0:
-                for _ in range(int(sleep_sec * 10)):
-                    if cancel_checker and cancel_checker():
-                        raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                    time.sleep(0.1)
+        res_texts = _run_gemini_batch_jobs(
+            entries,
+            lambda entry: entry.value,
+            api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
+            log_prefix="초고속 HQM 번역" if is_paid else "HQM 번역"
+        )
+        translated_texts.extend([str(res or entry.value) for entry, res in zip(entries, res_texts)])
     else:
         for count, entry in enumerate(entries, 1):
             if cancel_checker and cancel_checker():
@@ -546,11 +461,11 @@ def _translate_hqm_texts_entries(entries, engine_key, api_key, is_paid, progress
 
             source = entry.value
             if engine_key == "deepl":
-                result = translate_deepl(source, api_key, reference_map=reference_map)
+                result = translate_deepl(source, api_key, reference_map=reference_map, target_lang=target_lang)
             elif engine_key == "openai":
-                result = translate_openai(source, api_key, reference_map=reference_map)
+                result = translate_openai(source, api_key, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
             else:
-                result = translate_google(source, api_key, reference_map=reference_map)
+                result = translate_google(source, api_key, reference_map=reference_map, target_lang=target_lang)
 
             translated_texts.append(str(result or source))
             if progress_callback:
@@ -561,14 +476,14 @@ def _translate_hqm_texts_entries(entries, engine_key, api_key, is_paid, progress
     return translated_texts
 
 
-def process_hqm_with_progress(content, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, reference_map=None):
+def process_hqm_with_progress(content, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
     if not content:
         raise ValueError("빈 HQM 파일입니다.")
 
     if HQMQuestConverter is None:
         if log_callback:
             log_callback("⚠️ 로컬 HQM 파서가 없어서 기본 문의 추출 방식을 사용합니다.")
-        return _process_hqm_with_heuristic(content, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map)
+        return _process_hqm_with_heuristic(content, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map, glossary, ai_model, target_lang)
 
     try:
         converter = HQMQuestConverter()
@@ -591,7 +506,7 @@ def process_hqm_with_progress(content, engine_key, api_key, is_paid=False, progr
         log_callback(f"🔎 HQM 퀘스트 텍스트 {len(entries)}개를 감지했습니다.")
 
     translated_texts = _translate_hqm_texts_entries(
-        entries, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map=reference_map
+        entries, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang
     )
 
     # Naturalness-first policy: avoid saving hard-truncated Korean text.
@@ -622,7 +537,7 @@ def process_hqm_with_progress(content, engine_key, api_key, is_paid=False, progr
     return hqm_file.to_bytes()
 
 
-def _process_hqm_with_heuristic(content, engine_key, api_key, is_paid, progress_callback=None, log_callback=None, cancel_checker=None, reference_map=None):
+def _process_hqm_with_heuristic(content, engine_key, api_key, is_paid, progress_callback=None, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
     targets = extract_hqm_targets(content)
     if not targets:
         if log_callback:
@@ -634,7 +549,7 @@ def _process_hqm_with_heuristic(content, engine_key, api_key, is_paid, progress_
         log_callback(f"🔎 HQM 바이너리에서 번역할 제목/설명 {len(targets)}개를 찾았습니다.")
 
     translated_texts = _translate_hqm_texts(
-        targets, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map=reference_map
+        targets, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang
     )
     output = bytearray(content)
 

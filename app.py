@@ -29,12 +29,11 @@ from translation_engines import ENGINES
 from ui_screens import UIScreensMixin
 from modpack_manager import ModpackMixin
 from translation_runner import TranslationMixin
-
+from constants import FONT_NAME, DEFAULT_GLOSSARY, MODELS_GEMINI, MODELS_OPENAI, SUPPORTED_LANGUAGES
 if ctk is not None:
     ctk.set_appearance_mode("Dark")
     ctk.set_default_color_theme("blue")
 
-FONT_NAME = "Malgun Gothic"
 SETTINGS_FILE_NAME = "settings.json"
 
 
@@ -44,6 +43,7 @@ if ctk is not None and TkinterDnD is not None:
             super().__init__()
             self.TkdndVersion = TkinterDnD._require(self)
             self._setup_ui()
+
 
         # ====================================================================
         # UI 구성 (위젯 생성)
@@ -59,6 +59,8 @@ if ctk is not None and TkinterDnD is not None:
 
             self.cancel_requested = False
             self.scan_thread_active = False
+            self.translated_history = {}
+            self.glossary = DEFAULT_GLOSSARY.copy()
             self.protocol("WM_DELETE_WINDOW", self.on_close)
 
             self.grid_rowconfigure(1, weight=1)
@@ -249,10 +251,10 @@ if ctk is not None and TkinterDnD is not None:
             top = ctk.CTkFrame(self.quick_translate_screen, fg_color="transparent")
             top.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
 
-            self.btn_back_from_quick = ctk.CTkButton(top, text="← 모드 선택으로", width=130,
+            self.btn_back_from_quick = ctk.CTkButton(top, text="← 홈으로", width=130,
                                                      fg_color="#3f3f46", hover_color="#52525b",
                                                      font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
-                                                     command=self.show_select_screen)
+                                                     command=self.show_home_screen)
             self.btn_back_from_quick.pack(side="left")
 
             ctk.CTkLabel(top, text="파일/ZIP 즉시 번역",
@@ -319,6 +321,17 @@ if ctk is not None and TkinterDnD is not None:
                          font=ctk.CTkFont(family=FONT_NAME, size=14, weight="bold"),
                          text_color="#fed7aa").pack(anchor="w", padx=12, pady=(12, 8))
 
+            ctk.CTkLabel(config_frame, text="타겟 언어 선택",
+                         font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                         text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
+
+            self.target_lang_combo = ctk.CTkComboBox(config_frame, values=SUPPORTED_LANGUAGES,
+                                                font=ctk.CTkFont(family=FONT_NAME, size=12),
+                                                command=self.on_target_lang_change,
+                                                fg_color="#27272a", button_color="#10b981", button_hover_color="#059669")
+            self.target_lang_combo.pack(fill="x", padx=12, pady=(0, 8))
+            self.target_lang_combo.set(SUPPORTED_LANGUAGES[0])
+
             ctk.CTkLabel(config_frame, text="번역 엔진",
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                          text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
@@ -341,6 +354,18 @@ if ctk is not None and TkinterDnD is not None:
                                               fg_color="#27272a", button_color="#b45309", button_hover_color="#d97706")
             self.plan_combo.pack(fill="x", padx=12, pady=(0, 8))
             self.plan_combo.set("유료 계정 (Pay-as-you-go / 초고속 / 제한없음)")
+
+            self.model_label = ctk.CTkLabel(config_frame, text="AI 모델 선택",
+                         font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                         text_color="#cbd5e1")
+            self.model_label.pack(anchor="w", padx=12, pady=(2, 2))
+
+            self.model_combo = ctk.CTkComboBox(config_frame,
+                                              values=MODELS_GEMINI,
+                                              font=ctk.CTkFont(family=FONT_NAME, size=12),
+                                              fg_color="#27272a", button_color="#b45309", button_hover_color="#d97706")
+            self.model_combo.pack(fill="x", padx=12, pady=(0, 8))
+            self.model_combo.set(MODELS_GEMINI[0])
 
             ctk.CTkLabel(config_frame, text="API 키",
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
@@ -366,7 +391,14 @@ if ctk is not None and TkinterDnD is not None:
                 font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                 height=36, fg_color="#f97316", hover_color="#fb923c",
                 command=self.run_selected_modpack)
-            self.btn_translate_selected_modpack.pack(fill="x", padx=12, pady=(4, 12))
+            self.btn_translate_selected_modpack.pack(fill="x", padx=12, pady=(12, 6))
+
+            self.btn_edit_glossary = ctk.CTkButton(
+                config_frame, text="📖 용어집 편집 (Glossary)",
+                font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+                height=30, fg_color="#3f3f46", hover_color="#52525b",
+                command=self.open_glossary_editor)
+            self.btn_edit_glossary.pack(fill="x", padx=12, pady=(0, 12))
 
             # 로그 + 진행률 패널
             log_frame = ctk.CTkFrame(self.translate_screen, fg_color="#101015", corner_radius=14, border_width=1, border_color="#2a2a33")
@@ -429,6 +461,32 @@ if ctk is not None and TkinterDnD is not None:
             if saved_api_key:
                 self.api_entry.delete(0, "end")
                 self.api_entry.insert(0, saved_api_key)
+            
+            saved_model = settings.get("ai_model", "")
+            if saved_model:
+                self.model_combo.set(saved_model)
+                
+            saved_lang = settings.get("target_lang", "")
+            if saved_lang:
+                self.target_lang_combo.set(saved_lang)
+                
+            self.translated_history = settings.get("translated_history", {})
+            self.glossaries_by_lang = settings.get("glossaries_by_lang", {})
+            
+            # Migrate old single glossary format if present
+            if "glossary" in settings and not self.glossaries_by_lang:
+                self.glossaries_by_lang["한국어 (Korean)"] = settings.get("glossary")
+
+            self._sync_glossary_to_current_lang()
+
+        def _sync_glossary_to_current_lang(self):
+            lang = self.target_lang_combo.get()
+            if lang not in self.glossaries_by_lang:
+                if lang == "한국어 (Korean)":
+                    self.glossaries_by_lang[lang] = DEFAULT_GLOSSARY.copy()
+                else:
+                    self.glossaries_by_lang[lang] = {}
+            self.glossary = self.glossaries_by_lang[lang]
 
         def save_user_settings(self):
             try:
@@ -436,6 +494,10 @@ if ctk is not None and TkinterDnD is not None:
                 settings = {
                     "instance_root": self.instance_path_entry.get().strip(),
                     "api_key": self.api_entry.get().strip(),
+                    "ai_model": self.model_combo.get(),
+                    "target_lang": self.target_lang_combo.get(),
+                    "translated_history": getattr(self, "translated_history", {}),
+                    "glossaries_by_lang": getattr(self, "glossaries_by_lang", {})
                 }
                 with open(self.settings_path, "w", encoding="utf-8") as sf:
                     json.dump(settings, sf, ensure_ascii=False, indent=2)
@@ -444,13 +506,14 @@ if ctk is not None and TkinterDnD is not None:
 
         def on_close(self):
             self.save_user_settings()
+            if not self.do_backup_on_close():
+                return  # 사용자가 종료를 취소함
             self.destroy()
 
 else:
     class QuestTranslatorApp:
         def __init__(self):
             raise RuntimeError("GUI 라이브러리가 설치되지 않아 앱을 초기화할 수 없습니다.")
-
 
 # ==============================================================================
 # 🚀 진입점

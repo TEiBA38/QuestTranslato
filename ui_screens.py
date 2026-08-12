@@ -15,8 +15,7 @@ except Exception:
     messagebox = None
 
 from translation_engines import ENGINES
-
-FONT_NAME = "Malgun Gothic"
+from constants import FONT_NAME, MODELS_GEMINI, MODELS_OPENAI
 
 
 class UIScreensMixin:
@@ -233,15 +232,109 @@ class UIScreensMixin:
             self.api_entry.configure(state="disabled")
             self.show_btn.configure(state="disabled")
             self.plan_combo.configure(state="disabled")
+            self.model_combo.configure(state="disabled")
             self.log("💡 Google Translate는 API 키 없이 무료 사용 가능합니다.")
         else:
             self.api_entry.configure(state="normal")
             self.show_btn.configure(state="normal")
             if "Gemini" in choice:
                 self.plan_combo.configure(state="normal")
+                self.model_combo.configure(state="normal", values=MODELS_GEMINI)
+                if self.model_combo.get() not in MODELS_GEMINI:
+                    self.model_combo.set(MODELS_GEMINI[0])
                 self.log("💡 Gemini API 키를 입력하고 계정 상태(유료/무료)를 지정해주세요.")
+            elif "OpenAI" in choice:
+                self.plan_combo.configure(state="disabled")
+                self.model_combo.configure(state="normal", values=MODELS_OPENAI)
+                if self.model_combo.get() not in MODELS_OPENAI:
+                    self.model_combo.set(MODELS_OPENAI[0])
+                self.log("💡 OpenAI API 키를 입력해주세요. 요금제는 계정 설정에 따릅니다.")
             else:
                 self.plan_combo.configure(state="disabled")
+                self.model_combo.configure(state="disabled")
+                self.log("💡 DeepL API 키를 입력해주세요.")
+
+    def on_target_lang_change(self, choice):
+        if hasattr(self, "_sync_glossary_to_current_lang"):
+            self._sync_glossary_to_current_lang()
+        self.log(f"🌍 타겟 언어가 '{choice}'(으)로 변경되었습니다. (해당 언어 용어집 적용)")
+
+    def open_glossary_editor(self):
+        editor = ctk.CTkToplevel(self)
+        editor.title("용어집 편집 (Glossary)")
+        editor.geometry("460x550")
+        editor.minsize(400, 450)
+        editor.grab_set()
+
+        ctk.CTkLabel(editor, text="고정할 단어를 '원문=번역문' 형태로 한 줄씩 입력하세요.\n예: Creeper=크리퍼", 
+                     font=ctk.CTkFont(family=FONT_NAME, size=12), text_color="#d4d4d8", justify="left"
+                     ).pack(padx=12, pady=(12, 4), anchor="w")
+
+        textbox = ctk.CTkTextbox(editor, font=ctk.CTkFont(family=FONT_NAME, size=12))
+        textbox.pack(fill="both", expand=True, padx=12, pady=8)
+
+        # Load existing
+        current_text = ""
+        for k, v in getattr(self, 'glossary', {}).items():
+            current_text += f"{k}={v}\n"
+        textbox.insert("1.0", current_text)
+
+        def save_and_close():
+            content = textbox.get("1.0", "end").strip()
+            new_glossary = {}
+            for line in content.split('\n'):
+                line = line.strip()
+                if not line or '=' not in line:
+                    continue
+                k, v = line.split('=', 1)
+                new_glossary[k.strip()] = v.strip()
+            self.glossary = new_glossary
+            if hasattr(self, "glossaries_by_lang"):
+                lang = self.target_lang_combo.get()
+                self.glossaries_by_lang[lang] = new_glossary
+            self.save_user_settings()
+            self.log(f"✅ 용어집 저장 완료! (총 {len(self.glossary)}개 단어)")
+            editor.destroy()
+
+        def import_txt():
+            from tkinter import filedialog
+            path = filedialog.askopenfilename(title="용어집 텍스트 파일 불러오기", filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")])
+            if not path: return
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                # Append to current textbox text
+                textbox.insert("end", "\n" + content.strip())
+                self.log(f"📥 용어집 파일을 불러왔습니다: {path}")
+            except Exception as e:
+                if messagebox: messagebox.showerror("오류", f"파일을 읽는 중 오류가 발생했습니다: {e}")
+
+        def export_txt():
+            from tkinter import filedialog
+            path = filedialog.asksaveasfilename(title="용어집 텍스트 파일 내보내기", defaultextension=".txt", filetypes=[("Text Files", "*.txt")])
+            if not path: return
+            try:
+                content = textbox.get("1.0", "end").strip()
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                self.log(f"📤 용어집을 텍스트 파일로 저장했습니다: {path}")
+            except Exception as e:
+                if messagebox: messagebox.showerror("오류", f"파일을 저장하는 중 오류가 발생했습니다: {e}")
+
+        btn_frame = ctk.CTkFrame(editor, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=12, pady=(0, 8))
+
+        btn_import = ctk.CTkButton(btn_frame, text="📥 텍스트 파일 불러오기", command=import_txt,
+                                   fg_color="#3f3f46", hover_color="#52525b", font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"), width=150)
+        btn_import.pack(side="left", padx=(0, 4))
+
+        btn_export = ctk.CTkButton(btn_frame, text="📤 텍스트 파일 내보내기", command=export_txt,
+                                   fg_color="#3f3f46", hover_color="#52525b", font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"), width=150)
+        btn_export.pack(side="right", padx=(4, 0))
+
+        btn_save = ctk.CTkButton(editor, text="저장 및 닫기", command=save_and_close,
+                                 fg_color="#16a34a", hover_color="#15803d", font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"))
+        btn_save.pack(fill="x", padx=12, pady=(0, 12))
 
     def toggle_api_visibility(self):
         if self.api_entry.cget("show") == "*":
@@ -277,11 +370,13 @@ class UIScreensMixin:
 
         if engine_key != "google" and not api_key:
             messagebox.showwarning("경고", f"{engine_name} 사용을 위해 API 키를 입력해주세요.")
-            return None, None, False
+            return None, None, False, None, None
 
         self.save_user_settings()
         is_paid = "유료" in self.plan_combo.get()
-        return engine_key, api_key, is_paid
+        ai_model = self.model_combo.get()
+        target_lang = self.target_lang_combo.get()
+        return engine_key, api_key, is_paid, ai_model, target_lang
 
     def request_cancel(self):
         self.cancel_requested = True
