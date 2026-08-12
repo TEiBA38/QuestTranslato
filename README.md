@@ -44,7 +44,7 @@
 - 퀘스트 폴더 안에 "DefaultQuests.json"이 통째로 있는 경우 해당 파일만 번역하면 됩니다.
 
 ### 🔹 FTB Quests
-경로: "D:\MODE\Instances\[모드팩 이름]\config\ftbquests\normal"
+경로: "D:\MODE\Instances\[모드팩 이름]\config\ftbquests\normal" or quest
 
 <img width="648" height="141" alt="image" src="https://github.com/user-attachments/assets/bf23034a-92df-4377-b6bd-459fc3459440" />
 
