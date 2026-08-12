@@ -70,12 +70,6 @@ def _run_gemini_batch_jobs(items, text_extractor, api_key, is_paid, log_callback
             if progress_callback:
                 progress_callback(current_count, total)
 
-            if i + batch_size < total:
-                for _ in range(int(sleep_sec * 10)):
-                    if cancel_checker and cancel_checker():
-                        raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                    time.sleep(0.1)
-
     return translated_results
 
 

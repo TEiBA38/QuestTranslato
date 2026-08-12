@@ -29,7 +29,7 @@ from translation_engines import ENGINES
 from ui_screens import UIScreensMixin
 from modpack_manager import ModpackMixin
 from translation_runner import TranslationMixin
-from constants import FONT_NAME, DEFAULT_GLOSSARY, MODELS_GEMINI, MODELS_OPENAI, SUPPORTED_LANGUAGES
+from constants import FONT_NAME, DEFAULT_GLOSSARY, MODELS_GEMINI_FREE, MODELS_GEMINI_PAID, MODELS_OPENAI, SUPPORTED_LANGUAGES
 if ctk is not None:
     ctk.set_appearance_mode("Dark")
     ctk.set_default_color_theme("blue")
@@ -351,6 +351,7 @@ if ctk is not None and TkinterDnD is not None:
                                               values=["유료 계정 (Pay-as-you-go / 초고속 / 제한없음)",
                                                       "무료 계정 (안전대기 / 10 RPM 속도제한)"],
                                               font=ctk.CTkFont(family=FONT_NAME, size=12),
+                                              command=self.on_plan_change,
                                               fg_color="#27272a", button_color="#b45309", button_hover_color="#d97706")
             self.plan_combo.pack(fill="x", padx=12, pady=(0, 8))
             self.plan_combo.set("유료 계정 (Pay-as-you-go / 초고속 / 제한없음)")
@@ -361,11 +362,11 @@ if ctk is not None and TkinterDnD is not None:
             self.model_label.pack(anchor="w", padx=12, pady=(2, 2))
 
             self.model_combo = ctk.CTkComboBox(config_frame,
-                                              values=MODELS_GEMINI,
+                                              values=MODELS_GEMINI_PAID,
                                               font=ctk.CTkFont(family=FONT_NAME, size=12),
                                               fg_color="#27272a", button_color="#b45309", button_hover_color="#d97706")
             self.model_combo.pack(fill="x", padx=12, pady=(0, 8))
-            self.model_combo.set(MODELS_GEMINI[0])
+            self.model_combo.set(MODELS_GEMINI_PAID[0])
 
             ctk.CTkLabel(config_frame, text="API 키",
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),

@@ -4,6 +4,7 @@ QuestTranslatorApp이 이 클래스를 상속해서 사용합니다.
 """
 import threading
 import os
+import time
 
 try:
     import customtkinter as ctk
@@ -15,7 +16,7 @@ except Exception:
     messagebox = None
 
 from translation_engines import ENGINES
-from constants import FONT_NAME, MODELS_GEMINI, MODELS_OPENAI
+from constants import FONT_NAME, MODELS_GEMINI_FREE, MODELS_GEMINI_PAID, MODELS_OPENAI
 
 
 class UIScreensMixin:
@@ -201,7 +202,12 @@ class UIScreensMixin:
         if threading.current_thread() is not threading.main_thread():
             self.after(0, lambda: self.set_status(text))
             return
-        self.status_label.configure(text=text)
+        self._last_status_base = text
+        eta = getattr(self, "_current_eta", "")
+        if eta and ("번역" in text or "처리" in text or "진행" in text):
+            self.status_label.configure(text=f"{text} (남은 시간: 약 {eta})")
+        else:
+            self.status_label.configure(text=text)
 
     def route_log(self, message):
         if message.strip().startswith("⏳"):
@@ -213,8 +219,63 @@ class UIScreensMixin:
         if threading.current_thread() is not threading.main_thread():
             self.after(0, lambda: self.update_progress(val))
             return
-        self.progress.set(val)
+        
+        self._target_progress = val
+        if val == 0.0 or val >= 1.0:
+            self._current_eta = ""
+            
+        if val == 0.0:
+            self._current_progress = 0.0
+            if getattr(self, "progress", None) and self.progress.winfo_exists():
+                self.progress.set(0.0)
+            self._progress_start_time = time.time()
+            if not getattr(self, "_animating_progress", False):
+                self._animating_progress = True
+                self._animate_progress()
+        
+        elif val > 0.0 and val < 1.0 and hasattr(self, '_progress_start_time'):
+            elapsed = time.time() - self._progress_start_time
+            if elapsed > 3.0 and val > 0.001:
+                total_est = elapsed / val
+                remaining = max(total_est - elapsed, 0)
+                m, s = divmod(int(remaining), 60)
+                h, m = divmod(m, 60)
+                time_str = f"{h}시간 {m}분" if h > 0 else f"{m}분 {s}초"
+                
+                self._current_eta = time_str
+                
+                if getattr(self, "status_label", None) and self.status_label.winfo_exists():
+                    base_text = getattr(self, "_last_status_base", self.status_label.cget("text").split(" (남은 시간:")[0])
+                    self.status_label.configure(text=f"{base_text} (남은 시간: 약 {time_str})")
+
         self.update_idletasks()
+
+    def _animate_progress(self):
+        if not getattr(self, "_animating_progress", False):
+            return
+        if not getattr(self, "progress", None) or not self.progress.winfo_exists():
+            self._animating_progress = False
+            return
+            
+        target = getattr(self, "_target_progress", 0.0)
+        current = getattr(self, "_current_progress", 0.0)
+        
+        if target >= 1.0:
+            self.progress.set(1.0)
+            self._animating_progress = False
+            return
+            
+        fake_target = min(target + 0.03, 0.99)
+        if current < fake_target:
+            step = 0.0003
+            if current < target:
+                step = max(step, (target - current) * 0.1)
+                
+            current = min(current + step, fake_target)
+            self._current_progress = current
+            self.progress.set(current)
+            
+        self.after(50, self._animate_progress)
 
     def show_messagebox(self, kind, title, message):
         func = {"info": messagebox.showinfo, "warning": messagebox.showwarning, "error": messagebox.showerror}[kind]
@@ -226,6 +287,20 @@ class UIScreensMixin:
     # ====================================================================
     # 설정 & 입력 검증
     # ====================================================================
+
+    def on_plan_change(self, choice=None):
+        if choice is None:
+            choice = self.plan_combo.get()
+        engine = self.engine_combo.get()
+        if "Gemini" in engine:
+            if "무료" in choice:
+                self.model_combo.configure(values=MODELS_GEMINI_FREE)
+                if self.model_combo.get() not in MODELS_GEMINI_FREE:
+                    self.model_combo.set(MODELS_GEMINI_FREE[0])
+            else:
+                self.model_combo.configure(values=MODELS_GEMINI_PAID)
+                if self.model_combo.get() not in MODELS_GEMINI_PAID:
+                    self.model_combo.set(MODELS_GEMINI_PAID[0])
 
     def on_engine_change(self, choice):
         if choice == "Google Translate":
@@ -239,9 +314,8 @@ class UIScreensMixin:
             self.show_btn.configure(state="normal")
             if "Gemini" in choice:
                 self.plan_combo.configure(state="normal")
-                self.model_combo.configure(state="normal", values=MODELS_GEMINI)
-                if self.model_combo.get() not in MODELS_GEMINI:
-                    self.model_combo.set(MODELS_GEMINI[0])
+                self.model_combo.configure(state="normal")
+                self.on_plan_change(self.plan_combo.get())
                 self.log("💡 Gemini API 키를 입력하고 계정 상태(유료/무료)를 지정해주세요.")
             elif "OpenAI" in choice:
                 self.plan_combo.configure(state="disabled")

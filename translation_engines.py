@@ -23,6 +23,9 @@ _gemini_cache = {}
 _gemini_cache_lock = threading.Lock()
 _GEMINI_CACHE_MAX = 8000
 
+_last_gemini_api_call = 0
+_gemini_api_rate_lock = threading.Lock()
+
 
 class QuotaExceededError(Exception):
     pass
@@ -253,6 +256,19 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
     for attempt in range(1, max_retries + 1):
         if cancel_checker and cancel_checker():
             raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+
+        if not is_paid:
+            with _gemini_api_rate_lock:
+                import time
+                global _last_gemini_api_call
+                elapsed = time.time() - _last_gemini_api_call
+                if elapsed < 6.5:
+                    sleep_time = 6.5 - elapsed
+                    for _ in range(int(sleep_time * 10)):
+                        if cancel_checker and cancel_checker():
+                            raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+                        time.sleep(0.1)
+                _last_gemini_api_call = time.time()
 
         try:
             res = client.models.generate_content(

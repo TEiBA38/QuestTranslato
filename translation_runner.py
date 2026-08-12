@@ -100,15 +100,54 @@ class TranslationMixin:
         temp_zip_path = os.path.join(tempfile.gettempdir(), f"QuestTranslator_{safe_name}.zip")
         if os.path.exists(temp_zip_path):
             os.remove(temp_zip_path)
+            
         added_count = 0
         with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             for root, dirs, files_list in os.walk(modpack_dir):
                 dirs[:] = [d for d in dirs if d.lower() not in SCAN_IGNORE_DIRS]
+                
                 for filename in files_list:
                     if not filename.lower().endswith(TARGET_EXTENSIONS):
                         continue
+                        
                     full_path = os.path.join(root, filename)
-                    zf.write(full_path, os.path.relpath(full_path, modpack_dir))
+                    rel_path = os.path.relpath(full_path, modpack_dir)
+                    norm_path = rel_path.lower().replace('\\', '/')
+                    
+                    # 특수 예외: 외부 퀘스트 lang 파일 (예: kubejs/assets/ftbquests/lang/en_us.json, resources/betterquesting/lang/en_us.lang)
+                    is_quest_lang = (filename.lower() in ["en_us.json", "en_us.lang"] and 
+                                     any(q in norm_path for q in ["ftbquests", "betterquesting", "hqm", "heracles"]))
+                    
+                    if not is_quest_lang:
+                        # 나머지 퀘스트 파일들은 무조건 config/ 하위에 있어야 함
+                        if not (norm_path.startswith("config/ftbquests/") or 
+                                norm_path.startswith("config/betterquesting/") or 
+                                norm_path.startswith("config/hqm/") or 
+                                norm_path.startswith("config/heracles/")):
+                            continue
+
+                        if norm_path.startswith("config/ftbquests/"):
+                            if "/reward_tables/" in norm_path:
+                                continue
+                            if filename.lower() in ["data.snbt", "chapter_groups.snbt"]:
+                                continue
+                                
+                        if norm_path.startswith("config/betterquesting/"):
+                            is_valid = (filename.lower() == "defaultquests.json" or 
+                                        "/chapter/" in norm_path or 
+                                        "/chapters/" in norm_path)
+                            if not is_valid:
+                                continue
+                                
+                        if norm_path.startswith("config/hqm/"):
+                            is_valid = (filename.lower() in ["quests.hqm", "defaultquests.json"] or 
+                                        "/chapter/" in norm_path or 
+                                        "/chapters/" in norm_path or
+                                        "/quests/" in norm_path)
+                            if not is_valid:
+                                continue
+                            
+                    zf.write(full_path, rel_path)
                     added_count += 1
         return temp_zip_path, added_count
 
@@ -272,11 +311,14 @@ class TranslationMixin:
         threading.Thread(target=self._process_zip_file,
                          args=(zip_path, engine_key, api_key, is_paid, ai_model, target_lang), daemon=True).start()
 
-    def _translate_jobs_parallel(self, jobs, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)"):
+    def _translate_jobs_parallel(self, jobs, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", on_job_completed=None):
         batch_size = 50
-        tasks = [(job, job["targets"][i:i + batch_size])
-                 for job in jobs
-                 for i in range(0, len(job["targets"]), batch_size)]
+        tasks = []
+        for job in jobs:
+            job["tasks_total"] = (len(job["targets"]) + batch_size - 1) // batch_size
+            job["tasks_done"] = 0
+            for i in range(0, len(job["targets"]), batch_size):
+                tasks.append((job, job["targets"][i:i + batch_size]))
         total_items = sum(len(job["targets"]) for job in jobs)
         completed_items = 0
         lock = threading.Lock()
@@ -293,21 +335,25 @@ class TranslationMixin:
             else:
                 for (parent_node, key, _), trans in zip(chunk, translated_texts):
                     parent_node[key] = trans
-            return len(chunk)
+            return job, len(chunk)
 
         executor = ThreadPoolExecutor(max_workers=min(8, len(tasks)) or 1)
         try:
             futures = [executor.submit(run_task, t) for t in tasks]
             for future in as_completed(futures):
-                n = future.result()
+                job, n = future.result()
                 with lock:
                     completed_items += n
+                    job["tasks_done"] += 1
+                    if job["tasks_done"] >= job.get("tasks_total", 1):
+                        if on_job_completed:
+                            on_job_completed(job)
                 self.set_status(f"⏳ Gemini API 번역 진행 중... [{completed_items}/{total_items}]")
                 self.update_progress(completed_items / total_items if total_items else 1)
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
-    def _translate_jobs_sequential(self, jobs, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)"):
+    def _translate_jobs_sequential(self, jobs, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", on_job_completed=None):
         total_files = len(jobs)
         for idx, job in enumerate(jobs, 1):
             if self.is_cancelled():
@@ -327,6 +373,9 @@ class TranslationMixin:
                 process_json_safely(
                     job["data"], engine_key, api_key, is_paid,
                     progress_cb, self.route_log, self.is_cancelled, verbose=False, reference_map=None, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang)
+            
+            if on_job_completed:
+                on_job_completed(job)
 
     # ====================================================================
     # 스레드 안전 다이얼로그 & 백업 헬퍼
@@ -489,25 +538,11 @@ class TranslationMixin:
 
         if self._ask_main(
             '번역 작업 중단',
-            '번역 작업을 중단했습니다.\n지금까지 번역된 파일을 백업하고 보존하시겠습니까?\n\n'
-            '예: 백업 파일을 저장하고, 기록을 보존하여 다음 실행 시 이어서 번역 가능\n'
+            '번역 작업을 중단했습니다.\n지금까지 진행된 번역 상태를 저장하시겠습니까?\n\n'
+            '예: 내부적으로 기록을 저장하여 다음 실행 시 이어서 번역 가능 (추천)\n'
             '아니요: 지금까지 진행된 번역을 모두 삭제하고 취소'
         ):
-            save_dir = self._pick_dir_main('부분 백업 저장 위치 선택')
-            if save_dir:
-                out_path = os.path.join(save_dir, partial_name)
-                try:
-                    with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        for root, _, files in os.walk(out_dir):
-                            for fname in files:
-                                if fname == PROGRESS_FILE:
-                                    continue
-                                fp = os.path.join(root, fname)
-                                zf.write(fp, os.path.relpath(fp, out_dir))
-                    self.log(f"💾 부분 백업 저장 완료: {out_path}")
-                    self.show_messagebox('info', '백업 저장 완료', f'저장 위치:\n{out_path}')
-                except Exception as exc:
-                    self.log(f"❌ 백업 압축 중 오류: {exc}")
+            self.log("💾 번역 진행 상황이 성공적으로 저장되었습니다. 다음에 다시 실행하면 이어서 번역할 수 있습니다.")
         else:
             self.log("🗑️ 진행 중이던 번역 작업 파일과 임시 기록을 삭제합니다.")
             try:
@@ -535,28 +570,15 @@ class TranslationMixin:
 
         answer = messagebox.askyesnocancel(
             '번역 진행 중',
-            '번역이 진행 중입니다. 종료하면 현재 작업이 중단됩니다.\n\n'
-            '예: 지금까지 번역된 파일 백업 저장 및 기록 보존\n'
-            '아니요: 백업 없이 종료하고 지금까지 진행된 번역 삭제\n'
-            '취소: 종료를 취소하고 계속 진행'
+            '번역이 진행 중입니다. 앱을 종료하면 현재 작업이 중단됩니다.\n\n'
+            '예: 현재까지 진행된 번역 상황을 저장하고 종료 (다음에 이어서 가능)\n'
+            '아니요: 진행 상황을 모두 삭제하고 앱 종료\n'
+            '취소: 앱 종료를 취소하고 계속 번역 진행'
         )
         if answer is None:  # 취소 — 종료하지 않음
             return False
-        if answer:  # 예 — 백업 저장 후 종료 (기록 보존)
-            save_dir = filedialog.askdirectory(title='백업 저장 위치 선택')
-            if save_dir:
-                out_path = os.path.join(save_dir, 'translation_partial.zip')
-                try:
-                    with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        for root, _, files in os.walk(out_dir):
-                            for fname in files:
-                                if fname == PROGRESS_FILE:
-                                    continue
-                                fp = os.path.join(root, fname)
-                                zf.write(fp, os.path.relpath(fp, out_dir))
-                    messagebox.showinfo('백업 저장 완료', f'저장 위치:\n{out_path}')
-                except Exception as exc:
-                    self.log(f"❌ 백업 저장 오류: {exc}")
+        if answer:  # 예 — 기록 보존
+            pass
         else:  # 아니요 — 진행중인 것 삭제 후 종료
             try:
                 shutil.rmtree(out_dir, ignore_errors=True)
@@ -766,21 +788,21 @@ class TranslationMixin:
                                  "data": data, "targets": node_targets})
 
             if jobs:
-                if engine_key == "gemini_batch" and is_paid:
-                    self._translate_jobs_parallel(jobs, api_key, is_paid, ai_model=ai_model, target_lang=target_lang)
-                else:
-                    self._translate_jobs_sequential(jobs, engine_key, api_key, is_paid, ai_model=ai_model, target_lang=target_lang)
+                def on_job_completed(job):
+                    if job["kind"] == "snbt":
+                        text = job.get("final_text") or rebuild_snbt(job["lines"], job["translated_map"])
+                        with open(job["target_path"], 'w', encoding='utf-8', newline='\n') as f:
+                            f.write(text)
+                    else:
+                        with open(job["target_path"], 'w', encoding='utf-8') as f:
+                            json.dump(job["data"], f, ensure_ascii=False, indent=2)
+                    completed_set.add(job["rel_path"])
+                    _save_progress(out_dir, completed_set)
 
-            for job in jobs:
-                if job["kind"] == "snbt":
-                    text = job.get("final_text") or rebuild_snbt(job["lines"], job["translated_map"])
-                    with open(job["target_path"], 'w', encoding='utf-8', newline='\n') as f:
-                        f.write(text)
+                if engine_key == "gemini_batch" and is_paid:
+                    self._translate_jobs_parallel(jobs, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, on_job_completed=on_job_completed)
                 else:
-                    with open(job["target_path"], 'w', encoding='utf-8') as f:
-                        json.dump(job["data"], f, ensure_ascii=False, indent=2)
-                completed_set.add(job["rel_path"])
-                _save_progress(out_dir, completed_set)
+                    self._translate_jobs_sequential(jobs, engine_key, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, on_job_completed=on_job_completed)
 
             skip_parts = []
             if skipped_resume:
