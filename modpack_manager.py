@@ -48,11 +48,11 @@ class ModpackMixin:
                     if filename.lower().endswith(TARGET_EXTENSIONS):
                         count += 1
                     if not already_translated:
-                        if filename.lower() in ["ko_kr.json", "ko_kr.lang"]:
-                            already_translated = True
-                        elif sample_scanned < 30:
-                            is_quest_file = filename.lower().endswith(('.snbt', '.hqm')) or 'quest' in root.lower() or 'hqm' in root.lower()
-                            if is_quest_file:
+                        is_quest_file = filename.lower().endswith(('.snbt', '.hqm')) or 'quest' in root.lower() or 'hqm' in root.lower()
+                        if is_quest_file:
+                            if filename.lower() in ["ko_kr.json", "ko_kr.lang"]:
+                                already_translated = True
+                            elif sample_scanned < 30:
                                 try:
                                     with open(os.path.join(root, filename), 'r', encoding='utf-8', errors='ignore') as f:
                                         content = f.read(8192)
