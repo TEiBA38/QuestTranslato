@@ -1,4 +1,4 @@
-﻿"""
+"""
 모드팩 스캔, 카드 렌더링, 썸네일 로딩 관련 메서드 믹스인.
 """
 import os
@@ -48,11 +48,11 @@ class ModpackMixin:
                     if filename.lower().endswith(TARGET_EXTENSIONS):
                         count += 1
                     if not already_translated:
-                        is_quest_file = filename.lower().endswith(('.snbt', '.hqm')) or 'quest' in root.lower() or 'hqm' in root.lower()
+                        is_quest_file = filename.lower().endswith(('.snbt', '.hqm', '.json', '.lang', '.cfg', '.txt')) and ('quest' in root.lower() or 'hqm' in root.lower() or filename.lower().endswith(('.snbt', '.hqm')))
                         if is_quest_file:
                             if filename.lower() in ["ko_kr.json", "ko_kr.lang", "ko_kr.snbt"]:
                                 already_translated = True
-                            elif sample_scanned < 30:
+                            elif sample_scanned < 100:
                                 try:
                                     with open(os.path.join(root, filename), 'r', encoding='utf-8', errors='ignore') as f:
                                         content = f.read(8192)
