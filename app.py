@@ -470,6 +470,20 @@ if ctk is not None and TkinterDnD is not None:
             saved_lang = settings.get("target_lang", "")
             if saved_lang:
                 self.target_lang_combo.set(saved_lang)
+
+            saved_engine = settings.get("engine_name", "")
+            if saved_engine:
+                self.engine_combo.set(saved_engine)
+                # trigger UI update
+                if hasattr(self, "on_engine_change"):
+                    self.on_engine_change(saved_engine)
+
+            saved_plan = settings.get("plan_name", "")
+            if saved_plan:
+                if "Gemini" in saved_engine:
+                    self.plan_combo.set(saved_plan)
+                    if hasattr(self, "on_plan_change"):
+                        self.on_plan_change(saved_plan)
                 
             self.translated_history = settings.get("translated_history", {})
             self.glossaries_by_lang = settings.get("glossaries_by_lang", {})
@@ -497,6 +511,8 @@ if ctk is not None and TkinterDnD is not None:
                     "api_key": self.api_entry.get().strip(),
                     "ai_model": self.model_combo.get(),
                     "target_lang": self.target_lang_combo.get(),
+                    "engine_name": self.engine_combo.get(),
+                    "plan_name": self.plan_combo.get(),
                     "translated_history": getattr(self, "translated_history", {}),
                     "glossaries_by_lang": getattr(self, "glossaries_by_lang", {})
                 }

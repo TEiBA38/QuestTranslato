@@ -356,17 +356,22 @@ class UIScreensMixin:
             self.show_btn.configure(state="normal")
             if "Gemini" in choice:
                 self.plan_combo.configure(state="normal")
+                if self.plan_combo.get() not in ["유료 API (기본)", "무료 API (분당 제한)"]:
+                    self.plan_combo.set("유료 API (기본)")
                 self.model_combo.configure(state="normal")
                 self.on_plan_change(self.plan_combo.get())
                 self.log("💡 Gemini API 키를 입력하고 계정 상태(유료/무료)를 지정해주세요.")
             elif "OpenAI" in choice:
+                self.plan_combo.set("- (해당 없음)")
                 self.plan_combo.configure(state="disabled")
                 self.model_combo.configure(state="normal", values=MODELS_OPENAI)
                 if self.model_combo.get() not in MODELS_OPENAI:
                     self.model_combo.set(MODELS_OPENAI[0])
                 self.log("💡 OpenAI API 키를 입력해주세요. 요금제는 계정 설정에 따릅니다.")
             else:
+                self.plan_combo.set("- (해당 없음)")
                 self.plan_combo.configure(state="disabled")
+                self.model_combo.set("- (해당 없음)")
                 self.model_combo.configure(state="disabled")
                 self.log("💡 DeepL API 키를 입력해주세요.")
 

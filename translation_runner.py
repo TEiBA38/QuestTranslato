@@ -683,7 +683,10 @@ class TranslationMixin:
                 self.log("⚠️ 번역할 대상 파일을 찾을 수 없습니다.")
                 return
 
-            mode_str = "[유료/초고속]" if is_paid else "[무료/안전대기]"
+            if engine_key == "gemini_batch":
+                mode_str = "[유료/초고속]" if is_paid else "[무료/안전대기]"
+            else:
+                mode_str = "[초고속]"
             engine_label = next((name for name, key in ENGINES.items() if key == engine_key), engine_key)
             self.log(f"\n🎯 총 {total_files}개 파일 압축 번역 시작... {mode_str}")
             self.log(f"🧩 선택 옵션: 엔진={engine_label} / 모드={mode_str}")
@@ -839,6 +842,42 @@ class TranslationMixin:
                 self.save_user_settings()
                 if hasattr(self, "scan_modpacks_from_entry"):
                     self.after(0, self.scan_modpacks_from_entry) # Refresh UI
+
+                # 검수 리포트 생성
+                review_items = []
+                for root, _, files_list in os.walk(raw_dir):
+                    for f in files_list:
+                        rel_p = os.path.relpath(os.path.join(root, f), raw_dir)
+                        src_path = os.path.join(raw_dir, rel_p)
+                        dst_path = os.path.join(out_dir, rel_p)
+                        if not os.path.exists(dst_path):
+                            continue
+                        try:
+                            if f.lower().endswith('.snbt'):
+                                with open(src_path, 'r', encoding='utf-8', errors='ignore') as fh:
+                                    src = fh.read()
+                                with open(dst_path, 'r', encoding='utf-8', errors='ignore') as fh:
+                                    dst = fh.read()
+                                review_items.append((rel_p, analyze_snbt_texts(src, dst)))
+                            elif f.lower().endswith(('.json', '.lang')):
+                                with open(src_path, encoding='utf-8', errors='ignore') as fh:
+                                    src = json.load(fh)
+                                with open(dst_path, encoding='utf-8', errors='ignore') as fh:
+                                    dst = json.load(fh)
+                                review_items.append((rel_p, analyze_json_data(src, dst)))
+                            elif f.lower().endswith('.hqm'):
+                                with open(src_path, 'rb') as fh:
+                                    src = fh.read()
+                                with open(dst_path, 'rb') as fh:
+                                    dst = fh.read()
+                                review_items.append((rel_p, analyze_hqm_bytes(src, dst)))
+                        except Exception as review_exc:
+                            self.log(f"⚠️ 검수 스킵 [{rel_p}]: {review_exc}")
+
+                if review_items:
+                    report_text = render_review_report("덮어쓰기 완료: 번역 검수 리포트", review_items)
+                    self.show_review_report(report_text)
+                    self.log("🧪 검수 리포트가 결과창으로 표시되었습니다.")
 
                 self.show_messagebox("info", "적용 완료", f"모드팩에 번역본이 성공적으로 덮어쓰기 되었습니다!\n\n적용 경로:\n{modpack_path}")
                 shutil.rmtree(out_dir, ignore_errors=True)
