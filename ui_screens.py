@@ -40,7 +40,7 @@ class UIScreensMixin:
         self._apply_responsive_layout()
 
         saved_root = self.instance_path_entry.get().strip()
-        if saved_root and os.path.isdir(saved_root) and not self.scan_thread_active and not getattr(self, "_suppress_auto_scan", False):
+        if saved_root and os.path.isdir(saved_root) and not self.app_state.scan_thread_active and not getattr(self, "_suppress_auto_scan", False):
             self.scan_modpacks_from_entry(show_screen=False)
 
     def show_quick_translate_screen(self):
@@ -396,7 +396,7 @@ class UIScreensMixin:
 
         # Load existing
         current_text = ""
-        for k, v in getattr(self, 'glossary', {}).items():
+        for k, v in getattr(self.app_state, 'glossary', {}).items():
             current_text += f"{k}={v}\n"
         textbox.insert("1.0", current_text)
 
@@ -409,12 +409,12 @@ class UIScreensMixin:
                     continue
                 k, v = line.split('=', 1)
                 new_glossary[k.strip()] = v.strip()
-            self.glossary = new_glossary
+            self.app_state.glossary = new_glossary
             if hasattr(self, "glossaries_by_lang"):
                 lang = self.target_lang_combo.get()
-                self.glossaries_by_lang[lang] = new_glossary
+                self.app_state.glossaries_by_lang[lang] = new_glossary
             self.save_user_settings()
-            self.log(f"✅ 용어집 저장 완료! (총 {len(self.glossary)}개 단어)")
+            self.log(f"✅ 용어집 저장 완료! (총 {len(self.app_state.glossary)}개 단어)")
             editor.destroy()
 
         def import_txt():
@@ -500,9 +500,9 @@ class UIScreensMixin:
         return engine_key, api_key, is_paid, ai_model, target_lang
 
     def request_cancel(self):
-        self.cancel_requested = True
+        self.app_state.cancel_requested = True
         self.log("🛑 사용자가 번역 취소를 요청했습니다. 작업을 중단합니다...")
         self.btn_cancel.configure(state="disabled")
 
     def is_cancelled(self):
-        return self.cancel_requested
+        return self.app_state.cancel_requested

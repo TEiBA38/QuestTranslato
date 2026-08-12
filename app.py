@@ -1,4 +1,4 @@
-"""
+﻿"""
 Quest Translator Pro - 메인 진입점
 UI 구성(_setup_ui)과 생명주기 메서드만 담고,
 나머지 기능은 Mixin 파일에서 상속받습니다.
@@ -29,6 +29,7 @@ from translation_engines import ENGINES
 from ui_screens import UIScreensMixin
 from modpack_manager import ModpackMixin
 from translation_runner import TranslationMixin
+from state_manager import AppState
 from constants import FONT_NAME, DEFAULT_GLOSSARY, MODELS_GEMINI_FREE, MODELS_GEMINI_PAID, MODELS_OPENAI, SUPPORTED_LANGUAGES
 if ctk is not None:
     ctk.set_appearance_mode("Dark")
@@ -70,11 +71,8 @@ if ctk is not None and TkinterDnD is not None:
                     pass
 
             self.settings_path = self._get_settings_path()
-
-            self.cancel_requested = False
-            self.scan_thread_active = False
-            self.translated_history = {}
-            self.glossary = DEFAULT_GLOSSARY.copy()
+            self.app_state = AppState()
+            
             self.protocol("WM_DELETE_WINDOW", self.on_close)
 
             self.grid_rowconfigure(1, weight=1)
@@ -499,23 +497,18 @@ if ctk is not None and TkinterDnD is not None:
                     if hasattr(self, "on_plan_change"):
                         self.on_plan_change(saved_plan)
                 
-            self.translated_history = settings.get("translated_history", {})
-            self.glossaries_by_lang = settings.get("glossaries_by_lang", {})
+            self.app_state.translated_history = settings.get("translated_history", {})
+            self.app_state.glossaries_by_lang = settings.get("glossaries_by_lang", {})
             
             # Migrate old single glossary format if present
-            if "glossary" in settings and not self.glossaries_by_lang:
-                self.glossaries_by_lang["한국어 (Korean)"] = settings.get("glossary")
+            if "glossary" in settings and not self.app_state.glossaries_by_lang:
+                self.app_state.glossaries_by_lang["한국어 (Korean)"] = settings.get("glossary")
 
             self._sync_glossary_to_current_lang()
 
         def _sync_glossary_to_current_lang(self):
             lang = self.target_lang_combo.get()
-            if lang not in self.glossaries_by_lang:
-                if lang == "한국어 (Korean)":
-                    self.glossaries_by_lang[lang] = DEFAULT_GLOSSARY.copy()
-                else:
-                    self.glossaries_by_lang[lang] = {}
-            self.glossary = self.glossaries_by_lang[lang]
+            self.app_state.sync_glossary(lang)
 
         def save_user_settings(self):
             try:
@@ -527,8 +520,8 @@ if ctk is not None and TkinterDnD is not None:
                     "target_lang": self.target_lang_combo.get(),
                     "engine_name": self.engine_combo.get(),
                     "plan_name": self.plan_combo.get(),
-                    "translated_history": getattr(self, "translated_history", {}),
-                    "glossaries_by_lang": getattr(self, "glossaries_by_lang", {})
+                    "translated_history": self.app_state.translated_history,
+                    "glossaries_by_lang": self.app_state.glossaries_by_lang
                 }
                 with open(self.settings_path, "w", encoding="utf-8") as sf:
                     json.dump(settings, sf, ensure_ascii=False, indent=2)
@@ -552,3 +545,4 @@ else:
 if __name__ == "__main__":
     app = QuestTranslatorApp()
     app.mainloop()
+

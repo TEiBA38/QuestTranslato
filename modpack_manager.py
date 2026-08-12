@@ -1,4 +1,4 @@
-"""
+﻿"""
 모드팩 스캔, 카드 렌더링, 썸네일 로딩 관련 메서드 믹스인.
 """
 import os
@@ -98,11 +98,13 @@ class ModpackMixin:
         if not instance_root or not os.path.isdir(instance_root):
             messagebox.showwarning("경고", "유효한 인스턴스 루트 폴더를 먼저 선택해주세요.")
             return
-        if getattr(self, "scan_thread_active", False):
+        if getattr(self.app_state, "scan_thread_active", False):
             self.log("🔄 이미 모드팩 스캔이 진행 중입니다.")
             return
 
-        self.scan_thread_active = True
+        self.app_state.scan_thread_active = True
+        if hasattr(self, "btn_rescan_modpacks"):
+            self.btn_rescan_modpacks.configure(state="disabled")
         self._show_scan_loading()
         if show_screen:
             self.show_select_screen()
@@ -118,7 +120,9 @@ class ModpackMixin:
         threading.Thread(target=run_scan, daemon=True).start()
 
     def _finish_scan(self, candidates):
-        self.scan_thread_active = False
+        self.app_state.scan_thread_active = False
+        if hasattr(self, "btn_rescan_modpacks"):
+            self.btn_rescan_modpacks.configure(state="normal")
         self._hide_scan_loading()
         self._set_modpack_candidates(candidates)
         if candidates:
@@ -301,8 +305,8 @@ class ModpackMixin:
                          fg_color="#ea580c", text_color="#fff7ed",
                          corner_radius=6, padx=6, pady=1).place(relx=0.98, rely=0.08, anchor="ne")
 
-            if already_translated or path in getattr(self, 'translated_history', {}):
-                history_time = getattr(self, 'translated_history', {}).get(path, "원본")
+            if already_translated or path in getattr(self.app_state, 'translated_history', {}):
+                history_time = getattr(self.app_state, 'translated_history', {}).get(path, "원본")
                 ctk.CTkLabel(thumbnail_wrap, text="번역됨" if history_time == "원본" else "한글화됨",
                              font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
                              fg_color="#16a34a", text_color="#f0fdf4",

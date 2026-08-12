@@ -1,4 +1,4 @@
-"""
+﻿"""
 번역 실행 (단일 파일, ZIP, 모드팩) 관련 메서드 믹스인.
 """
 import os
@@ -77,6 +77,7 @@ class TranslationMixin:
 
     def handle_file_drop(self, event):
         engine_key, api_key, is_paid, ai_model, target_lang = self.validate_inputs()
+        self.app_state.cancel_requested = False
         if not engine_key:
             return
         dropped_path = event.data.strip('{}').strip('"')
@@ -200,7 +201,7 @@ class TranslationMixin:
                          args=(file_path, engine_key, api_key, is_paid, ai_model, target_lang), daemon=True).start()
 
     def _process_single_file(self, file_path, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)"):
-        self.cancel_requested = False
+        self.app_state.cancel_requested = False
         self.toggle_buttons(False)
         self.update_progress(0)
 
@@ -582,11 +583,11 @@ class TranslationMixin:
                 shutil.rmtree(out_dir, ignore_errors=True)
             except Exception:
                 pass
-        self.cancel_requested = True
+        self.app_state.cancel_requested = True
         return True
 
     def _process_zip_file(self, zip_path, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", modpack_path=None):
-        self.cancel_requested = False
+        self.app_state.cancel_requested = False
         self.toggle_buttons(False)
         self.update_progress(0)
 
@@ -837,8 +838,7 @@ class TranslationMixin:
                 shutil.copytree(out_dir, modpack_path, dirs_exist_ok=True)
                 self.log(f"💾 덮어쓰기 완료: {modpack_path}")
                 
-                import time
-                self.translated_history[modpack_path] = time.strftime("%Y-%m-%d %H:%M:%S")
+                self.app_state.translated_history[modpack_path] = time.strftime("%Y-%m-%d %H:%M:%S")
                 self.save_user_settings()
                 if hasattr(self, "scan_modpacks_from_entry"):
                     self.after(0, self.scan_modpacks_from_entry) # Refresh UI
@@ -934,11 +934,11 @@ class TranslationMixin:
                 self.log(f"💾 압축 저장 완료: {out_zip_path}")
                 
                 if modpack_path and apply_mode is False:
-                    import time
-                    self.translated_history[modpack_path] = time.strftime("%Y-%m-%d %H:%M:%S")
-                    self.save_user_settings()
-                    if hasattr(self, "scan_modpacks_from_entry"):
-                        self.after(0, self.scan_modpacks_from_entry) # Refresh UI
+                    if not self.is_cancelled():
+                        self.app_state.translated_history[modpack_path] = time.strftime("%Y-%m-%d %H:%M:%S")
+                        self.save_user_settings()
+                        if hasattr(self, "scan_modpacks_from_entry"):
+                            self.after(0, self.scan_modpacks_from_entry) # Refresh UI
 
                 self.show_messagebox("info", "완료", f"모든 작업이 완료되었습니다!\n\n저장 위치:\n{out_zip_path}")
                 shutil.rmtree(out_dir, ignore_errors=True)
@@ -958,3 +958,4 @@ class TranslationMixin:
             shutil.rmtree(raw_dir, ignore_errors=True)
             self._translation_out_dir = None
             self.toggle_buttons(True)
+
