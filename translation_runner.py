@@ -1,4 +1,4 @@
-﻿"""
+"""
 번역 실행 (단일 파일, ZIP, 모드팩) 관련 메서드 믹스인.
 """
 import os
@@ -7,6 +7,7 @@ import shutil
 import threading
 import tempfile
 import zipfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
