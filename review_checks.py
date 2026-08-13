@@ -5,6 +5,7 @@ from io import BytesIO
 from file_processors import extract_snbt_targets
 from hqm_parser import HQMQuestConverter, filter_text
 from translation_engines import is_code_or_id
+from constants import has_hangul
 
 
 def _normalize_text(text):
@@ -12,13 +13,6 @@ def _normalize_text(text):
         return ""
     return re.sub(r"\s+", " ", str(text)).strip()
 
-
-def _has_hangul(text):
-    for ch in str(text):
-        code = ord(ch)
-        if 0xAC00 <= code <= 0xD7A3:
-            return True
-    return False
 
 
 def _is_suspect_untranslated(source, translated):
@@ -30,7 +24,7 @@ def _is_suspect_untranslated(source, translated):
     if src == dst and re.search(r"[A-Za-z]", src):
         return True
 
-    if re.search(r"[A-Za-z]{4,}", src) and not _has_hangul(dst) and src == dst:
+    if re.search(r"[A-Za-z]{4,}", src) and not has_hangul(dst) and src == dst:
         return True
 
     return False

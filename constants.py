@@ -113,3 +113,28 @@ LANG_CODES = {
     "독일어 (German)": ("DE", "de", "natural German"),
     "프랑스어 (French)": ("FR", "fr", "natural French"),
 }
+
+
+def has_non_latin(text):
+    """텍스트에 비라틴 문자(한글, CJK, 키릴 등)가 포함되어 있는지 확인합니다.
+    이미 번역된 텍스트를 감지하는 데 사용됩니다."""
+    for ch in str(text):
+        code = ord(ch)
+        if 0xAC00 <= code <= 0xD7A3:  # Hangul
+            return True
+        if 0x3040 <= code <= 0x30FF:  # Hiragana / Katakana
+            return True
+        if 0x4E00 <= code <= 0x9FFF:  # CJK Unified
+            return True
+        if 0x0400 <= code <= 0x04FF:  # Cyrillic
+            return True
+    return False
+
+
+def has_hangul(text):
+    """텍스트에 한글이 포함되어 있는지 확인합니다."""
+    for ch in str(text):
+        code = ord(ch)
+        if 0xAC00 <= code <= 0xD7A3:
+            return True
+    return False

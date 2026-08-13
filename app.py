@@ -49,8 +49,26 @@ if ctk is not None and TkinterDnD is not None:
     class QuestTranslatorApp(UIScreensMixin, ModpackMixin, TranslationMixin, ctk.CTk, TkinterDnD.DnDWrapper):
         def __init__(self):
             super().__init__()
+            self._setup_logging()
             self.TkdndVersion = TkinterDnD._require(self)
             self._setup_ui()
+
+        def _setup_logging(self):
+            import logging
+            import datetime
+            appdata_dir = os.getenv("APPDATA") or os.path.expanduser("~")
+            log_dir = os.path.join(appdata_dir, "QuestTranslatorPro", "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            log_file = os.path.join(log_dir, f"quest_translator_{datetime.datetime.now().strftime('%Y%m%d')}.log")
+            
+            logging.basicConfig(
+                filename=log_file,
+                level=logging.INFO,
+                format='%(asctime)s - %(levelname)s - %(message)s',
+                encoding='utf-8'
+            )
+            logging.info("================ QuestTranslatorPro Started ================")
+
 
 
         # ====================================================================
@@ -572,8 +590,9 @@ if ctk is not None and TkinterDnD is not None:
                 }
                 with open(self.settings_path, "w", encoding="utf-8") as sf:
                     json.dump(settings, sf, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
+            except Exception as e:
+                import logging
+                logging.error(f"설정 저장 실패: {e}")
 
         def on_close(self):
             self.save_user_settings()

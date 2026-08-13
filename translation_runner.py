@@ -20,7 +20,6 @@ except Exception:
     filedialog = None
     messagebox = None
 
-FONT_NAME = "Malgun Gothic"
 
 
 from translation_engines import ENGINES, QuotaExceededError, TranslationCancelledError, translate_gemini_batch, translate_local_ai
@@ -32,26 +31,9 @@ from file_processors import (
 from review_checks import (
     analyze_hqm_bytes, analyze_json_data, analyze_snbt_texts, render_review_report,
 )
-from constants import FONT_NAME, TARGET_EXTENSIONS, SCAN_IGNORE_DIRS
+from constants import FONT_NAME, TARGET_EXTENSIONS, SCAN_IGNORE_DIRS, has_non_latin
 
 PROGRESS_FILE = "_progress.json"
-
-
-def _has_non_latin(text):
-    """Return True if text contains non-Latin characters (Hangul, CJK, Cyrillic, etc.)
-    indicating it may already be translated."""
-    for ch in str(text):
-        code = ord(ch)
-        if 0xAC00 <= code <= 0xD7A3:  # Hangul
-            return True
-        if 0x3040 <= code <= 0x30FF:  # Hiragana / Katakana
-            return True
-        if 0x4E00 <= code <= 0x9FFF:  # CJK Unified
-            return True
-        if 0x0400 <= code <= 0x04FF:  # Cyrillic
-            return True
-    return False
-
 
 def _load_progress(out_dir):
     """Load set of completed relative paths from progress file."""
@@ -251,7 +233,7 @@ class TranslationMixin:
 
             self.update_progress(1.0)
             self.log("\n✅ 모든 텍스트 번역 완료! 저장할 위치를 선택해주세요.")
-            save_dir = filedialog.askdirectory(title="번역된 파일을 저장할 폴더 선택")
+            save_dir = self._pick_dir_main("번역된 파일을 저장할 폴더 선택")
 
             if save_dir:
                 out_path = os.path.join(save_dir, file_name)
@@ -588,377 +570,123 @@ class TranslationMixin:
         self.app_state.cancel_requested = True
         return True
 
+    def _generate_zip_review_report(self, raw_dir, out_dir, report_title):
+        review_items = []
+        for root, _, files_list in os.walk(raw_dir):
+            for f in files_list:
+                rel_p = os.path.relpath(os.path.join(root, f), raw_dir)
+                src_path = os.path.join(raw_dir, rel_p)
+                dst_path = os.path.join(out_dir, rel_p)
+                if not os.path.exists(dst_path):
+                    continue
+                try:
+                    if f.lower().endswith('.snbt'):
+                        with open(src_path, 'r', encoding='utf-8', errors='ignore') as fh:
+                            src = fh.read()
+                        with open(dst_path, 'r', encoding='utf-8', errors='ignore') as fh:
+                            dst = fh.read()
+                        review_items.append((rel_p, analyze_snbt_texts(src, dst)))
+                    elif f.lower().endswith(('.json', '.lang')):
+                        with open(src_path, encoding='utf-8', errors='ignore') as fh:
+                            src = json.load(fh)
+                        with open(dst_path, encoding='utf-8', errors='ignore') as fh:
+                            dst = json.load(fh)
+                        review_items.append((rel_p, analyze_json_data(src, dst)))
+                    elif f.lower().endswith('.hqm'):
+                        with open(src_path, 'rb') as fh:
+                            src = fh.read()
+                        with open(dst_path, 'rb') as fh:
+                            dst = fh.read()
+                        review_items.append((rel_p, analyze_hqm_bytes(src, dst)))
+                except Exception as review_exc:
+                    self.log(f"⚠️ 검수 스킵 [{rel_p}]: {review_exc}")
+
+        if review_items:
+            report_text = render_review_report(report_title, review_items)
+            self.show_review_report(report_text)
+            self.log("🧪 검수 리포트가 결과창으로 표시되었습니다.")
+
     def _process_zip_file(self, zip_path, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", modpack_path=None):
         self.app_state.cancel_requested = False
         self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
         self.toggle_buttons(False)
         self.update_progress(0)
 
-        base_zip_name = os.path.basename(zip_path)
-        origin_dir = os.path.dirname(zip_path)
-        raw_dir = os.path.join(origin_dir, "_temp_raw")
+        from translation_core import TranslationUIContext, run_zip_translation_logic
+        from tkinter import filedialog
         
-        # --- Multi-backup Detection ---
-        # Look for folders containing PROGRESS_FILE in the same directory or temp directory
-        out_dir = os.path.join(origin_dir, "_temp_out")
-        completed_set = set()
-        resuming = False
-        
-        # Find potential resume candidate folders
-        candidates = []
-        # Case A: Default out_dir
-        if os.path.isfile(os.path.join(out_dir, PROGRESS_FILE)):
-            comp = _load_progress(out_dir)
-            if comp:
-                candidates.append({
-                    "path": out_dir,
-                    "name": "기본 임시 번역 폴더 (기본 기록)",
-                    "count": len(comp),
-                    "completed": comp
-                })
-        
-        # Case B: Other subfolders inside the original zip directory with valid progress files
-        if os.path.isdir(origin_dir):
-            for entry in os.scandir(origin_dir):
-                if entry.is_dir() and entry.name.startswith("_temp_out_") and entry.path != out_dir:
-                    prog_path = os.path.join(entry.path, PROGRESS_FILE)
-                    if os.path.isfile(prog_path):
-                        comp = _load_progress(entry.path)
-                        if comp:
-                            candidates.append({
-                                "path": entry.path,
-                                "name": f"임시 백업 폴더 ({entry.name})",
-                                "count": len(comp),
-                                "completed": comp
-                            })
-
-        if candidates:
-            if len(candidates) == 1:
-                # Only 1 candidate, ask single yes/no dialog
-                single = candidates[0]
-                if self._ask_main(
-                    '번역 재개',
-                    f"이전에 중단된 번역 기록이 발견되었습니다.\n'{single['name']}' ({single['count']}개 완료)에서 이어서 번역하시겠습니까?\n\n아니요: 처음부터 새로 시작합니다."
-                ):
-                    out_dir = single["path"]
-                    completed_set = single["completed"]
-                    resuming = True
-                    self.log(f"♻️ 이전 번역 이어서 시작: {single['name']} (완료된 파일 {len(completed_set)}개 건너뜀)")
-            else:
-                # Multiple candidates, show the list dialog
-                choice = self._ask_resume_backup_list(candidates)
-                if choice is None:
-                    # Cancelled
-                    self.log("⚠️ 번역 재개 선택이 취소되었습니다. 작업을 종료합니다.")
-                    self.toggle_buttons(True)
-                    return
-                elif choice == -1:
-                    # Start New
-                    resuming = False
-                    self.log("♻️ 새 번역으로 처음부터 시작합니다.")
+        class AppTranslationContext(TranslationUIContext):
+            def __init__(self, app):
+                self.app = app
+                
+            def log(self, message):
+                self.app.log(message)
+                
+            def set_status(self, text):
+                self.app.set_status(text)
+                
+            def update_progress(self, current, total=None):
+                self.app.update_progress(current, total)
+                
+            def is_cancelled(self):
+                return self.app.is_cancelled()
+                
+            def show_messagebox(self, type_, title, message):
+                self.app.show_messagebox(type_, title, message)
+                
+            def show_review_report(self, report_text):
+                self.app.show_review_report(report_text)
+                
+            def ask_resume(self, candidates, default_out_dir):
+                if not candidates:
+                    return default_out_dir, set(), False
+                    
+                if len(candidates) == 1:
+                    single = candidates[0]
+                    if self.app._ask_main('번역 재개', f"이전에 중단된 번역 기록이 발견되었습니다.\n'{single['name']}' ({single['count']}개 완료)에서 이어서 번역하시겠습니까?\n\n아니요: 처음부터 새로 시작합니다."):
+                        self.log(f"♻️ 이전 번역 이어서 시작: {single['name']} (완료된 파일 {len(single['completed'])}개 건너뜀)")
+                        return single["path"], single["completed"], True
+                    return default_out_dir, set(), False
                 else:
-                    # Chosen index
-                    chosen = candidates[choice]
-                    out_dir = chosen["path"]
-                    completed_set = chosen["completed"]
-                    resuming = True
-                    self.log(f"♻️ 이전 번역 이어서 시작: {chosen['name']} (완료된 파일 {len(completed_set)}개 건너뜀)")
-
-        self._translation_out_dir = out_dir
-
-        try:
-            # raw_dir 항상 새로 추출 (원본 보장), out_dir은 재개 시 보존
-            if os.path.exists(raw_dir):
-                shutil.rmtree(raw_dir)
-            if not resuming and os.path.exists(out_dir):
-                shutil.rmtree(out_dir)
-
-
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(raw_dir)
-
-            target_files = [
-                os.path.join(root, f)
-                for root, _, files in os.walk(raw_dir)
-                for f in files if f.lower().endswith(('.snbt', '.json', '.lang', '.hqm'))
-            ]
-            total_files = len(target_files)
-            if total_files == 0:
-                self.log("⚠️ 번역할 대상 파일을 찾을 수 없습니다.")
-                return
-
-            if engine_key == "gemini_batch":
-                mode_str = "[유료/초고속]" if is_paid else "[무료/안전대기]"
-            else:
-                mode_str = "[초고속]"
-            engine_label = next((name for name, key in ENGINES.items() if key == engine_key), engine_key)
-            self.log(f"\n🎯 총 {total_files}개 파일 압축 번역 시작... {mode_str}")
-            self.log(f"🧩 선택 옵션: 엔진={engine_label} / 모드={mode_str}")
-
-            jobs = []
-            skipped_no_targets = 0
-            skipped_bad_json = 0
-            skipped_translated = 0
-            skipped_resume = 0
-
-            for idx, file_path in enumerate(target_files, 1):
-                rel_path = os.path.relpath(file_path, raw_dir)
-                target_path = os.path.join(out_dir, rel_path)
-                os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                filename = os.path.basename(file_path)
-
-                # 재개: 이미 완료된 파일은 건너뜀
-                if rel_path in completed_set:
-                    skipped_resume += 1
-                    continue
-
-                if file_path.lower().endswith('.snbt'):
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                    if _has_non_latin(content):
-                        skipped_translated += 1
-                        shutil.copy2(file_path, target_path)
-                        completed_set.add(rel_path)
-                        _save_progress(out_dir, completed_set)
-                        continue
-                    lines, targets = extract_snbt_targets(content)
-                    if not targets:
-                        skipped_no_targets += 1
-                        shutil.copy2(file_path, target_path)
-                        completed_set.add(rel_path)
-                        _save_progress(out_dir, completed_set)
-                        continue
-                    jobs.append({"kind": "snbt", "target_path": target_path, "rel_path": rel_path,
-                                 "lines": lines, "targets": targets, "translated_map": {}})
-
-                elif file_path.lower().endswith('.hqm'):
-                    with open(file_path, 'rb') as f:
-                        hqm_content = f.read()
-                    if _has_non_latin(hqm_content.decode('utf-8', errors='ignore')):
-                        skipped_translated += 1
-                        shutil.copy2(file_path, target_path)
-                        completed_set.add(rel_path)
-                        _save_progress(out_dir, completed_set)
-                        continue
-                    self.set_status(f"🔄 [{idx}/{total_files}] [{filename}] HQM 바이너리 번역 중...")
-
-                    def hqm_progress_cb(current, total, _idx=idx, _fn=filename):
-                        base = (_idx - 1) / total_files
-                        inner = (current / total) / total_files if total > 0 else 0
-                        self.update_progress(base + inner)
-                        self.set_status(f"⏳ [{_idx}/{total_files}] [{_fn}] HQM 번역 중... [{current}/{total}]")
-
-                    try:
-                        translated_hqm = process_hqm_with_progress(
-                            hqm_content, engine_key, api_key, is_paid,
-                            progress_callback=hqm_progress_cb,
-                            log_callback=self.route_log, cancel_checker=self.is_cancelled, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang)
-                    except Exception as exc:
-                        self.log(f"⚠️ [{filename}] HQM 처리 경고: {exc}")
-                        translated_hqm = hqm_content
-                    with open(target_path, 'wb') as f:
-                        f.write(translated_hqm)
-                    self.log(f"✅ [{filename}] HQM 번역 완료")
-                    completed_set.add(rel_path)
-                    _save_progress(out_dir, completed_set)
-                    continue
-
-                elif file_path.lower().endswith(('.json', '.lang')):
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        try:
-                            data = json.load(f)
-                        except json.JSONDecodeError:
-                            skipped_bad_json += 1
-                            shutil.copy2(file_path, target_path)
-                            completed_set.add(rel_path)
-                            _save_progress(out_dir, completed_set)
-                            continue
-                    if _has_non_latin(json.dumps(data, ensure_ascii=False)):
-                        skipped_translated += 1
-                        with open(target_path, 'w', encoding='utf-8') as f:
-                            json.dump(data, f, ensure_ascii=False, indent=2)
-                        completed_set.add(rel_path)
-                        _save_progress(out_dir, completed_set)
-                        continue
-                    node_targets = []
-                    collect_json_targets(data, node_targets)
-                    if not node_targets:
-                        skipped_no_targets += 1
-                        with open(target_path, 'w', encoding='utf-8') as f:
-                            json.dump(data, f, ensure_ascii=False, indent=2)
-                        completed_set.add(rel_path)
-                        _save_progress(out_dir, completed_set)
-                        continue
-                    jobs.append({"kind": "json", "target_path": target_path, "rel_path": rel_path,
-                                 "data": data, "targets": node_targets})
-
-            if jobs:
-                def on_job_completed(job):
-                    if job["kind"] == "snbt":
-                        text = job.get("final_text") or rebuild_snbt(job["lines"], job["translated_map"])
-                        with open(job["target_path"], 'w', encoding='utf-8', newline='\n') as f:
-                            f.write(text)
+                    choice = self.app._ask_resume_backup_list(candidates)
+                    if choice is None:
+                        self.log("⚠️ 번역 재개 선택이 취소되었습니다. 작업을 종료합니다.")
+                        return None, set(), False
+                    elif choice == -1:
+                        self.log("♻️ 새 번역으로 처음부터 시작합니다.")
+                        return default_out_dir, set(), False
                     else:
-                        with open(job["target_path"], 'w', encoding='utf-8') as f:
-                            json.dump(job["data"], f, ensure_ascii=False, indent=2)
-                    completed_set.add(job["rel_path"])
-                    _save_progress(out_dir, completed_set)
+                        chosen = candidates[choice]
+                        self.log(f"♻️ 이전 번역 이어서 시작: {chosen['name']} (완료된 파일 {len(chosen['completed'])}개 건너뜀)")
+                        return chosen["path"], chosen["completed"], True
 
-                if engine_key == "gemini_batch" and is_paid:
-                    self._translate_jobs_parallel(jobs, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, on_job_completed=on_job_completed)
-                else:
-                    self._translate_jobs_sequential(jobs, engine_key, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, on_job_completed=on_job_completed)
+            def ask_save_dir(self):
+                return self.app._pick_dir_main(title="번역된 ZIP 저장 폴더 선택")
+                
+            def offer_partial_backup(self, out_dir, backup_name):
+                self.app._offer_partial_backup(out_dir, backup_name)
+                
+            def on_translation_success(self, modpack_path):
+                if not self.is_cancelled():
+                    self.app.app_state.translated_history[modpack_path] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    self.app.save_user_settings()
+                    if hasattr(self.app, "scan_modpacks_from_entry"):
+                        self.app.after(0, self.app.scan_modpacks_from_entry)
 
-            skip_parts = []
-            if skipped_resume:
-                skip_parts.append(f"재개 스킵 {skipped_resume}개")
-            if skipped_translated:
-                skip_parts.append(f"이미 번역됨 스킵 {skipped_translated}개")
-            if skipped_no_targets:
-                skip_parts.append(f"번역 대상 없음 {skipped_no_targets}개")
-            if skipped_bad_json:
-                skip_parts.append(f"JSON 오류 {skipped_bad_json}개")
-            if skip_parts:
-                self.log(f"ℹ️ 스캔 요약: {', '.join(skip_parts)} 건너뜀")
-
-            self.update_progress(1.0)
+        context = AppTranslationContext(self)
+        try:
+            # We already loaded glossary/reference_map before this thread started, or we load it here.
+            # In the original, it loaded it here or we can just load it here.
+            reference_map = self.app_state.glossaries_by_lang.get(target_lang, {})
+            glossary = self.app_state.glossaries_by_lang.get(target_lang, {})
             
-            if modpack_path:
-                self.log("\n🎉 모든 파일 번역 완료! 저장 및 적용 방식을 선택해주세요.")
-                apply_mode = messagebox.askyesnocancel(
-                    "번역 적용 방식 선택", 
-                    "모드팩 번역이 완료되었습니다!\n\n'예': 원본 모드팩에 번역본을 덮어쓰기 (즉시 적용)\n'아니요': ZIP 파일로 압축하여 저장 (백업)\n'취소': 아무 작업도 하지 않고 종료"
-                )
-            else:
-                self.log("\n🎉 모든 파일 번역 완료! 저장할 위치를 선택해주세요.")
-                apply_mode = False
 
-            if apply_mode is None:
-                self.log(f"⚠️ 저장 및 적용이 취소되었습니다. 임시 결과 폴더에 파일이 남아있습니다:\n{out_dir}")
-                return
-            elif apply_mode is True:
-                self.log(f"\n📦 원본 모드팩에 즉시 덮어쓰기 시작: {modpack_path}")
-                shutil.copytree(out_dir, modpack_path, dirs_exist_ok=True)
-                self.log(f"💾 덮어쓰기 완료: {modpack_path}")
-                
-                self.app_state.translated_history[modpack_path] = time.strftime("%Y-%m-%d %H:%M:%S")
-                self.save_user_settings()
-                if hasattr(self, "scan_modpacks_from_entry"):
-                    self.after(0, self.scan_modpacks_from_entry) # Refresh UI
-
-                # 검수 리포트 생성
-                review_items = []
-                for root, _, files_list in os.walk(raw_dir):
-                    for f in files_list:
-                        rel_p = os.path.relpath(os.path.join(root, f), raw_dir)
-                        src_path = os.path.join(raw_dir, rel_p)
-                        dst_path = os.path.join(out_dir, rel_p)
-                        if not os.path.exists(dst_path):
-                            continue
-                        try:
-                            if f.lower().endswith('.snbt'):
-                                with open(src_path, 'r', encoding='utf-8', errors='ignore') as fh:
-                                    src = fh.read()
-                                with open(dst_path, 'r', encoding='utf-8', errors='ignore') as fh:
-                                    dst = fh.read()
-                                review_items.append((rel_p, analyze_snbt_texts(src, dst)))
-                            elif f.lower().endswith(('.json', '.lang')):
-                                with open(src_path, encoding='utf-8', errors='ignore') as fh:
-                                    src = json.load(fh)
-                                with open(dst_path, encoding='utf-8', errors='ignore') as fh:
-                                    dst = json.load(fh)
-                                review_items.append((rel_p, analyze_json_data(src, dst)))
-                            elif f.lower().endswith('.hqm'):
-                                with open(src_path, 'rb') as fh:
-                                    src = fh.read()
-                                with open(dst_path, 'rb') as fh:
-                                    dst = fh.read()
-                                review_items.append((rel_p, analyze_hqm_bytes(src, dst)))
-                        except Exception as review_exc:
-                            self.log(f"⚠️ 검수 스킵 [{rel_p}]: {review_exc}")
-
-                if review_items:
-                    report_text = render_review_report("덮어쓰기 완료: 번역 검수 리포트", review_items)
-                    self.show_review_report(report_text)
-                    self.log("🧪 검수 리포트가 결과창으로 표시되었습니다.")
-
-                self.show_messagebox("info", "적용 완료", f"모드팩에 번역본이 성공적으로 덮어쓰기 되었습니다!\n\n적용 경로:\n{modpack_path}")
-                shutil.rmtree(out_dir, ignore_errors=True)
-                return
-
-            # ZIP으로 저장하는 로직 (apply_mode == False)
-            save_dir = filedialog.askdirectory(title="번역된 ZIP 저장 폴더 선택")
-
-            if save_dir:
-                out_zip_path = os.path.join(save_dir, base_zip_name)
-                with zipfile.ZipFile(out_zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_out:
-                    for root, _, files_list in os.walk(out_dir):
-                        for f in files_list:
-                            if f == PROGRESS_FILE:
-                                continue
-                            full_p = os.path.join(root, f)
-                            zip_out.write(full_p, os.path.relpath(full_p, out_dir))
-
-                review_items = []
-                for root, _, files_list in os.walk(raw_dir):
-                    for f in files_list:
-                        rel_p = os.path.relpath(os.path.join(root, f), raw_dir)
-                        src_path = os.path.join(raw_dir, rel_p)
-                        dst_path = os.path.join(out_dir, rel_p)
-                        if not os.path.exists(dst_path):
-                            continue
-                        try:
-                            if f.lower().endswith('.snbt'):
-                                with open(src_path, 'r', encoding='utf-8', errors='ignore') as fh:
-                                    src = fh.read()
-                                with open(dst_path, 'r', encoding='utf-8', errors='ignore') as fh:
-                                    dst = fh.read()
-                                review_items.append((rel_p, analyze_snbt_texts(src, dst)))
-                            elif f.lower().endswith(('.json', '.lang')):
-                                with open(src_path, encoding='utf-8', errors='ignore') as fh:
-                                    src = json.load(fh)
-                                with open(dst_path, encoding='utf-8', errors='ignore') as fh:
-                                    dst = json.load(fh)
-                                review_items.append((rel_p, analyze_json_data(src, dst)))
-                            elif f.lower().endswith('.hqm'):
-                                with open(src_path, 'rb') as fh:
-                                    src = fh.read()
-                                with open(dst_path, 'rb') as fh:
-                                    dst = fh.read()
-                                review_items.append((rel_p, analyze_hqm_bytes(src, dst)))
-                        except Exception as review_exc:
-                            self.log(f"⚠️ 검수 스킵 [{rel_p}]: {review_exc}")
-
-                if review_items:
-                    report_text = render_review_report("ZIP 번역 검수 리포트", review_items)
-                    self.show_review_report(report_text)
-                    self.log("🧪 검수 리포트가 결과창으로 표시되었습니다.")
-
-                self.log(f"💾 압축 저장 완료: {out_zip_path}")
-                
-                if modpack_path and apply_mode is False:
-                    if not self.is_cancelled():
-                        self.app_state.translated_history[modpack_path] = time.strftime("%Y-%m-%d %H:%M:%S")
-                        self.save_user_settings()
-                        if hasattr(self, "scan_modpacks_from_entry"):
-                            self.after(0, self.scan_modpacks_from_entry) # Refresh UI
-
-                self.show_messagebox("info", "완료", f"모든 작업이 완료되었습니다!\n\n저장 위치:\n{out_zip_path}")
-                shutil.rmtree(out_dir, ignore_errors=True)
-            else:
-                self.log(f"⚠️ 저장 폴더 선택이 취소되었습니다. 번역 결과는 여기 남아있습니다:\n{out_dir}")
-
-        except TranslationCancelledError as e:
-            self.log(f"\n🛑 {str(e)}")
-            self._offer_partial_backup(out_dir, os.path.splitext(base_zip_name)[0] + '_partial.zip')
-        except QuotaExceededError as e:
-            self.log(f"\n🛑 [중단] {str(e)}")
-            self._offer_partial_backup(out_dir, os.path.splitext(base_zip_name)[0] + '_partial.zip')
-        except Exception as e:
-            self.log(f"\n❌ 오류 발생: {str(e)}")
-            self._offer_partial_backup(out_dir, os.path.splitext(base_zip_name)[0] + '_partial.zip')
+            run_zip_translation_logic(
+                context, zip_path, engine_key, api_key, is_paid, ai_model, target_lang, modpack_path,
+                apply_mode=getattr(self, "apply_mode", False) if modpack_path else False,
+                reference_map=reference_map, glossary=glossary
+            )
         finally:
-            shutil.rmtree(raw_dir, ignore_errors=True)
             self._translation_out_dir = None
             self.toggle_buttons(True)
 

@@ -49,8 +49,8 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                 if log_callback:
                     log_callback(f"⏳ {log_prefix} (병렬) [{completed_items}/{total}]")
     else:
-        batch_size = 5
-        sleep_sec = 6.5
+        batch_size = 15
+        sleep_sec = 4.5
         for i in range(0, total, batch_size):
             if cancel_checker and cancel_checker():
                 raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")

@@ -20,13 +20,13 @@ except Exception:
     messagebox = None
 
 try:
-    Image = importlib.import_module("PIL.Image")
-    ImageTk = importlib.import_module("PIL.ImageTk")
+    from PIL import Image, ImageTk, ImageOps
 except Exception:
     Image = None
     ImageTk = None
+    ImageOps = None
 
-from constants import FONT_NAME, TARGET_EXTENSIONS, SCAN_IGNORE_DIRS
+from constants import FONT_NAME, TARGET_EXTENSIONS, SCAN_IGNORE_DIRS, has_non_latin
 
 SCAN_EXCLUDE_CANDIDATE_DIRS = {'translation_output', 'install'}
 THUMBNAIL_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico")
@@ -56,11 +56,8 @@ class ModpackMixin:
                                 try:
                                     with open(os.path.join(root, filename), 'r', encoding='utf-8', errors='ignore') as f:
                                         content = f.read(8192)
-                                        for ch in content:
-                                            code = ord(ch)
-                                            if (0xAC00 <= code <= 0xD7A3) or (0x3040 <= code <= 0x30FF) or (0x4E00 <= code <= 0x9FFF) or (0x0400 <= code <= 0x04FF):
-                                                already_translated = True
-                                                break
+                                        if has_non_latin(content):
+                                            already_translated = True
                                     sample_scanned += 1
                                 except Exception:
                                     pass
@@ -543,8 +540,10 @@ class ModpackMixin:
                 pil_image = Image.open(image_path).convert("RGBA")
                 resample_mode = getattr(Image, "Resampling", Image).LANCZOS
                 try:
-                    ImageOps = importlib.import_module("PIL.ImageOps")
-                    pil_image = ImageOps.fit(pil_image, (max_size, max_size), method=resample_mode)
+                    if ImageOps is not None:
+                        pil_image = ImageOps.fit(pil_image, (max_size, max_size), method=resample_mode)
+                    else:
+                        pil_image.thumbnail((max_size, max_size), resample_mode)
                 except Exception:
                     pil_image.thumbnail((max_size, max_size), resample_mode)
                 return ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=pil_image.size)

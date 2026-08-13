@@ -155,7 +155,9 @@ def _translate_google_request(text, target_lang="한국어 (Korean)"):
         _google_cache[cache_key] = result
 
         return result
-    except Exception:
+    except Exception as e:
+        import logging
+        logging.warning(f"Google Translate failed for text '{text[:30]}...': {e}")
         return text
 
 

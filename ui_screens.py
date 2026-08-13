@@ -189,6 +189,10 @@ class UIScreensMixin:
     # ====================================================================
 
     def log(self, message):
+        import logging
+        if message and not message.startswith("⏳"):
+            logging.info(message)
+            
         if threading.current_thread() is not threading.main_thread():
             self.after(0, lambda: self.log(message))
             return
@@ -475,23 +479,26 @@ class UIScreensMixin:
             self.show_btn.configure(text="보기")
 
     def toggle_buttons(self, state):
-        btn_state = "normal" if state else "disabled"
-        cancel_state = "disabled" if state else "normal"
+        def _toggle():
+            btn_state = "normal" if state else "disabled"
+            cancel_state = "disabled" if state else "normal"
 
-        for attr in ("btn_single", "btn_zip", "btn_pick_instance_root", "btn_auto_detect_root",
-                     "btn_rescan_modpacks", "btn_open_translate_options", "btn_translate_selected_modpack",
-                     "btn_back_to_select", "btn_back_from_quick"):
-            if hasattr(self, attr):
-                getattr(self, attr).configure(state=btn_state)
+            for attr in ("btn_single", "btn_zip", "btn_pick_instance_root", "btn_auto_detect_root",
+                         "btn_rescan_modpacks", "btn_open_translate_options", "btn_translate_selected_modpack",
+                         "btn_back_to_select", "btn_back_from_quick"):
+                if hasattr(self, attr):
+                    getattr(self, attr).configure(state=btn_state)
 
-        if hasattr(self, "btn_go_translate"):
-            if state and not self.selected_modpack_path:
-                self.btn_go_translate.configure(state="disabled")
-            else:
-                self.btn_go_translate.configure(state=btn_state)
+            if hasattr(self, "btn_go_translate"):
+                if state and getattr(self, "selected_modpack_path", None) is None:
+                    self.btn_go_translate.configure(state="disabled")
+                else:
+                    self.btn_go_translate.configure(state=btn_state)
 
-        if hasattr(self, "btn_cancel"):
-            self.btn_cancel.configure(state=cancel_state)
+            if hasattr(self, "btn_cancel"):
+                self.btn_cancel.configure(state=cancel_state)
+        
+        self.after(0, _toggle)
 
     def validate_inputs(self):
         engine_name = self.engine_combo.get()
