@@ -1,4 +1,4 @@
-﻿"""
+"""
 Quest Translator Pro - 메인 진입점
 UI 구성(_setup_ui)과 생명주기 메서드만 담고,
 나머지 기능은 Mixin 파일에서 상속받습니다.
@@ -12,6 +12,13 @@ UI 구성(_setup_ui)과 생명주기 메서드만 담고,
 
 import os
 import json
+import sys
+
+# PyInstaller noconsole 모드에서 stdout/stderr이 없을 때 발생하는 크래시 방지
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
 
 try:
     import customtkinter as ctk

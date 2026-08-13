@@ -1,11 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
 
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.')],
+    datas=[('icon.ico', '.')] + collect_data_files('tkinterdnd2') + collect_data_files('customtkinter'),
     hiddenimports=[
         'ui_screens',
         'modpack_manager',
