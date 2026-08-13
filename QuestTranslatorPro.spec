@@ -18,6 +18,8 @@ a = Analysis(
         'customtkinter',
         'tkinterdnd2',
         'PIL',
+        'google.genai',
+        'deep_translator',
     ],
     hookspath=[],
     hooksconfig={},
