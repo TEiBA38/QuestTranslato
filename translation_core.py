@@ -121,25 +121,29 @@ def _generate_zip_review_report(context, raw_dir, out_dir, report_title):
 
 def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_key, api_key, is_paid, ai_model, target_lang, modpack_path, apply_mode, reference_map, glossary):
     base_zip_name = os.path.basename(zip_path)
+    base_no_ext = os.path.splitext(base_zip_name)[0]
     origin_dir = os.path.dirname(zip_path)
-    raw_dir = os.path.join(origin_dir, "_temp_raw")
-    out_dir = os.path.join(origin_dir, "_temp_out")
+    
+    # 모드팩(ZIP) 이름별로 고유한 임시 폴더 경로 생성
+    raw_dir = os.path.join(origin_dir, f"_temp_raw_{base_no_ext}")
+    out_dir = os.path.join(origin_dir, f"_temp_out_{base_no_ext}")
     
     # 1. Resume detection
     candidates = []
     if os.path.isfile(os.path.join(out_dir, PROGRESS_FILE)):
         comp = _load_progress(out_dir)
         if comp:
-            candidates.append({"path": out_dir, "name": "기본 임시 번역 폴더 (기본 기록)", "count": len(comp), "completed": comp})
+            candidates.append({"path": out_dir, "name": f"이전 번역 백업 ({base_no_ext})", "count": len(comp), "completed": comp})
     
+    # 예전 방식(_temp_out_ 백업)이 남아있을 수 있으므로 호환성을 위해 스캔하되, 현재 이름이 포함된 경우만 추가
     if os.path.isdir(origin_dir):
         for entry in os.scandir(origin_dir):
-            if entry.is_dir() and entry.name.startswith("_temp_out_") and entry.path != out_dir:
+            if entry.is_dir() and entry.name.startswith(f"_temp_out_{base_no_ext}_") and entry.path != out_dir:
                 prog_path = os.path.join(entry.path, PROGRESS_FILE)
                 if os.path.isfile(prog_path):
                     comp = _load_progress(entry.path)
                     if comp:
-                        candidates.append({"path": entry.path, "name": f"임시 백업 폴더 ({entry.name})", "count": len(comp), "completed": comp})
+                        candidates.append({"path": entry.path, "name": f"임시 백업 ({entry.name})", "count": len(comp), "completed": comp})
 
     out_dir, completed_set, resuming = context.ask_resume(candidates, out_dir)
     if out_dir is None:
