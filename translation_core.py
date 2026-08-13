@@ -286,17 +286,30 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                 else:
                     context.app._translate_jobs_sequential(jobs, engine_key, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, on_job_completed=on_job_completed)
 
+        if modpack_path:
+            context.log("\n🎉 모든 번역 완료! 저장 및 적용 방식을 선택해주세요.")
+            apply_mode = context.ask_apply_mode()
+        else:
+            context.log("\n🎉 모든 번역 완료! 저장할 위치를 선택해주세요.")
+            apply_mode = False
+
+        if apply_mode is None:
+            context.log(f"⚠️ 저장 및 적용이 취소되었습니다. 임시 결과 폴더에 파일이 남아있습니다:\n{out_dir}")
+            return
+
         if apply_mode is True:
             context.log(f"\n📦 원본 모드팩에 즉시 덮어쓰기 시작: {modpack_path}")
             shutil.copytree(out_dir, modpack_path, dirs_exist_ok=True)
             context.log(f"💾 덮어쓰기 완료: {modpack_path}")
-            context.on_translation_success(modpack_path)
             
             _generate_zip_review_report(context, raw_dir, out_dir, "덮어쓰기 완료: 번역 검수 리포트")
             context.show_messagebox("info", "적용 완료", f"모드팩에 번역본이 성공적으로 덮어쓰기 되었습니다!\n\n적용 경로:\n{modpack_path}")
+            
+            context.on_translation_success(modpack_path)
             shutil.rmtree(out_dir, ignore_errors=True)
             return
 
+        # apply_mode is False -> Save as ZIP
         save_dir = context.ask_save_dir()
         if save_dir:
             out_zip_path = os.path.join(save_dir, base_zip_name)

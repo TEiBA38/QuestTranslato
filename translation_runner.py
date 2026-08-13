@@ -660,6 +660,20 @@ class TranslationMixin:
                         self.log(f"♻️ 이전 번역 이어서 시작: {chosen['name']} (완료된 파일 {len(chosen['completed'])}개 건너뜀)")
                         return chosen["path"], chosen["completed"], True
 
+            def ask_apply_mode(self):
+                result = [None]
+                ev = threading.Event()
+                def _run():
+                    from tkinter import messagebox
+                    result[0] = messagebox.askyesnocancel(
+                        "번역 적용 방식 선택", 
+                        "모드팩 번역이 완료되었습니다!\n\n'예': 원본 모드팩에 번역본을 덮어쓰기 (즉시 적용)\n'아니요': ZIP 파일로 압축하여 저장 (백업)\n'취소': 아무 작업도 하지 않고 종료"
+                    )
+                    ev.set()
+                self.app.after(0, _run)
+                ev.wait()
+                return result[0]
+
             def ask_save_dir(self):
                 return self.app._pick_dir_main(title="번역된 ZIP 저장 폴더 선택")
                 
