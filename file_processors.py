@@ -13,10 +13,10 @@ from translation_engines import (
     translate_google,
     translate_openai,
     translate_gemini_batch,
+    translate_local_ai,
 )
 
-
-def _run_gemini_batch_jobs(items, text_extractor, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary=None, ai_model=None, target_lang="한국어 (Korean)", log_prefix="Gemini API 번역 진행 중"):
+def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary=None, ai_model=None, target_lang="한국어 (Korean)", log_prefix="API 번역 진행 중"):
     total = len(items)
     translated_results = [None] * total
 
@@ -62,7 +62,10 @@ def _run_gemini_batch_jobs(items, text_extractor, api_key, is_paid, log_callback
             if log_callback:
                 log_callback(f"⏳ {log_prefix}... [{current_count}/{total}]")
 
-            res_texts = translate_gemini_batch(texts, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
+            if engine_key == "local_ai":
+                res_texts = translate_local_ai(texts, api_key, ai_model, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, target_lang=target_lang)
+            else:
+                res_texts = translate_gemini_batch(texts, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
             
             for offset, res in enumerate(res_texts):
                 translated_results[i + offset] = res
@@ -182,12 +185,14 @@ def process_snbt_with_progress(content, engine_key, api_key, is_paid=False, prog
 
     translated_map = {}
 
-    if engine_key == "gemini_batch":
-        translated_texts = _run_gemini_batch_jobs(
+    if engine_key in ("gemini_batch", "local_ai"):
+        log_pref = "초고속 SNBT 번역" if is_paid else "SNBT 번역"
+        if engine_key == "local_ai": log_pref = "Local AI SNBT 번역"
+        translated_texts = _run_batch_jobs(
             targets,
             lambda item: item[2].replace('\\"', '"'),
-            api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
-            log_prefix="초고속 SNBT 번역" if is_paid else "SNBT 번역"
+            engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
+            log_prefix=log_pref
         )
         for (line_idx, prefix, _, suffix), trans_text in zip(targets, translated_texts):
             final_text = str(trans_text).replace('"', '\\"')
@@ -256,12 +261,14 @@ def process_json_safely(node, engine_key, api_key, is_paid=False, progress_callb
     if log_callback and verbose:
         log_callback(f"✅ 분석 완료! 총 {len(targets)}개의 JSON 노드를 감지했습니다. 번역을 시작합니다...")
 
-    if engine_key == "gemini_batch":
-        translated_texts = _run_gemini_batch_jobs(
+    if engine_key in ("gemini_batch", "local_ai"):
+        log_pref = "초고속 다국어 번역" if is_paid else "다국어 번역"
+        if engine_key == "local_ai": log_pref = "Local AI 다국어 번역"
+        translated_texts = _run_batch_jobs(
             targets,
             lambda item: item[2],
-            api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
-            log_prefix="초고속 JSON 번역" if is_paid else "JSON 번역"
+            engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
+            log_prefix=log_pref
         )
         for (parent_node, key, _), trans_text in zip(targets, translated_texts):
             parent_node[key] = trans_text
@@ -386,10 +393,10 @@ def _translate_hqm_texts(targets, engine_key, api_key, is_paid, progress_callbac
         return []
 
     if engine_key == "gemini_batch":
-        res_texts = _run_gemini_batch_jobs(
+        res_texts = _run_batch_jobs(
             targets,
             lambda item: item["text"],
-            api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
+            engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
             log_prefix="초고속 HQM 번역" if is_paid else "HQM 번역"
         )
         translated = [str(res or item["text"]) for item, res in zip(targets, res_texts)]
@@ -440,14 +447,17 @@ def _translate_hqm_texts_entries(entries, engine_key, api_key, is_paid, progress
     if total == 0:
         return translated_texts
 
-    if engine_key == "gemini_batch":
-        res_texts = _run_gemini_batch_jobs(
+    if engine_key in ("gemini_batch", "local_ai"):
+        log_pref = "초고속 HQM 텍스트 덩어리 번역" if is_paid else "HQM 텍스트 번역"
+        if engine_key == "local_ai": log_pref = "Local AI HQM 텍스트 번역"
+        res_texts = _run_batch_jobs(
             entries,
             lambda entry: entry.value,
-            api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
-            log_prefix="초고속 HQM 번역" if is_paid else "HQM 번역"
+            engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
+            log_prefix=log_pref
         )
         translated_texts.extend([str(res or entry.value) for entry, res in zip(entries, res_texts)])
+        return translated_texts
     else:
         for count, entry in enumerate(entries, 1):
             if cancel_checker and cancel_checker():

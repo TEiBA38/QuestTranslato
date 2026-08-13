@@ -362,11 +362,15 @@ if ctk is not None and TkinterDnD is not None:
             self.engine_combo.pack(fill="x", padx=12, pady=(0, 8))
             self.engine_combo.set("Gemini Lite (배치 번역)")
 
-            ctk.CTkLabel(config_frame, text="Gemini 계정 상태",
+            # --- Standard API Frame ---
+            self.standard_api_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
+            self.standard_api_frame.pack(fill="x")
+
+            ctk.CTkLabel(self.standard_api_frame, text="Gemini 계정 상태",
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                          text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
 
-            self.plan_combo = ctk.CTkComboBox(config_frame,
+            self.plan_combo = ctk.CTkComboBox(self.standard_api_frame,
                                               values=["유료 계정 (Pay-as-you-go / 초고속 / 제한없음)",
                                                       "무료 계정 (안전대기 / 10 RPM 속도제한)"],
                                               font=ctk.CTkFont(family=FONT_NAME, size=12),
@@ -375,23 +379,23 @@ if ctk is not None and TkinterDnD is not None:
             self.plan_combo.pack(fill="x", padx=12, pady=(0, 8))
             self.plan_combo.set("유료 계정 (Pay-as-you-go / 초고속 / 제한없음)")
 
-            self.model_label = ctk.CTkLabel(config_frame, text="AI 모델 선택",
+            self.model_label = ctk.CTkLabel(self.standard_api_frame, text="AI 모델 선택",
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                          text_color="#cbd5e1")
             self.model_label.pack(anchor="w", padx=12, pady=(2, 2))
 
-            self.model_combo = ctk.CTkComboBox(config_frame,
+            self.model_combo = ctk.CTkComboBox(self.standard_api_frame,
                                               values=MODELS_GEMINI_PAID,
                                               font=ctk.CTkFont(family=FONT_NAME, size=12),
                                               fg_color="#27272a", button_color="#b45309", button_hover_color="#d97706")
             self.model_combo.pack(fill="x", padx=12, pady=(0, 8))
             self.model_combo.set(MODELS_GEMINI_PAID[0])
 
-            ctk.CTkLabel(config_frame, text="API 키",
+            ctk.CTkLabel(self.standard_api_frame, text="API 키",
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                          text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
 
-            api_row = ctk.CTkFrame(config_frame, fg_color="transparent")
+            api_row = ctk.CTkFrame(self.standard_api_frame, fg_color="transparent")
             api_row.pack(fill="x", padx=12, pady=(0, 10))
 
             self.api_entry = ctk.CTkEntry(api_row, show="*", placeholder_text="API 키를 입력하세요",
@@ -405,6 +409,30 @@ if ctk is not None and TkinterDnD is not None:
                                           fg_color="#3f3f46", hover_color="#52525b",
                                           command=self.toggle_api_visibility)
             self.show_btn.pack(side="right")
+
+            # --- Local API Frame ---
+            self.local_api_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
+            # Initially not packed!
+
+            ctk.CTkLabel(self.local_api_frame, text="로컬 API 주소 (Base URL)",
+                         font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                         text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
+            
+            self.local_url_entry = ctk.CTkEntry(self.local_api_frame, placeholder_text="예: http://localhost:11434/v1",
+                                          font=ctk.CTkFont(family=FONT_NAME, size=12),
+                                          fg_color="#111113", border_color="#52525b")
+            self.local_url_entry.pack(fill="x", padx=12, pady=(0, 8))
+            self.local_url_entry.bind("<FocusOut>", lambda _e: self.save_user_settings())
+
+            ctk.CTkLabel(self.local_api_frame, text="로컬 모델 이름",
+                         font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                         text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
+            
+            self.local_model_entry = ctk.CTkEntry(self.local_api_frame, placeholder_text="예: llama3.1",
+                                          font=ctk.CTkFont(family=FONT_NAME, size=12),
+                                          fg_color="#111113", border_color="#52525b")
+            self.local_model_entry.pack(fill="x", padx=12, pady=(0, 10))
+            self.local_model_entry.bind("<FocusOut>", lambda _e: self.save_user_settings())
 
             self.btn_translate_selected_modpack = ctk.CTkButton(
                 config_frame, text="선택 모드팩 자동 번역",
@@ -482,6 +510,16 @@ if ctk is not None and TkinterDnD is not None:
                 self.api_entry.delete(0, "end")
                 self.api_entry.insert(0, saved_api_key)
             
+            saved_local_url = settings.get("local_url", "")
+            if saved_local_url:
+                self.local_url_entry.delete(0, "end")
+                self.local_url_entry.insert(0, saved_local_url)
+            
+            saved_local_model = settings.get("local_model", "")
+            if saved_local_model:
+                self.local_model_entry.delete(0, "end")
+                self.local_model_entry.insert(0, saved_local_model)
+            
             saved_model = settings.get("ai_model", "")
             if saved_model:
                 self.model_combo.set(saved_model)
@@ -523,6 +561,8 @@ if ctk is not None and TkinterDnD is not None:
                 settings = {
                     "instance_root": self.instance_path_entry.get().strip(),
                     "api_key": self.api_entry.get().strip(),
+                    "local_url": self.local_url_entry.get().strip(),
+                    "local_model": self.local_model_entry.get().strip(),
                     "ai_model": self.model_combo.get(),
                     "target_lang": self.target_lang_combo.get(),
                     "engine_name": self.engine_combo.get(),

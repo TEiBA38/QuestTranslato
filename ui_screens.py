@@ -345,6 +345,15 @@ class UIScreensMixin:
                     self.model_combo.set(MODELS_GEMINI_PAID[0])
 
     def on_engine_change(self, choice):
+        if "Local AI" in choice:
+            self.standard_api_frame.pack_forget()
+            self.local_api_frame.pack(fill="x", before=self.btn_translate_selected_modpack)
+            self.log("💡 로컬 AI (Ollama/LM Studio 등) 주소와 모델명을 입력해주세요.")
+            return
+
+        self.local_api_frame.pack_forget()
+        self.standard_api_frame.pack(fill="x", before=self.btn_translate_selected_modpack)
+
         if choice == "Google Translate":
             self.api_entry.configure(state="disabled")
             self.show_btn.configure(state="disabled")
@@ -487,13 +496,24 @@ class UIScreensMixin:
     def validate_inputs(self):
         engine_name = self.engine_combo.get()
         engine_key = ENGINES.get(engine_name)
+
+        self.save_user_settings()
+
+        if engine_key == "local_ai":
+            local_url = self.local_url_entry.get().strip()
+            local_model = self.local_model_entry.get().strip()
+            if not local_url or not local_model:
+                messagebox.showwarning("경고", "로컬 API 주소와 모델명을 모두 입력해주세요.")
+                return None, None, False, None, None
+            target_lang = self.target_lang_combo.get()
+            return engine_key, local_url, False, local_model, target_lang
+
         api_key = self.api_entry.get().strip()
 
         if engine_key != "google" and not api_key:
             messagebox.showwarning("경고", f"{engine_name} 사용을 위해 API 키를 입력해주세요.")
             return None, None, False, None, None
 
-        self.save_user_settings()
         is_paid = "유료" in self.plan_combo.get()
         ai_model = self.model_combo.get()
         target_lang = self.target_lang_combo.get()

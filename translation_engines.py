@@ -329,8 +329,116 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
     return [item if item is not None else text for item, text in zip(resolved, text_list)]
 
 
+def translate_local_ai(text_list, base_url, model_name, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, target_lang="한국어 (Korean)"):
+    if not text_list:
+        return []
+
+    resolved = []
+    unresolved_indices = []
+    unresolved_raw = []
+
+    for text in text_list:
+        cached = get_reference_translation(text, reference_map)
+        if cached is not None:
+            resolved.append(cached)
+        else:
+            # We don't cache local AI calls aggressively to save memory, as it's free anyway
+            # but we could use _gemini_cache for simplicity if we wanted. Let's just use it.
+            cache_key = (text, target_lang)
+            with _gemini_cache_lock:
+                cached_local = _gemini_cache.get(cache_key)
+            if cached_local is not None:
+                resolved.append(cached_local)
+            else:
+                resolved.append(None)
+                unresolved_indices.append(len(resolved) - 1)
+                unresolved_raw.append(text)
+
+    if not unresolved_raw:
+        return resolved
+
+    unique_unresolved = []
+    unique_map = {}
+    unresolved_to_unique = []
+    for text in unresolved_raw:
+        pos = unique_map.get(text)
+        if pos is None:
+            pos = len(unique_unresolved)
+            unique_map[text] = pos
+            unique_unresolved.append(text)
+        unresolved_to_unique.append(pos)
+
+    input_json = json.dumps(unique_unresolved, ensure_ascii=False)
+    target_prompt = LANG_CODES.get(target_lang, ("KO", "ko", "natural Korean"))[2]
+    
+    system_prompt = (
+        f"Translate the input JSON array from English to {target_prompt} for Minecraft quests.\n"
+        "Rules:\n"
+        "- Return ONLY a valid JSON array (no explanation, no markdown).\n"
+        "- Keep array order and length exactly the same.\n"
+        "- Preserve formatting/placeholders exactly (&a, §c, {{color:...}}, %s, {{0}}, <...>).\n"
+    )
+    if glossary:
+        glossary_text = ", ".join([f"'{k}' as '{v}'" for k, v in glossary.items()])
+        system_prompt += f"- Glossary (Strictly replace these words): {glossary_text}\n"
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Input JSON: {input_json}"}
+    ]
+    
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": 0.1
+    }
+    
+    headers = {"Content-Type": "application/json"}
+    
+    url = base_url.strip().rstrip("/")
+    if not url.endswith("/chat/completions"):
+        url += "/chat/completions"
+
+    try:
+        if cancel_checker and cancel_checker():
+            raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+            
+        response = requests.post(url, headers=headers, json=payload, timeout=300)
+        response.raise_for_status()
+        data = response.json()
+        raw_text = data['choices'][0]['message']['content'].strip()
+        
+        match = re.search(r'\[.*\]', raw_text, re.DOTALL)
+        if match:
+            raw_text = match.group(0)
+            
+        translated_array = json.loads(raw_text)
+        if isinstance(translated_array, list) and len(translated_array) == len(unique_unresolved):
+            with _gemini_cache_lock:
+                if len(_gemini_cache) >= _GEMINI_CACHE_MAX:
+                    _gemini_cache.clear()
+                for src, dst in zip(unique_unresolved, translated_array):
+                    _gemini_cache[(src, target_lang)] = str(dst)
+
+            merged = list(resolved)
+            for original_pos, resolved_idx in enumerate(unresolved_indices):
+                unique_pos = unresolved_to_unique[original_pos]
+                merged[resolved_idx] = translated_array[unique_pos]
+            return merged
+            
+        if log_callback:
+            log_callback("⚠️ [응답 파싱 실패] 로컬 AI 응답이 올바른 JSON 형식이 아니어 원문으로 대체됩니다.")
+        return [item if item is not None else text for item, text in zip(resolved, text_list)]
+
+    except Exception as e:
+        if log_callback:
+            log_callback(f"⚠️ [통신/파싱 에러] 로컬 AI 호출 실패: {str(e)}")
+        return [item if item is not None else text for item, text in zip(resolved, text_list)]
+
+
 ENGINES = {
     "Gemini Lite (배치 번역)": "gemini_batch",
+    "Local AI (Ollama/LM Studio 등)": "local_ai",
     "DeepL": "deepl",
     "Google Translate": "google",
     "OpenAI": "openai",

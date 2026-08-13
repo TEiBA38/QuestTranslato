@@ -23,7 +23,7 @@ except Exception:
 FONT_NAME = "Malgun Gothic"
 
 
-from translation_engines import ENGINES, QuotaExceededError, TranslationCancelledError, translate_gemini_batch
+from translation_engines import ENGINES, QuotaExceededError, TranslationCancelledError, translate_gemini_batch, translate_local_ai
 from file_processors import (
     collect_json_targets, extract_snbt_targets,
     process_hqm_with_progress, process_json_safely,
