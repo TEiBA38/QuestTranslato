@@ -334,12 +334,12 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
 
     except TranslationCancelledError as e:
         context.log(f"\n🛑 {str(e)}")
-        context.offer_partial_backup(out_dir, os.path.splitext(base_zip_name)[0] + '_partial.zip')
+        context.offer_partial_backup(out_dir, os.path.splitext(base_zip_name)[0] + '_partial.zip', error_msg="사용자에 의해 번역 작업이 중단되었습니다.")
     except QuotaExceededError as e:
         context.log(f"\n🛑 [중단] {str(e)}")
-        context.offer_partial_backup(out_dir, os.path.splitext(base_zip_name)[0] + '_partial.zip')
+        context.offer_partial_backup(out_dir, os.path.splitext(base_zip_name)[0] + '_partial.zip', error_msg=str(e))
     except Exception as e:
         context.log(f"\n❌ 오류 발생: {str(e)}")
-        context.offer_partial_backup(out_dir, os.path.splitext(base_zip_name)[0] + '_partial.zip')
+        context.offer_partial_backup(out_dir, os.path.splitext(base_zip_name)[0] + '_partial.zip', error_msg=f"오류가 발생했습니다:\n{str(e)}")
     finally:
         shutil.rmtree(raw_dir, ignore_errors=True)

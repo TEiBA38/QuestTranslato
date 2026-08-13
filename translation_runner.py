@@ -501,11 +501,12 @@ class TranslationMixin:
         ev.wait()
         return result[0]
 
-    def _offer_partial_backup(self, out_dir, partial_name):
+    def _offer_partial_backup(self, out_dir, partial_name, error_msg=None):
         """After cancel/error, ask user if they want to backup and preserve records.
         Yes -> Save backup zip and keep out_dir (can resume later).
         No -> Clean up/delete the out_dir (do not save, clean up state)."""
         if not os.path.exists(out_dir):
+            if error_msg: self.show_messagebox("warning", "중단됨", error_msg)
             return
         has_data = any(
             fname != PROGRESS_FILE
@@ -517,6 +518,7 @@ class TranslationMixin:
                 shutil.rmtree(out_dir, ignore_errors=True)
             except Exception:
                 pass
+            if error_msg: self.show_messagebox("warning", "중단됨", error_msg)
             return
 
         if self._ask_main(
@@ -677,8 +679,8 @@ class TranslationMixin:
             def ask_save_dir(self):
                 return self.app._pick_dir_main(title="번역된 ZIP 저장 폴더 선택")
                 
-            def offer_partial_backup(self, out_dir, backup_name):
-                self.app._offer_partial_backup(out_dir, backup_name)
+            def offer_partial_backup(self, out_dir, backup_name, error_msg=None):
+                self.app._offer_partial_backup(out_dir, backup_name, error_msg)
                 
             def on_translation_success(self, modpack_path):
                 if not self.is_cancelled():
