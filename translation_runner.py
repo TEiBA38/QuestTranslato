@@ -295,43 +295,60 @@ class TranslationMixin:
                          args=(zip_path, engine_key, api_key, is_paid, ai_model, target_lang), daemon=True).start()
 
     def _translate_jobs_parallel(self, jobs, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", on_job_completed=None):
-        batch_size = 50
-        tasks = []
+        batch_size = 500 if is_paid else 150
+        
+        all_targets = []
         for job in jobs:
-            job["tasks_total"] = (len(job["targets"]) + batch_size - 1) // batch_size
+            job["tasks_total"] = len(job["targets"])
             job["tasks_done"] = 0
-            for i in range(0, len(job["targets"]), batch_size):
-                tasks.append((job, job["targets"][i:i + batch_size]))
-        total_items = sum(len(job["targets"]) for job in jobs)
+            for item in job["targets"]:
+                all_targets.append((job, item))
+                
+        total_items = len(all_targets)
         completed_items = 0
         lock = threading.Lock()
+        
+        chunks = []
+        for i in range(0, total_items, batch_size):
+            chunks.append(all_targets[i:i + batch_size])
 
-        def run_task(task):
-            job, chunk = task
+        def run_chunk(chunk):
             if self.is_cancelled():
                 raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-            texts = [item[2].replace('\\"', '"') if job["kind"] == "snbt" else item[2] for item in chunk]
+                
+            texts = [item[2].replace('\\"', '"') if job["kind"] == "snbt" else item[2] for job, item in chunk]
             translated_texts = translate_gemini_batch(texts, api_key, is_paid, self.route_log, self.is_cancelled, ai_model=ai_model, target_lang=target_lang)
-            if job["kind"] == "snbt":
-                for (line_idx, prefix, _, suffix), trans in zip(chunk, translated_texts):
+            
+            jobs_to_check = []
+            for (job, item), trans in zip(chunk, translated_texts):
+                if job["kind"] == "snbt":
+                    line_idx, prefix, _, suffix = item
                     job["translated_map"][line_idx] = f'{prefix}"{str(trans).replace(chr(34), chr(92)+chr(34))}"{suffix}'
-            else:
-                for (parent_node, key, _), trans in zip(chunk, translated_texts):
+                else:
+                    parent_node, key, _ = item
                     parent_node[key] = trans
-            return job, len(chunk)
+                
+                with lock:
+                    job["tasks_done"] += 1
+                    if job["tasks_done"] == job["tasks_total"]:
+                        jobs_to_check.append(job)
+                        
+            for job in jobs_to_check:
+                if on_job_completed:
+                    on_job_completed(job)
+            
+            return len(chunk)
 
-        executor = ThreadPoolExecutor(max_workers=min(8, len(tasks)) or 1)
+        max_w = min(8, len(chunks)) if is_paid else 1
+        max_w = max_w or 1
+        executor = ThreadPoolExecutor(max_workers=max_w)
         try:
-            futures = [executor.submit(run_task, t) for t in tasks]
+            futures = [executor.submit(run_chunk, c) for c in chunks]
             for future in as_completed(futures):
-                job, n = future.result()
+                n = future.result()
                 with lock:
                     completed_items += n
-                    job["tasks_done"] += 1
-                    if job["tasks_done"] >= job.get("tasks_total", 1):
-                        if on_job_completed:
-                            on_job_completed(job)
-                self.set_status(f"⏳ Gemini API 번역 진행 중... [{completed_items}/{total_items}]")
+                self.set_status(f"⏳ Gemini API 묶음 번역 진행 중... [{completed_items}/{total_items}]")
                 self.update_progress(completed_items / total_items if total_items else 1)
         finally:
             executor.shutdown(wait=False, cancel_futures=True)

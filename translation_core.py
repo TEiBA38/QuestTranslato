@@ -2,19 +2,13 @@ import os
 import json
 import shutil
 import zipfile
-import time
-
 from constants import has_non_latin
-from translation_engines import ENGINES
+from translation_engines import ENGINES, QuotaExceededError, TranslationCancelledError
 from file_processors import (
     extract_snbt_targets,
     rebuild_snbt,
-    _run_batch_jobs,
-    process_snbt_with_progress,
-    process_json_safely,
     process_hqm_with_progress,
 )
-from translation_engines import QuotaExceededError, TranslationCancelledError
 from review_checks import analyze_snbt_texts, analyze_json_data, analyze_hqm_bytes, render_review_report
 
 PROGRESS_FILE = "_progress.json"
@@ -285,7 +279,7 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                 _save_progress(out_dir, completed_set)
 
             if getattr(context.app, "_translate_jobs_parallel", None):
-                if engine_key == "gemini_batch" and is_paid:
+                if engine_key == "gemini_batch":
                     context.app._translate_jobs_parallel(jobs, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, on_job_completed=on_job_completed)
                 else:
                     context.app._translate_jobs_sequential(jobs, engine_key, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, on_job_completed=on_job_completed)
@@ -338,12 +332,15 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
 
     except TranslationCancelledError as e:
         context.log(f"\n🛑 {str(e)}")
+        # pyrefly: ignore [unexpected-keyword]
         context.offer_partial_backup(out_dir, os.path.splitext(base_zip_name)[0] + '_partial.zip', error_msg="사용자에 의해 번역 작업이 중단되었습니다.")
     except QuotaExceededError as e:
         context.log(f"\n🛑 [중단] {str(e)}")
+        # pyrefly: ignore [unexpected-keyword]
         context.offer_partial_backup(out_dir, os.path.splitext(base_zip_name)[0] + '_partial.zip', error_msg=str(e))
     except Exception as e:
         context.log(f"\n❌ 오류 발생: {str(e)}")
+        # pyrefly: ignore [unexpected-keyword]
         context.offer_partial_backup(out_dir, os.path.splitext(base_zip_name)[0] + '_partial.zip', error_msg=f"오류가 발생했습니다:\n{str(e)}")
     finally:
         shutil.rmtree(raw_dir, ignore_errors=True)
