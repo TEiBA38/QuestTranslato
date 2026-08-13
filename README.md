@@ -14,7 +14,6 @@
 
 ## 1) 🚀 실행 방법
 
-1. "QuestTranslatorPro_win64.zip" 파일을 원하는 폴더에 압축 해제합니다.
 2. 압축 해제한 폴더에서 "QuestTranslatorPro.exe"를 실행합니다.
 3. Windows SmartScreen 경고가 뜨면 "추가 정보 -> 실행"을 선택합니다.
 
