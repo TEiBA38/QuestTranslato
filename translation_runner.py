@@ -508,18 +508,7 @@ class TranslationMixin:
         if not os.path.exists(out_dir):
             if error_msg: self.show_messagebox("warning", "중단됨", error_msg)
             return
-        has_data = any(
-            fname != PROGRESS_FILE
-            for root, _, files in os.walk(out_dir)
-            for fname in files
-        )
-        if not has_data:
-            try:
-                shutil.rmtree(out_dir, ignore_errors=True)
-            except Exception:
-                pass
-            if error_msg: self.show_messagebox("warning", "중단됨", error_msg)
-            return
+
 
         if self._ask_main(
             '번역 작업 중단',
