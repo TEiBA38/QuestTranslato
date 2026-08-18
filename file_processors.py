@@ -541,7 +541,7 @@ def process_hqm_with_progress(content, engine_key, api_key, is_paid=False, progr
     return hqm_file.to_bytes()
 
 
-def _process_hqm_with_heuristic(content, engine_key, api_key, is_paid, progress_callback=None, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
+def _process_hqm_with_heuristic(content, engine_key, api_key, is_paid, progress_callback=None, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):
     targets = extract_hqm_targets(content)
     if not targets:
         if log_callback:
