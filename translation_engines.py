@@ -81,6 +81,8 @@ def apply_builtin_quest_style_translation(text):
     return text
 
 
+import translation_memory
+
 def translate_with_builtin_fallback(text, api_key, reference_map, translate_fn, target_lang="한국어 (Korean)"):
     if text is None:
         return text
@@ -88,6 +90,10 @@ def translate_with_builtin_fallback(text, api_key, reference_map, translate_fn, 
     cached_translation = get_reference_translation(text, reference_map)
     if cached_translation is not None:
         return cached_translation
+        
+    global_cached = translation_memory.get_cached_translation(text, target_lang)
+    if global_cached is not None:
+        return global_cached
 
     translated = translate_fn(text, api_key)
     if translated is None or not str(translated).strip():
@@ -97,6 +103,9 @@ def translate_with_builtin_fallback(text, api_key, reference_map, translate_fn, 
         if target_lang == "한국어 (Korean)":
             return apply_builtin_quest_style_translation(text)
         return text
+        
+    translation_memory.add_to_memory(text, translated, target_lang)
+    translation_memory.save_memory()
 
     return translated
 

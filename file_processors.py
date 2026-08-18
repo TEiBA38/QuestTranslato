@@ -16,62 +16,91 @@ from translation_engines import (
     translate_local_ai,
 )
 
+import translation_memory
+
 def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary=None, ai_model=None, target_lang="한국어 (Korean)", log_prefix="API 번역 진행 중", custom_url=None):
     total = len(items)
     translated_results = [None] * total
 
+    # 1단계: 글로벌 번역 메모리 조회
+    uncached_indices = []
+    uncached_texts = []
+    
+    for i, item in enumerate(items):
+        original_text = text_extractor(item)
+        cached_val = translation_memory.get_cached_translation(original_text, target_lang)
+        if cached_val is not None:
+            translated_results[i] = cached_val
+        else:
+            uncached_indices.append(i)
+            uncached_texts.append(original_text)
+            
+    if not uncached_texts:
+        return translated_results
+        
+    if log_callback and len(uncached_texts) < total:
+        log_callback(f"💾 이전에 번역된 {total - len(uncached_texts)}개의 텍스트를 캐시에서 불러왔습니다.")
+
+    total_uncached = len(uncached_texts)
+
     if is_paid:
         batch_size = 50
-        chunks = [(i, items[i:i + batch_size]) for i in range(0, total, batch_size)]
+        chunks = [(i, uncached_indices[i:i + batch_size], uncached_texts[i:i + batch_size]) for i in range(0, total_uncached, batch_size)]
         completed_items = 0
 
-        def process_chunk(start_idx, chunk):
+        def process_chunk(start_idx, indices_chunk, texts_chunk):
             if cancel_checker and cancel_checker():
                 raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-            texts = [text_extractor(item) for item in chunk]
-            res = translate_gemini_batch(texts, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
-            return start_idx, chunk, res
+            res = translate_gemini_batch(texts_chunk, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
+            return indices_chunk, texts_chunk, res
 
         with ThreadPoolExecutor(max_workers=min(8, len(chunks) or 1)) as executor:
-            futures = [executor.submit(process_chunk, idx, chunk) for idx, chunk in chunks]
+            futures = [executor.submit(process_chunk, idx, indices_chunk, texts_chunk) for idx, indices_chunk, texts_chunk in chunks]
             for future in as_completed(futures):
                 if cancel_checker and cancel_checker():
                     executor.shutdown(wait=False, cancel_futures=True)
                     raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                start_idx, chunk, res_texts = future.result()
+                indices_chunk, texts_chunk, res_texts = future.result()
                 
-                for offset, res in enumerate(res_texts):
-                    translated_results[start_idx + offset] = res
+                for idx_in_global, orig, res in zip(indices_chunk, texts_chunk, res_texts):
+                    translated_results[idx_in_global] = res
+                    translation_memory.add_to_memory(orig, res, target_lang)
                 
-                completed_items += len(chunk)
+                translation_memory.save_memory()
+                completed_items += len(indices_chunk)
                 if progress_callback:
-                    progress_callback(completed_items, total)
+                    progress_callback(completed_items, total_uncached)
                 if log_callback:
-                    log_callback(f"⏳ {log_prefix} (병렬) [{completed_items}/{total}]")
+                    log_callback(f"⏳ {log_prefix} (병렬) [{completed_items}/{total_uncached}]")
     else:
-        batch_size = 15
+        # 무료 제미나이 또는 Local AI: 
+        # TPM 여유가 매우 크므로 한 번에 더 많은 문장(40개)을 묶어서 보냅니다 (약 3배 속도 향상!)
+        batch_size = 40 if engine_key in ("gemini_batch", "local_ai") else 15
         sleep_sec = 4.5
-        for i in range(0, total, batch_size):
+        for i in range(0, total_uncached, batch_size):
             if cancel_checker and cancel_checker():
                 raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
 
-            chunk = items[i:i + batch_size]
-            texts = [text_extractor(item) for item in chunk]
+            indices_chunk = uncached_indices[i:i + batch_size]
+            texts_chunk = uncached_texts[i:i + batch_size]
             
-            current_count = min(i + len(chunk), total)
+            current_count = min(i + len(texts_chunk), total_uncached)
             if log_callback:
-                log_callback(f"⏳ {log_prefix}... [{current_count}/{total}]")
+                log_callback(f"⏳ {log_prefix}... [{current_count}/{total_uncached}]")
 
             if engine_key == "local_ai":
-                res_texts = translate_local_ai(texts, custom_url, ai_model, api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=glossary, target_lang=target_lang)
+                res_texts = translate_local_ai(texts_chunk, custom_url, ai_model, api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=glossary, target_lang=target_lang)
             else:
-                res_texts = translate_gemini_batch(texts, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
+                res_texts = translate_gemini_batch(texts_chunk, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
             
-            for offset, res in enumerate(res_texts):
-                translated_results[i + offset] = res
+            for idx_in_global, orig, res in zip(indices_chunk, texts_chunk, res_texts):
+                translated_results[idx_in_global] = res
+                translation_memory.add_to_memory(orig, res, target_lang)
+
+            translation_memory.save_memory()
 
             if progress_callback:
-                progress_callback(current_count, total)
+                progress_callback(current_count, total_uncached)
 
     return translated_results
 

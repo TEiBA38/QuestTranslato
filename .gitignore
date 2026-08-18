@@ -27,3 +27,4 @@ translated/
 
 # Backup files
 app_backup.py
+translation_memory.json

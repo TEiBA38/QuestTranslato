@@ -459,15 +459,19 @@ if ctk is not None and TkinterDnD is not None:
             self.local_model_entry = ctk.CTkEntry(self.local_api_frame, placeholder_text="예: llama3.1 또는 deepseek-chat",
                                           font=ctk.CTkFont(family=FONT_NAME, size=12),
                                           fg_color="#111113", border_color="#52525b")
-            self.local_model_entry.pack(fill="x", padx=12, pady=(0, 10))
-            self.local_model_entry.bind("<FocusOut>", lambda _e: self.save_user_settings())
-
             self.btn_translate_selected_modpack = ctk.CTkButton(
-                config_frame, text="선택 모드팩 자동 번역",
+                config_frame, text="선택 모드팩 퀘스트 번역",
                 font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                 height=36, fg_color="#f97316", hover_color="#fb923c",
                 command=self.run_selected_modpack)
-            self.btn_translate_selected_modpack.pack(fill="x", padx=12, pady=(12, 6))
+            self.btn_translate_selected_modpack.pack(fill="x", padx=12, pady=(12, 4))
+            
+            self.btn_translate_all_guidebooks = ctk.CTkButton(
+                config_frame, text="모드팩 전체 한글화 (가이드북 & 아이템 리소스팩 생성)",
+                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                height=36, fg_color="#10b981", hover_color="#059669",
+                command=self.run_all_modpack_translations)
+            self.btn_translate_all_guidebooks.pack(fill="x", padx=12, pady=(0, 6))
 
             self.btn_edit_glossary = ctk.CTkButton(
                 config_frame, text="📖 용어집 편집 (Glossary)",
@@ -600,7 +604,7 @@ if ctk is not None and TkinterDnD is not None:
                     "ai_model": self.model_combo.get(),
                     "target_lang": self.target_lang_combo.get(),
                     "engine_name": self.engine_combo.get(),
-                    "plan_name": self.plan_combo.get(),
+                    "plan_name": self.plan_combo.get() if hasattr(self, 'plan_combo') else "",
                     "translated_history": self.app_state.translated_history,
                     "glossaries_by_lang": self.app_state.glossaries_by_lang
                 }
