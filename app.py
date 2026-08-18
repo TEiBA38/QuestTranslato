@@ -432,21 +432,31 @@ if ctk is not None and TkinterDnD is not None:
             self.local_api_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
             # Initially not packed!
 
-            ctk.CTkLabel(self.local_api_frame, text="로컬 API 주소 (Base URL)",
+            ctk.CTkLabel(self.local_api_frame, text="커스텀 API 주소 (Base URL)",
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                          text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
             
-            self.local_url_entry = ctk.CTkEntry(self.local_api_frame, placeholder_text="예: http://localhost:11434/v1",
+            self.local_url_entry = ctk.CTkEntry(self.local_api_frame, placeholder_text="예: http://localhost:11434/v1 또는 https://api.groq.com/v1",
                                           font=ctk.CTkFont(family=FONT_NAME, size=12),
                                           fg_color="#111113", border_color="#52525b")
             self.local_url_entry.pack(fill="x", padx=12, pady=(0, 8))
             self.local_url_entry.bind("<FocusOut>", lambda _e: self.save_user_settings())
 
-            ctk.CTkLabel(self.local_api_frame, text="로컬 모델 이름",
+            ctk.CTkLabel(self.local_api_frame, text="API 키 (옵션, 필요한 경우)",
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                          text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
             
-            self.local_model_entry = ctk.CTkEntry(self.local_api_frame, placeholder_text="예: llama3.1",
+            self.local_api_key_entry = ctk.CTkEntry(self.local_api_frame, show="*", placeholder_text="API 키가 필요한 경우 입력",
+                                          font=ctk.CTkFont(family=FONT_NAME, size=12),
+                                          fg_color="#111113", border_color="#52525b")
+            self.local_api_key_entry.pack(fill="x", padx=12, pady=(0, 8))
+            self.local_api_key_entry.bind("<FocusOut>", lambda _e: self.save_user_settings())
+
+            ctk.CTkLabel(self.local_api_frame, text="모델 이름",
+                         font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                         text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
+            
+            self.local_model_entry = ctk.CTkEntry(self.local_api_frame, placeholder_text="예: llama3.1 또는 deepseek-chat",
                                           font=ctk.CTkFont(family=FONT_NAME, size=12),
                                           fg_color="#111113", border_color="#52525b")
             self.local_model_entry.pack(fill="x", padx=12, pady=(0, 10))
@@ -532,6 +542,11 @@ if ctk is not None and TkinterDnD is not None:
             if saved_local_url:
                 self.local_url_entry.delete(0, "end")
                 self.local_url_entry.insert(0, saved_local_url)
+                
+            saved_local_api_key = settings.get("local_api_key", "")
+            if saved_local_api_key:
+                self.local_api_key_entry.delete(0, "end")
+                self.local_api_key_entry.insert(0, saved_local_api_key)
             
             saved_local_model = settings.get("local_model", "")
             if saved_local_model:
@@ -580,6 +595,7 @@ if ctk is not None and TkinterDnD is not None:
                     "instance_root": self.instance_path_entry.get().strip(),
                     "api_key": self.api_entry.get().strip(),
                     "local_url": self.local_url_entry.get().strip(),
+                    "local_api_key": self.local_api_key_entry.get().strip(),
                     "local_model": self.local_model_entry.get().strip(),
                     "ai_model": self.model_combo.get(),
                     "target_lang": self.target_lang_combo.get(),

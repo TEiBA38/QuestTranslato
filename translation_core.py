@@ -113,7 +113,7 @@ def _generate_zip_review_report(context, raw_dir, out_dir, report_title):
         context.log("🧪 검수 리포트가 결과창으로 표시되었습니다.")
 
 
-def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_key, api_key, is_paid, ai_model, target_lang, modpack_path, apply_mode, reference_map, glossary):
+def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_key, api_key, is_paid, ai_model, target_lang, modpack_path, apply_mode, reference_map, glossary, custom_url=None):
     base_zip_name = os.path.basename(zip_path)
     base_no_ext = os.path.splitext(base_zip_name)[0]
     origin_dir = os.path.dirname(zip_path)
@@ -220,7 +220,7 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                     translated_hqm = process_hqm_with_progress(
                         hqm_content, engine_key, api_key, is_paid,
                         progress_callback=hqm_progress_cb,
-                        log_callback=context.log, cancel_checker=context.is_cancelled, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
+                        log_callback=context.log, cancel_checker=context.is_cancelled, glossary=glossary, ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
                 except Exception as exc:
                     context.log(f"⚠️ [{os.path.basename(file_path)}] HQM 처리 경고: {exc}")
                     translated_hqm = hqm_content
@@ -282,7 +282,7 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                 if engine_key == "gemini_batch":
                     context.app._translate_jobs_parallel(jobs, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, on_job_completed=on_job_completed)
                 else:
-                    context.app._translate_jobs_sequential(jobs, engine_key, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, on_job_completed=on_job_completed)
+                    context.app._translate_jobs_sequential(jobs, engine_key, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, on_job_completed=on_job_completed, custom_url=custom_url)
 
         if modpack_path:
             context.log("\n🎉 모든 번역 완료! 저장 및 적용 방식을 선택해주세요.")

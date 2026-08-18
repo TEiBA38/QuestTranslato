@@ -16,7 +16,7 @@ from translation_engines import (
     translate_local_ai,
 )
 
-def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary=None, ai_model=None, target_lang="한국어 (Korean)", log_prefix="API 번역 진행 중"):
+def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary=None, ai_model=None, target_lang="한국어 (Korean)", log_prefix="API 번역 진행 중", custom_url=None):
     total = len(items)
     translated_results = [None] * total
 
@@ -63,7 +63,7 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                 log_callback(f"⏳ {log_prefix}... [{current_count}/{total}]")
 
             if engine_key == "local_ai":
-                res_texts = translate_local_ai(texts, api_key, ai_model, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, target_lang=target_lang)
+                res_texts = translate_local_ai(texts, custom_url, ai_model, api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=glossary, target_lang=target_lang)
             else:
                 res_texts = translate_gemini_batch(texts, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
             
@@ -166,7 +166,7 @@ def rebuild_snbt(lines, translated_map):
     return "\n".join(new_lines)
 
 
-def process_snbt_with_progress(content, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, verbose=True, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
+def process_snbt_with_progress(content, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, verbose=True, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):
     if log_callback and verbose:
         log_callback("🔍 .snbt 퀘스트 구조 분석을 시작합니다...")
 
@@ -192,7 +192,7 @@ def process_snbt_with_progress(content, engine_key, api_key, is_paid=False, prog
             targets,
             lambda item: item[2].replace('\\"', '"'),
             engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
-            log_prefix=log_pref
+            log_prefix=log_pref, custom_url=custom_url
         )
         for (line_idx, prefix, _, suffix), trans_text in zip(targets, translated_texts):
             final_text = str(trans_text).replace('"', '\\"')
@@ -241,7 +241,7 @@ def collect_json_targets(node, target_list):
                 collect_json_targets(item, target_list)
 
 
-def process_json_safely(node, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, verbose=True, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
+def process_json_safely(node, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, verbose=True, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):
     if log_callback and verbose:
         log_callback("🔍 JSON/HQM 퀘스트 언어 파일 구조 분석을 시작합니다...")
 
@@ -268,7 +268,7 @@ def process_json_safely(node, engine_key, api_key, is_paid=False, progress_callb
             targets,
             lambda item: item[2],
             engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
-            log_prefix=log_pref
+            log_prefix=log_pref, custom_url=custom_url
         )
         for (parent_node, key, _), trans_text in zip(targets, translated_texts):
             parent_node[key] = trans_text
@@ -441,7 +441,7 @@ def _fit_utf8_exact_bytes(text, target_len):
     return b" " * target_len
 
 
-def _translate_hqm_texts_entries(entries, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
+def _translate_hqm_texts_entries(entries, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):
     translated_texts = []
     total = len(entries)
     if total == 0:
@@ -454,7 +454,7 @@ def _translate_hqm_texts_entries(entries, engine_key, api_key, is_paid, progress
             entries,
             lambda entry: entry.value,
             engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
-            log_prefix=log_pref
+            log_prefix=log_pref, custom_url=custom_url
         )
         translated_texts.extend([str(res or entry.value) for entry, res in zip(entries, res_texts)])
         return translated_texts
@@ -480,14 +480,14 @@ def _translate_hqm_texts_entries(entries, engine_key, api_key, is_paid, progress
     return translated_texts
 
 
-def process_hqm_with_progress(content, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
+def process_hqm_with_progress(content, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):
     if not content:
         raise ValueError("빈 HQM 파일입니다.")
 
     if HQMQuestConverter is None:
         if log_callback:
             log_callback("⚠️ 로컬 HQM 파서가 없어서 기본 문의 추출 방식을 사용합니다.")
-        return _process_hqm_with_heuristic(content, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map, glossary, ai_model, target_lang)
+        return _process_hqm_with_heuristic(content, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map, glossary, ai_model, target_lang, custom_url=custom_url)
 
     try:
         converter = HQMQuestConverter()
@@ -510,7 +510,7 @@ def process_hqm_with_progress(content, engine_key, api_key, is_paid=False, progr
         log_callback(f"🔎 HQM 퀘스트 텍스트 {len(entries)}개를 감지했습니다.")
 
     translated_texts = _translate_hqm_texts_entries(
-        entries, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang
+        entries, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang, custom_url=custom_url
     )
 
     # Naturalness-first policy: avoid saving hard-truncated Korean text.

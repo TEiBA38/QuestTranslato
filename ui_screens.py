@@ -349,10 +349,10 @@ class UIScreensMixin:
                     self.model_combo.set(MODELS_GEMINI_PAID[0])
 
     def on_engine_change(self, choice):
-        if "Local AI" in choice:
+        if "Custom API" in choice or "Local AI" in choice:
             self.standard_api_frame.pack_forget()
             self.local_api_frame.pack(fill="x", before=self.btn_translate_selected_modpack)
-            self.log("💡 로컬 AI (Ollama/LM Studio 등) 주소와 모델명을 입력해주세요.")
+            self.log("💡 커스텀 호환 API 주소와 모델명(필요시 API 키 포함)을 입력해주세요.")
             return
 
         self.local_api_frame.pack_forget()
@@ -509,22 +509,23 @@ class UIScreensMixin:
         if engine_key == "local_ai":
             local_url = self.local_url_entry.get().strip()
             local_model = self.local_model_entry.get().strip()
+            local_api_key = self.local_api_key_entry.get().strip()
             if not local_url or not local_model:
-                messagebox.showwarning("경고", "로컬 API 주소와 모델명을 모두 입력해주세요.")
-                return None, None, False, None, None
+                messagebox.showwarning("경고", "커스텀 API 주소와 모델명을 모두 입력해주세요.")
+                return None, None, False, None, None, None
             target_lang = self.target_lang_combo.get()
-            return engine_key, local_url, False, local_model, target_lang
+            return engine_key, local_api_key, False, local_model, target_lang, local_url
 
         api_key = self.api_entry.get().strip()
 
         if engine_key != "google" and not api_key:
             messagebox.showwarning("경고", f"{engine_name} 사용을 위해 API 키를 입력해주세요.")
-            return None, None, False, None, None
+            return None, None, False, None, None, None
 
         is_paid = "유료" in self.plan_combo.get()
         ai_model = self.model_combo.get()
         target_lang = self.target_lang_combo.get()
-        return engine_key, api_key, is_paid, ai_model, target_lang
+        return engine_key, api_key, is_paid, ai_model, target_lang, None
 
     def request_cancel(self):
         self.app_state.cancel_requested = True

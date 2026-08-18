@@ -331,7 +331,7 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
     return [item if item is not None else text for item, text in zip(resolved, text_list)]
 
 
-def translate_local_ai(text_list, base_url, model_name, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, target_lang="한국어 (Korean)"):
+def translate_local_ai(text_list, base_url, model_name, api_key=None, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, target_lang="한국어 (Korean)"):
     if not text_list:
         return []
 
@@ -396,6 +396,8 @@ def translate_local_ai(text_list, base_url, model_name, log_callback=None, cance
     }
     
     headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     
     url = base_url.strip().rstrip("/")
     if not url.endswith("/chat/completions"):
@@ -440,7 +442,7 @@ def translate_local_ai(text_list, base_url, model_name, log_callback=None, cance
 
 ENGINES = {
     "Gemini Lite (배치 번역)": "gemini_batch",
-    "Local AI (Ollama/LM Studio 등)": "local_ai",
+    "Custom API (OpenAI 호환, Local AI 등)": "local_ai",
     "DeepL": "deepl",
     "Google Translate": "google",
     "OpenAI": "openai",

@@ -59,7 +59,7 @@ class TranslationMixin:
     # ====================================================================
 
     def handle_file_drop(self, event):
-        engine_key, api_key, is_paid, ai_model, target_lang = self.validate_inputs()
+        engine_key, api_key, is_paid, ai_model, target_lang, custom_url = self.validate_inputs()
         self.app_state.cancel_requested = False
         if not engine_key:
             return
@@ -68,10 +68,10 @@ class TranslationMixin:
             return
         if dropped_path.lower().endswith(('.snbt', '.json', '.hqm')):
             threading.Thread(target=self._process_single_file,
-                             args=(dropped_path, engine_key, api_key, is_paid, ai_model, target_lang), daemon=True).start()
+                             args=(dropped_path, engine_key, api_key, is_paid, ai_model, target_lang, custom_url), daemon=True).start()
         elif dropped_path.lower().endswith('.zip'):
             threading.Thread(target=self._process_zip_file,
-                             args=(dropped_path, engine_key, api_key, is_paid, ai_model, target_lang), daemon=True).start()
+                             args=(dropped_path, engine_key, api_key, is_paid, ai_model, target_lang, None, custom_url), daemon=True).start()
         else:
             messagebox.showwarning("지원하지 않는 파일", ".snbt, .json, .hqm 또는 .zip 파일만 지원합니다.")
 
@@ -136,7 +136,7 @@ class TranslationMixin:
         return temp_zip_path, added_count
 
     def run_selected_modpack(self):
-        engine_key, api_key, is_paid, ai_model, target_lang = self.validate_inputs()
+        engine_key, api_key, is_paid, ai_model, target_lang, custom_url = self.validate_inputs()
         if not engine_key:
             return
 
@@ -153,7 +153,7 @@ class TranslationMixin:
                     self.show_messagebox("warning", "대상 없음", "선택한 모드팩에서 번역 대상 파일을 찾지 못했습니다.")
                     return
                 self.log(f"🚀 선택 모드팩 자동 번역 시작: {os.path.basename(modpack_dir)} ({file_count} files)")
-                self._process_zip_file(temp_zip_path, engine_key, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, modpack_path=modpack_dir)
+                self._process_zip_file(temp_zip_path, engine_key, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, modpack_path=modpack_dir, custom_url=custom_url)
             except Exception as exc:
                 self.log(f"❌ 인스턴스 번역 준비 중 오류: {exc}")
                 self.show_messagebox("error", "오류", f"인스턴스 번역 준비 중 오류가 발생했습니다:\n{exc}")
@@ -171,7 +171,7 @@ class TranslationMixin:
     # ====================================================================
 
     def run_single_file(self):
-        engine_key, api_key, is_paid, ai_model, target_lang = self.validate_inputs()
+        engine_key, api_key, is_paid, ai_model, target_lang, custom_url = self.validate_inputs()
         if not engine_key:
             return
         file_path = filedialog.askopenfilename(
@@ -183,7 +183,7 @@ class TranslationMixin:
         threading.Thread(target=self._process_single_file,
                          args=(file_path, engine_key, api_key, is_paid, ai_model, target_lang), daemon=True).start()
 
-    def _process_single_file(self, file_path, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)"):
+    def _process_single_file(self, file_path, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):
         self.app_state.cancel_requested = False
         self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
         self.toggle_buttons(False)
@@ -211,7 +211,7 @@ class TranslationMixin:
                     content = f.read()
                 source_content = content
                 translated_content = process_snbt_with_progress(
-                    content, engine_key, api_key, is_paid, progress_cb, self.route_log, self.is_cancelled, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang)
+                    content, engine_key, api_key, is_paid, progress_cb, self.route_log, self.is_cancelled, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
             elif file_path.lower().endswith('.json'):
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     try:
@@ -219,14 +219,14 @@ class TranslationMixin:
                     except json.JSONDecodeError as e:
                         raise Exception(f"'{file_name}' 파일이 올바른 JSON 형식이 아닙니다 ({e.lineno}:{e.colno}: {e.msg})")
                 source_json_data = json.loads(json.dumps(json_data, ensure_ascii=False))
-                process_json_safely(json_data, engine_key, api_key, is_paid, progress_cb, self.route_log, self.is_cancelled, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang)
+                process_json_safely(json_data, engine_key, api_key, is_paid, progress_cb, self.route_log, self.is_cancelled, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
             elif file_path.lower().endswith('.hqm'):
                 with open(file_path, 'rb') as f:
                     content = f.read()
                 source_content = content
                 try:
                     translated_content = process_hqm_with_progress(
-                        content, engine_key, api_key, is_paid, progress_cb, self.route_log, self.is_cancelled, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang)
+                        content, engine_key, api_key, is_paid, progress_cb, self.route_log, self.is_cancelled, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
                 except ValueError as exc:
                     self.log(f"⚠️ HQM 처리 경고: {exc}")
                     translated_content = content
@@ -282,7 +282,7 @@ class TranslationMixin:
     # ====================================================================
 
     def run_zip_file(self):
-        engine_key, api_key, is_paid, ai_model, target_lang = self.validate_inputs()
+        engine_key, api_key, is_paid, ai_model, target_lang, custom_url = self.validate_inputs()
         if not engine_key:
             return
         zip_path = filedialog.askopenfilename(
@@ -353,7 +353,7 @@ class TranslationMixin:
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
-    def _translate_jobs_sequential(self, jobs, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", on_job_completed=None):
+    def _translate_jobs_sequential(self, jobs, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", on_job_completed=None, custom_url=None):
         total_files = len(jobs)
         for idx, job in enumerate(jobs, 1):
             if self.is_cancelled():
@@ -368,11 +368,11 @@ class TranslationMixin:
             if job["kind"] == "snbt":
                 job["final_text"] = process_snbt_with_progress(
                     "\n".join(job["lines"]), engine_key, api_key, is_paid,
-                    progress_cb, self.route_log, self.is_cancelled, verbose=False, reference_map=None, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang)
+                    progress_cb, self.route_log, self.is_cancelled, verbose=False, reference_map=None, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
             else:
                 process_json_safely(
                     job["data"], engine_key, api_key, is_paid,
-                    progress_cb, self.route_log, self.is_cancelled, verbose=False, reference_map=None, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang)
+                    progress_cb, self.route_log, self.is_cancelled, verbose=False, reference_map=None, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
             
             if on_job_completed:
                 on_job_completed(job)
@@ -614,7 +614,7 @@ class TranslationMixin:
             self.show_review_report(report_text)
             self.log("🧪 검수 리포트가 결과창으로 표시되었습니다.")
 
-    def _process_zip_file(self, zip_path, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", modpack_path=None):
+    def _process_zip_file(self, zip_path, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", modpack_path=None, custom_url=None):
         self.app_state.cancel_requested = False
         self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
         self.toggle_buttons(False)
@@ -706,7 +706,7 @@ class TranslationMixin:
             run_zip_translation_logic(
                 context, zip_path, engine_key, api_key, is_paid, ai_model, target_lang, modpack_path,
                 apply_mode=getattr(self, "apply_mode", False) if modpack_path else False,
-                reference_map=reference_map, glossary=glossary
+                reference_map=reference_map, glossary=glossary, custom_url=custom_url
             )
         finally:
             self._translation_out_dir = None
