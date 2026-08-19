@@ -55,23 +55,64 @@ def find_patchouli_books_in_jars(mods_dir, log_callback=None):
 
     return found_books
 
-def create_resource_pack(output_zip_path, translated_books_map, pack_description="Translated Guidebooks"):
+def get_pack_format(modpack_dir):
+    try:
+        if not modpack_dir: return 3
+        # CurseForge
+        cf_json = os.path.join(modpack_dir, 'minecraftinstance.json')
+        if os.path.exists(cf_json):
+            with open(cf_json, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                mc_version = data.get('baseModLoader', {}).get('minecraftVersion', '')
+                if not mc_version:
+                    mc_version = data.get('gameVersion', '')
+                if mc_version:
+                    return _version_to_format(mc_version)
+        
+        # Prism Launcher / MultiMC
+        mmc_cfg = os.path.join(modpack_dir, 'instance.cfg')
+        if os.path.exists(mmc_cfg):
+            with open(mmc_cfg, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.startswith('IntendedVersion='):
+                        mc_version = line.split('=')[1].strip()
+                        return _version_to_format(mc_version)
+    except Exception:
+        pass
+    return 3
+
+def _version_to_format(version_str):
+    if version_str.startswith("1.11") or version_str.startswith("1.12"): return 3
+    if version_str.startswith("1.13") or version_str.startswith("1.14"): return 4
+    if version_str.startswith("1.15") or version_str == "1.16" or version_str == "1.16.1": return 5
+    if version_str.startswith("1.16."): return 6
+    if version_str.startswith("1.17"): return 7
+    if version_str.startswith("1.18"): return 8
+    if version_str.startswith("1.19.3"): return 12
+    if version_str.startswith("1.19.4"): return 13
+    if version_str.startswith("1.19"): return 9
+    if version_str.startswith("1.20.1") or version_str.startswith("1.20"): return 15
+    if version_str.startswith("1.21"): return 34
+    return 3
+
+def create_resource_pack(output_zip_path, translated_books_map, pack_description="Translated Guidebooks", modpack_dir=None):
     """
     번역된 JSON 데이터(translated_books_map)를 바탕으로 마인크래프트 리소스팩/데이터팩(.zip)을 생성합니다.
     translated_books_map 형식: { "jar_filename": { "zip_path": translated_json_data } }
     """
+    p_format = get_pack_format(modpack_dir)
     with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
         # 1. pack.mcmeta 생성 (리소스팩 식별자)
-        # pack_format 3 (1.12.2), 최신 버전에서도 호환성을 위해 보통 3~9 사용 (데이터팩은 별도지만, 둘 다 포함되게 작성 가능)
         pack_mcmeta = {
             "pack": {
-                "pack_format": 3,
+                "pack_format": p_format,
                 "description": pack_description
             }
         }
         zf.writestr('pack.mcmeta', json.dumps(pack_mcmeta, ensure_ascii=False, indent=2))
 
         # 2. 번역된 파일들을 원래 경로에서 언어 코드만 ko_kr로 변경하여 zip에 쓰기
+        written_paths = set()
         for jar_name, files in translated_books_map.items():
             for zip_path, json_data in files.items():
                 # 언어 폴더명을 ko_kr로 변경 (예: .../en_us/entries/... -> .../ko_kr/entries/...)
@@ -83,6 +124,10 @@ def create_resource_pack(output_zip_path, translated_books_map, pack_description
                     # 만약 언어 코드가 명시되지 않았다면 그냥 원본 덮어쓰기
                     pass
                     
+                if new_zip_path in written_paths:
+                    continue
+                written_paths.add(new_zip_path)
+                
                 json_str = json.dumps(json_data, ensure_ascii=False, indent=2)
                 zf.writestr(new_zip_path, json_str)
 
@@ -129,24 +174,29 @@ def extract_lang_files_from_jars(mods_dir, log_callback=None):
 
     return found_langs
 
-def create_lang_resource_pack(translated_langs, output_zip_path):
+def create_lang_resource_pack(translated_langs, output_zip_path, modpack_dir=None):
     """
     번역된 lang 데이터를 ko_kr.lang 파일명으로 바꾸어 리소스팩으로 묶습니다.
     translated_langs: { "jar_name": { "assets/modid/lang/en_us.lang": "번역된_lang_내용" } }
     """
+    p_format = get_pack_format(modpack_dir)
     with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        # pack.mcmeta 생성 (1.12.2 = format 3)
+        # pack.mcmeta 생성
         pack_mcmeta = {
             "pack": {
-                "pack_format": 3,
+                "pack_format": p_format,
                 "description": "QuestTranslatorPro Lang Translations"
             }
         }
         zf.writestr("pack.mcmeta", json.dumps(pack_mcmeta, indent=4, ensure_ascii=False))
 
         # 번역된 파일 추가
+        written_paths = set()
         for jar_name, lang_dict in translated_langs.items():
             for original_zip_path, translated_content in lang_dict.items():
                 # en_us.lang -> ko_kr.lang 로 변경
                 ko_kr_path = original_zip_path.replace('en_us.lang', 'ko_kr.lang').replace('en_US.lang', 'ko_kr.lang')
+                if ko_kr_path in written_paths:
+                    continue
+                written_paths.add(ko_kr_path)
                 zf.writestr(ko_kr_path, translated_content)

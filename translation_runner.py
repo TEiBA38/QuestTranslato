@@ -301,7 +301,7 @@ class TranslationMixin:
                         final_langs_map[jar_name][zip_path] = "\n".join(out_lines)
                 
                 output_zip = os.path.join(modpack_dir, "QuestTranslatorPro_Lang_Pack.zip")
-                mod_jar_extractor.create_lang_resource_pack(final_langs_map, output_zip)
+                mod_jar_extractor.create_lang_resource_pack(final_langs_map, output_zip, modpack_dir=modpack_dir)
                 
                 self.log("✨ 전체 모드(.lang) 번역 및 리소스팩 생성이 완료되었습니다!")
                 self.log(f"저장 위치: {output_zip}")
@@ -462,7 +462,7 @@ class TranslationMixin:
                 
                 if not check_cancel():
                     resource_pack_path = os.path.join(modpack_dir, "QuestTranslatorPro_Patchouli_Pack.zip")
-                    mod_jar_extractor.create_resource_pack(resource_pack_path, translated_books_map, "Translated Guidebooks by QuestTranslatorPro")
+                    mod_jar_extractor.create_resource_pack(resource_pack_path, translated_books_map, "Translated Guidebooks by QuestTranslatorPro", modpack_dir=modpack_dir)
                     self.log(f"🎉 가이드북 리소스팩 생성 완료!\n경로: {resource_pack_path}")
                     self.show_messagebox("info", "완료", f"가이드북 리소스팩이 생성되었습니다.\n\n인게임의 리소스팩 설정에서 'QuestTranslatorPro_Patchouli_Pack.zip'을 활성화해주세요!")
                 else:
@@ -471,7 +471,7 @@ class TranslationMixin:
                         import tkinter.messagebox as mb
                         if mb.askyesno("부분 저장", f"지금까지 번역된 페이지라도 리소스팩으로 묶어서 저장하시겠습니까?\n(API 비용 낭비를 막을 수 있습니다)"):
                             partial_pack_path = os.path.join(modpack_dir, "QuestTranslatorPro_Patchouli_Pack_Partial.zip")
-                            mod_jar_extractor.create_resource_pack(partial_pack_path, translated_books_map, "Partially Translated Guidebooks")
+                            mod_jar_extractor.create_resource_pack(partial_pack_path, translated_books_map, "Partially Translated Guidebooks", modpack_dir=modpack_dir)
                             self.log(f"💾 부분 번역 리소스팩이 저장되었습니다!\n경로: {partial_pack_path}")
         except Exception as exc:
             if "취소" in str(exc) or getattr(self.app_state, 'cancel_requested', False):
