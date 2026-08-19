@@ -71,11 +71,20 @@ def create_resource_pack(output_zip_path, translated_books_map, pack_description
         }
         zf.writestr('pack.mcmeta', json.dumps(pack_mcmeta, ensure_ascii=False, indent=2))
 
-        # 2. 번역된 파일들을 원래 경로 그대로 zip에 쓰기
+        # 2. 번역된 파일들을 원래 경로에서 언어 코드만 ko_kr로 변경하여 zip에 쓰기
         for jar_name, files in translated_books_map.items():
             for zip_path, json_data in files.items():
+                # 언어 폴더명을 ko_kr로 변경 (예: .../en_us/entries/... -> .../ko_kr/entries/...)
+                # 대소문자 모두 처리
+                new_zip_path = zip_path.replace('/en_us/', '/ko_kr/').replace('/en_US/', '/ko_kr/')
+                
+                # 추가적으로 최상단 폴더가 다른 언어일 가능성도 대비 (거의 없지만 방어적 코드)
+                if '/en_us/' not in zip_path.lower():
+                    # 만약 언어 코드가 명시되지 않았다면 그냥 원본 덮어쓰기
+                    pass
+                    
                 json_str = json.dumps(json_data, ensure_ascii=False, indent=2)
-                zf.writestr(zip_path, json_str)
+                zf.writestr(new_zip_path, json_str)
 
 def extract_lang_files_from_jars(mods_dir, log_callback=None):
     """
