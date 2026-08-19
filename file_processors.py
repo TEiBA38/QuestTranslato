@@ -66,7 +66,6 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                     translated_results[idx_in_global] = res
                     translation_memory.add_to_memory(orig, res, target_lang)
                 
-                translation_memory.save_memory()
                 completed_items += len(indices_chunk)
                 if progress_callback:
                     progress_callback(completed_items, total_uncached)
@@ -97,11 +96,10 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                 translated_results[idx_in_global] = res
                 translation_memory.add_to_memory(orig, res, target_lang)
 
-            translation_memory.save_memory()
-
             if progress_callback:
                 progress_callback(current_count, total_uncached)
 
+    translation_memory.save_memory()
     return translated_results
 
 

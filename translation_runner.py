@@ -117,9 +117,10 @@ class TranslationMixin:
                                 continue
                                 
                         if norm_path.startswith("config/betterquesting/"):
-                            is_valid = (filename.lower() == "defaultquests.json" or 
-                                        "/chapter/" in norm_path or 
-                                        "/chapters/" in norm_path)
+                            is_valid = (filename.lower() in ["defaultquests.json", "questdatabase.json", "questlines.json"] or 
+                                        "/chapter" in norm_path or 
+                                        "/questline" in norm_path or
+                                        "/quest" in norm_path)
                             if not is_valid:
                                 continue
                                 
@@ -231,6 +232,30 @@ class TranslationMixin:
                 unique_texts = list(dict.fromkeys([t[4] for t in all_targets]))
                 self.log(f"🧠 총 {len(all_targets)}개의 텍스트 중 중복을 제거한 {len(unique_texts)}개의 고유 문장을 번역합니다.")
                 
+                try:
+                    import random
+                    samples = unique_texts.copy()
+                    if len(samples) > 0:
+                        random.shuffle(samples)
+                        sample_subset = samples[:100]
+                        self.log("🧠 [AI 자동 추출] 번역 시작 전 .lang 파일의 핵심 단어를 추출하여 단어장을 진화시킵니다...")
+                        from translation_engines import auto_extract_glossary
+                        extracted_glossary = auto_extract_glossary(
+                            sample_subset, engine_key, api_key, ai_model, target_lang, custom_url=None
+                        )
+                        if extracted_glossary:
+                            commented_glossary = {k: f"{v} # [Auto-Extracted]" for k, v in extracted_glossary.items()}
+                            added_keys = list(commented_glossary.keys())[:5]
+                            self.log(f"✨ 진화 완료! 새로 추가된 단어: {added_keys} 등 총 {len(commented_glossary)}개")
+                            self.app_state.glossary.update(commented_glossary)
+                            if target_lang not in self.app_state.glossaries_by_lang:
+                                self.app_state.glossaries_by_lang[target_lang] = {}
+                            self.app_state.glossaries_by_lang[target_lang].update(commented_glossary)
+                            if hasattr(self, "save_user_settings"):
+                                self.save_user_settings()
+                except Exception as e:
+                    self.log(f"⚠️ 용어 추출 중 오류가 발생했으나 번역은 계속 진행합니다: {e}")
+
                 def check_cancel():
                     return self.app_state.cancel_requested
                 
@@ -240,12 +265,13 @@ class TranslationMixin:
                 def local_progress(current, total):
                     self.update_progress(current / max(1, total))
 
+                glossary_map = self.app_state.glossaries_by_lang.get(target_lang, {})
                 translated_unique = file_processors._run_batch_jobs(
                     unique_texts,
                     lambda x: x,
                     engine_key, api_key, is_paid,
                     local_log, check_cancel, local_progress,
-                    reference_map={}, glossary=None, ai_model=ai_model, target_lang=target_lang, log_prefix="모드 텍스트 번역 중"
+                    reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang, log_prefix="모드 텍스트 번역 중"
                 )
                 
                 translation_dict = dict(zip(unique_texts, translated_unique))
@@ -370,6 +396,30 @@ class TranslationMixin:
                     # 중복 텍스트 제거 (API 비용/RPD 절감)
                     unique_texts = list(dict.fromkeys(original_texts))
                     self.log(f"✂️ 중복 제거 후 실제 번역할 고유 텍스트는 {len(unique_texts)}개 입니다. 일괄 번역 시작!")
+                    
+                    try:
+                        import random
+                        samples = unique_texts.copy()
+                        if len(samples) > 0:
+                            random.shuffle(samples)
+                            sample_subset = samples[:100]
+                            self.log("🧠 [AI 자동 추출] 번역 시작 전 가이드북의 핵심 단어를 추출하여 단어장을 진화시킵니다...")
+                            from translation_engines import auto_extract_glossary
+                            extracted_glossary = auto_extract_glossary(
+                                sample_subset, engine_key, api_key, ai_model, target_lang, custom_url=None
+                            )
+                            if extracted_glossary:
+                                commented_glossary = {k: f"{v} # [Auto-Extracted]" for k, v in extracted_glossary.items()}
+                                added_keys = list(commented_glossary.keys())[:5]
+                                self.log(f"✨ 진화 완료! 새로 추가된 단어: {added_keys} 등 총 {len(commented_glossary)}개")
+                                self.app_state.glossary.update(commented_glossary)
+                                if target_lang not in self.app_state.glossaries_by_lang:
+                                    self.app_state.glossaries_by_lang[target_lang] = {}
+                                self.app_state.glossaries_by_lang[target_lang].update(commented_glossary)
+                                if hasattr(self, "save_user_settings"):
+                                    self.save_user_settings()
+                    except Exception as e:
+                        self.log(f"⚠️ 용어 추출 중 오류가 발생했으나 번역은 계속 진행합니다: {e}")
                     
                     import file_processors
                     from translation_engines import translate_deepl, translate_openai, translate_google

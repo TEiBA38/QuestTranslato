@@ -24,11 +24,17 @@ def load_memory():
 
 def save_memory():
     with _memory_lock:
+        tmp_file = MEMORY_FILE + ".tmp"
         try:
-            with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(_memory_cache, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+            os.replace(tmp_file, MEMORY_FILE)
+        except Exception as e:
+            if os.path.exists(tmp_file):
+                try: os.remove(tmp_file)
+                except: pass
+            import logging
+            logging.error(f"Failed to save translation memory: {e}")
 
 def get_cached_translation(text, target_lang="한국어 (Korean)"):
     if not _is_loaded:

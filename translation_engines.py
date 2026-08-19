@@ -26,6 +26,29 @@ _GEMINI_CACHE_MAX = 8000
 _last_gemini_api_call = 0
 _gemini_api_rate_lock = threading.Lock()
 
+# ============================================================
+# Mock Mode: API 호출 없이 테스트할 수 있는 모의 번역 모드
+# ============================================================
+MOCK_MODE = False
+
+def _mock_translate(text):
+    """Mock translation: wraps text with [번역됨] prefix for testing."""
+    if not text or not str(text).strip():
+        return text
+    return f"[번역됨] {text}"
+
+def _mock_translate_batch(text_list):
+    """Mock batch translation for testing."""
+    return [_mock_translate(t) for t in text_list]
+
+def _mock_extract_glossary():
+    """Mock glossary extraction for testing."""
+    return {
+        "creeper": "크리퍼 # [Auto-Extracted]",
+        "ender dragon": "엔더 드래곤 # [Auto-Extracted]",
+        "redstone": "레드스톤 # [Auto-Extracted]",
+    }
+
 
 class QuotaExceededError(Exception):
     pass
@@ -86,6 +109,8 @@ import translation_memory
 def translate_with_builtin_fallback(text, api_key, reference_map, translate_fn, target_lang="한국어 (Korean)"):
     if text is None:
         return text
+    if MOCK_MODE:
+        return _mock_translate(text)
 
     cached_translation = get_reference_translation(text, reference_map)
     if cached_translation is not None:
@@ -105,7 +130,6 @@ def translate_with_builtin_fallback(text, api_key, reference_map, translate_fn, 
         return text
         
     translation_memory.add_to_memory(text, translated, target_lang)
-    translation_memory.save_memory()
 
     return translated
 
@@ -178,9 +202,17 @@ def _translate_openai_request(text, api_key, glossary=None, ai_model=None, targe
     url = "https://api.openai.com/v1/chat/completions"
     model = ai_model if ai_model else "gpt-4o-mini"
     target_prompt = LANG_CODES.get(target_lang, ("KO", "ko", "natural Korean"))[2]
-    system_prompt = f"You are a professional Minecraft quest translator. Translate the given text from English to {target_prompt}. Preserve Minecraft formatting and color codes (e.g., &a, §c) without changing them. Output ONLY the translated text."
+    system_prompt = (
+        f"You are a professional Minecraft quest translator. Translate the given text from English to {target_prompt}.\n"
+        "Rules:\n"
+        "- Preserve Minecraft formatting and color codes (e.g., &a, §c) exactly without changing them.\n"
+        "- NEVER use square brackets [] around translated words (e.g., WRONG: '[철] [검]', RIGHT: '철 검').\n"
+        "- Preserve game abbreviations and formats exactly without translating (e.g., 'Lv.', 'HP', 'MP', 'ATK', 'DEF', 'x2', '+10%').\n"
+        "- Output ONLY the translated text without explanation."
+    )
     if glossary:
-        glossary_text = ", ".join([f"'{k}' as '{v}'" for k, v in glossary.items()])
+        clean_glossary = [f"'{k}' as '{v.split('#')[0].strip()}'" for k, v in glossary.items()]
+        glossary_text = ", ".join(clean_glossary)
         system_prompt += f"\nGlossary (Strictly replace these words): {glossary_text}"
         
     payload = {
@@ -207,7 +239,11 @@ def _translate_openai_request(text, api_key, glossary=None, ai_model=None, targe
 def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
     if not text_list:
         return []
-
+    if MOCK_MODE:
+        if log_callback:
+            log_callback(f"🧪 [Mock Mode] {len(text_list)}개 텍스트를 모의 번역합니다.")
+        time.sleep(0.1)  # 약간의 지연으로 실제 번역처럼 느끼게
+        return _mock_translate_batch(text_list)
     resolved = []
     unresolved_indices = []
     unresolved_raw = []
@@ -256,9 +292,12 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
         "- Return ONLY a valid JSON array (no explanation, no markdown).\n"
         "- Keep array order and length exactly the same.\n"
         "- Preserve formatting/placeholders exactly (&a, §c, {color:...}, %s, {0}, <...>).\n"
+        "- NEVER use square brackets [] around translated words (e.g., WRONG: '[철] [검]', RIGHT: '철 검').\n"
+        "- Preserve game abbreviations and formats exactly without translating (e.g., 'Lv.', 'HP', 'MP', 'ATK', 'DEF', 'x2', '+10%').\n"
     )
     if glossary:
-        glossary_text = ", ".join([f"'{k}' as '{v}'" for k, v in glossary.items()])
+        clean_glossary = [f"'{k}' as '{v.split('#')[0].strip()}'" for k, v in glossary.items()]
+        glossary_text = ", ".join(clean_glossary)
         prompt += f"- Glossary (Strictly replace these words): {glossary_text}\n"
     prompt += f"Input JSON: {input_json}"
 
@@ -343,6 +382,11 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
 def translate_local_ai(text_list, base_url, model_name, api_key=None, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, target_lang="한국어 (Korean)"):
     if not text_list:
         return []
+    if MOCK_MODE:
+        if log_callback:
+            log_callback(f"🧪 [Mock Mode] {len(text_list)}개 텍스트를 모의 번역합니다.")
+        time.sleep(0.1)
+        return _mock_translate_batch(text_list)
 
     resolved = []
     unresolved_indices = []
@@ -385,13 +429,16 @@ def translate_local_ai(text_list, base_url, model_name, api_key=None, log_callba
     system_prompt = (
         f"Translate the input JSON array from English to {target_prompt} for Minecraft quests.\n"
         "Rules:\n"
-        "- Return ONLY a valid JSON array (no explanation, no markdown).\n"
-        "- Keep array order and length exactly the same.\n"
+        "- Return ONLY a valid JSON array matching the exact order and length of the input.\n"
+        "- Output MUST start with '[' and end with ']'.\n"
         "- Preserve formatting/placeholders exactly (&a, §c, {{color:...}}, %s, {{0}}, <...>).\n"
+        "- NEVER use square brackets [] around translated words.\n"
+        "- Preserve abbreviations like 'Lv.', 'HP', 'MP', 'ATK', 'x2'.\n"
     )
     if glossary:
-        glossary_text = ", ".join([f"'{k}' as '{v}'" for k, v in glossary.items()])
-        system_prompt += f"- Glossary (Strictly replace these words): {glossary_text}\n"
+        clean_glossary = [f"'{k}' as '{v.split('#')[0].strip()}'" for k, v in glossary.items()]
+        glossary_text = ", ".join(clean_glossary)
+        system_prompt += f"- Glossary (Strictly apply): {glossary_text}\n"
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -455,4 +502,64 @@ ENGINES = {
     "DeepL": "deepl",
     "Google Translate": "google",
     "OpenAI": "openai",
+    "🧪 테스트 모드 (Mock)": "mock",
 }
+
+
+def auto_extract_glossary(text_samples, engine_key, api_key, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):
+    if not text_samples:
+        return {}
+    if MOCK_MODE or engine_key == "mock":
+        return _mock_extract_glossary()
+        
+    combined_text = "\n".join(text_samples)
+    if len(combined_text) > 12000:
+        combined_text = combined_text[:12000]
+        
+    prompt = (
+        "You are an expert Minecraft translator.\n"
+        "Analyze the following Minecraft modpack texts and extract the top 20 most important game terms, items, or proper nouns.\n"
+        "RULES:\n"
+        "- DO NOT extract generic words like 'Chest', 'Block', 'Item', 'Sword'. ONLY extract highly specific proper nouns (e.g., 'Botania', 'Mekanism', 'Draconium').\n"
+        "- Return ALL English keys in lowercase (e.g., 'iron ingot' instead of 'Iron Ingot') to prevent fragmentation.\n"
+        f"- Translate them into natural {target_lang}.\n"
+        "Return ONLY a valid JSON dictionary where the key is the English term and the value is the translated term.\n"
+        "Example output: {\"draconium ingot\": \"드라코늄 주괴\", \"mana pool\": \"마나 풀\"}\n\n"
+        f"Input text:\n{combined_text}"
+    )
+
+    extracted = {}
+    try:
+        if engine_key == "gemini_batch":
+            client = genai.Client(api_key=api_key)
+            model_name = ai_model if ai_model else 'gemini-3.5-flash-lite'
+            res = client.models.generate_content(model=model_name, contents=prompt)
+            raw_text = res.text.strip() if res.text else ""
+        elif engine_key in ("openai", "local_ai"):
+            url = custom_url.strip().rstrip("/") + "/chat/completions" if engine_key == "local_ai" and custom_url else "https://api.openai.com/v1/chat/completions"
+            model_name = ai_model if ai_model else ("gpt-4o-mini" if engine_key == "openai" else "llama")
+            headers = {"Content-Type": "application/json"}
+            if api_key: headers["Authorization"] = f"Bearer {api_key}"
+            payload = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}
+            import requests
+            res = requests.post(url, headers=headers, json=payload, timeout=30)
+            res.raise_for_status()
+            raw_text = res.json()['choices'][0]['message']['content'].strip()
+        else:
+            return {}
+
+        match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+        if match:
+            raw_text = match.group(0)
+        parsed = json.loads(raw_text)
+        if isinstance(parsed, dict):
+            for k, v in parsed.items():
+                if isinstance(k, str) and isinstance(v, str) and len(k) < 40 and len(v) < 40:
+                    clean_k = re.sub(r'[^a-zA-Z0-9\s]', '', k).lower().strip()
+                    if clean_k:
+                        extracted[clean_k] = v.strip()
+    except Exception as e:
+        import logging
+        logging.warning(f"Auto glossary extraction failed: {e}")
+        
+    return extracted

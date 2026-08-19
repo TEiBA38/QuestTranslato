@@ -265,6 +265,45 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
         if not jobs:
             context.log("✅ 새로 번역할 파일이 없습니다. 모든 작업이 완료되었습니다.")
         else:
+            try:
+                samples = []
+                for j in jobs:
+                    if j["kind"] == "snbt":
+                        for t in j["targets"]:
+                            samples.append(t[2])
+                    elif j["kind"] == "json":
+                        for t in j["targets"]:
+                            samples.append(t[2])
+                
+                import random
+                if len(samples) > 0:
+                    random.shuffle(samples)
+                    sample_subset = samples[:100]
+                    
+                    context.log("🧠 [AI 자동 추출] 번역 시작 전 모드팩 핵심 단어를 추출하여 단어장을 진화시킵니다...")
+                    from translation_engines import auto_extract_glossary
+                    extracted_glossary = auto_extract_glossary(
+                        sample_subset, engine_key, api_key, ai_model, target_lang, custom_url
+                    )
+                    
+                    if extracted_glossary:
+                        commented_glossary = {k: f"{v} # [Auto-Extracted]" for k, v in extracted_glossary.items()}
+                        added_keys = list(commented_glossary.keys())[:5]
+                        context.log(f"✨ 진화 완료! 새로 추가된 단어: {added_keys} 등 총 {len(commented_glossary)}개")
+                        if isinstance(glossary, dict):
+                            glossary.update(commented_glossary)
+                        
+                        if hasattr(context, 'app'):
+                            app = context.app
+                            app.app_state.glossary.update(commented_glossary)
+                            if target_lang not in app.app_state.glossaries_by_lang:
+                                app.app_state.glossaries_by_lang[target_lang] = {}
+                            app.app_state.glossaries_by_lang[target_lang].update(commented_glossary)
+                            if hasattr(app, "save_user_settings"):
+                                app.save_user_settings()
+            except Exception as e:
+                context.log(f"⚠️ 용어 추출 중 오류가 발생했으나 번역은 계속 진행합니다: {e}")
+
             context.set_status(f"총 {len(jobs)}개 파일 번역 중...")
             
             def on_job_completed(job):

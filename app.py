@@ -129,16 +129,24 @@ if ctk is not None and TkinterDnD is not None:
         def _build_header(self):
             self.hero_frame = ctk.CTkFrame(self, fg_color="#121217", corner_radius=18, border_width=1, border_color="#23232b")
             self.hero_frame.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 10))
-            self.hero_frame.grid_columnconfigure(0, weight=1)
+            self.hero_frame.grid_columnconfigure(1, weight=1)
 
-            ctk.CTkLabel(self.hero_frame, text="Quest Translator Pro",
+            title_frame = ctk.CTkFrame(self.hero_frame, fg_color="transparent")
+            title_frame.grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(12, 0))
+
+            from constants import APP_VERSION
+            ctk.CTkLabel(title_frame, text="Quest Translator Pro",
                          font=ctk.CTkFont(family=FONT_NAME, size=26, weight="bold"),
-                         text_color="#f8fafc").grid(row=0, column=0, sticky="w", padx=16, pady=(12, 0))
+                         text_color="#f8fafc").pack(side="left")
+            
+            ctk.CTkLabel(title_frame, text=APP_VERSION,
+                         font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                         text_color="#a1a1aa").pack(side="left", padx=(8, 0), pady=(8, 0))
 
             self.phase_label = ctk.CTkLabel(self.hero_frame, text="STEP 1/2 · 모드팩 선택",
                                             font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                                             text_color="#fb923c")
-            self.phase_label.grid(row=1, column=0, sticky="w", padx=16, pady=(2, 12))
+            self.phase_label.grid(row=1, column=0, columnspan=2, sticky="w", padx=16, pady=(2, 12))
 
             self.screen_container = ctk.CTkFrame(self, fg_color="transparent")
             self.screen_container.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 14))
@@ -616,6 +624,8 @@ if ctk is not None and TkinterDnD is not None:
 
         def on_close(self):
             self.save_user_settings()
+            import translation_memory
+            translation_memory.save_memory()
             if not self.do_backup_on_close():
                 return  # 사용자가 종료를 취소함
             self.destroy()
