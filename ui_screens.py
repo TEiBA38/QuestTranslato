@@ -282,11 +282,41 @@ class UIScreensMixin:
         self.after(50, self._animate_progress)
 
     def show_messagebox(self, kind, title, message):
-        func = {"info": messagebox.showinfo, "warning": messagebox.showwarning, "error": messagebox.showerror}[kind]
-        if threading.current_thread() is not threading.main_thread():
-            self.after(0, lambda: func(title, message))
-        else:
+        def _show():
+            try:
+                import platform
+                if platform.system() == "Windows":
+                    import winsound
+                    flags = {"info": winsound.MB_OK, "warning": winsound.MB_ICONEXCLAMATION, "error": winsound.MB_ICONHAND}
+                    winsound.MessageBeep(flags.get(kind, winsound.MB_OK))
+            except:
+                pass
+            
+            import os
+            func = {"info": messagebox.showinfo, "warning": messagebox.showwarning, "error": messagebox.showerror}[kind]
+            
+            if kind == "info" and ("위치:" in message or "경로:" in message):
+                path_str = ""
+                if "경로:" in message:
+                    path_str = message.split("경로:")[-1].strip()
+                elif "위치:" in message:
+                    path_str = message.split("위치:")[-1].strip()
+                    
+                if path_str and os.path.exists(path_str):
+                    folder_path = path_str if os.path.isdir(path_str) else os.path.dirname(path_str)
+                    if messagebox.askyesno(title, message + "\n\n📂 결과 폴더를 여시겠습니까?"):
+                        try:
+                            os.startfile(folder_path)
+                        except:
+                            pass
+                    return
+            
             func(title, message)
+
+        if threading.current_thread() is not threading.main_thread():
+            self.after(0, _show)
+        else:
+            _show()
 
     def show_review_report(self, report_text):
         if threading.current_thread() is not threading.main_thread():
@@ -364,6 +394,12 @@ class UIScreensMixin:
             self.plan_combo.configure(state="disabled")
             self.model_combo.configure(state="disabled")
             self.log("💡 Google Translate는 API 키 없이 무료 사용 가능합니다.")
+        elif "테스트 모드" in choice or "Mock" in choice:
+            self.api_entry.configure(state="disabled")
+            self.show_btn.configure(state="disabled")
+            self.plan_combo.configure(state="disabled")
+            self.model_combo.configure(state="disabled")
+            self.log("🧪 테스트 모드입니다. API 키가 필요 없습니다.")
         else:
             self.api_entry.configure(state="normal")
             self.show_btn.configure(state="normal")
@@ -400,18 +436,29 @@ class UIScreensMixin:
         editor.minsize(400, 450)
         editor.grab_set()
 
-        ctk.CTkLabel(editor, text="고정할 단어를 '원문=번역문' 형태로 한 줄씩 입력하세요.\n예: Creeper=크리퍼", 
+        ctk.CTkLabel(editor, text="고정할 단어를 '원문=번역문' 형태로 한 줄씩 입력하세요.\n예: Creeper=크리퍼\n💡 팁: AI가 추가한 단어에는 # [Auto-Extracted]가 표시됩니다.", 
                      font=ctk.CTkFont(family=FONT_NAME, size=12), text_color="#d4d4d8", justify="left"
                      ).pack(padx=12, pady=(12, 4), anchor="w")
 
+        count_label = ctk.CTkLabel(editor, text="현재 등록된 단어: 0개", font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"), text_color="#fb923c")
+        count_label.pack(padx=12, pady=(0, 4), anchor="w")
+
         textbox = ctk.CTkTextbox(editor, font=ctk.CTkFont(family=FONT_NAME, size=12))
         textbox.pack(fill="both", expand=True, padx=12, pady=8)
+
+        def update_count(*args):
+            content = textbox.get("1.0", "end").strip()
+            count = len([line for line in content.split('\n') if line.strip() and '=' in line])
+            count_label.configure(text=f"현재 등록된 단어: {count}개")
+            
+        textbox.bind("<KeyRelease>", update_count)
 
         # Load existing
         current_text = ""
         for k, v in getattr(self.app_state, 'glossary', {}).items():
             current_text += f"{k}={v}\n"
         textbox.insert("1.0", current_text)
+        update_count()
 
         def save_and_close():
             content = textbox.get("1.0", "end").strip()
@@ -505,6 +552,14 @@ class UIScreensMixin:
         engine_key = ENGINES.get(engine_name)
 
         self.save_user_settings()
+
+        # Mock Mode 자동 활성화/비활성화
+        import translation_engines
+        translation_engines.MOCK_MODE = (engine_key == "mock")
+        if engine_key == "mock":
+            self.log("🧪 [테스트 모드] API 호출 없이 모의 번역을 수행합니다.")
+            target_lang = self.target_lang_combo.get()
+            return "gemini_batch", "MOCK_KEY", False, None, target_lang, None
 
         if engine_key == "local_ai":
             local_url = self.local_url_entry.get().strip()
