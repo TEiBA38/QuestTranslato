@@ -8,6 +8,7 @@ import threading
 import tempfile
 import zipfile
 import time
+import translation_memory
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -244,10 +245,12 @@ class TranslationMixin:
                 unique_texts = list(dict.fromkeys([t[4] for t in all_targets]))
                 self.log(f"🧠 총 {len(all_targets)}개의 텍스트 중 중복을 제거한 {len(unique_texts)}개의 고유 문장을 번역합니다.")
                 
+                # 용어 자동 추출: 실제로 새로 번역할 텍스트가 충분히 많을 때만 실행 (캐시 히트 시 스킵하여 API 비용 절약)
+                uncached_for_glossary = [t for t in unique_texts if translation_memory.get_cached_translation(t, target_lang) is None]
                 try:
                     import random
-                    samples = unique_texts.copy()
-                    if len(samples) > 0:
+                    if len(uncached_for_glossary) >= 50:
+                        samples = uncached_for_glossary.copy()
                         random.shuffle(samples)
                         sample_subset = samples[:100]
                         self.log("🧠 [AI 자동 추출] 번역 시작 전 .lang 파일의 핵심 단어를 추출하여 단어장을 진화시킵니다...")
@@ -265,6 +268,10 @@ class TranslationMixin:
                             self.app_state.glossaries_by_lang[target_lang].update(commented_glossary)
                             if hasattr(self, "save_user_settings"):
                                 self.save_user_settings()
+                    elif len(uncached_for_glossary) > 0:
+                        self.log(f"💾 새로 번역할 텍스트가 {len(uncached_for_glossary)}개로 적어 용어 추출을 건너뜁니다.")
+                    else:
+                        self.log("💾 모든 텍스트가 캐시에 있어 용어 추출이 필요 없습니다.")
                 except Exception as e:
                     self.log(f"⚠️ 용어 추출 중 오류가 발생했으나 번역은 계속 진행합니다: {e}")
 
@@ -432,10 +439,12 @@ class TranslationMixin:
                     unique_texts = list(dict.fromkeys(original_texts))
                     self.log(f"✂️ 중복 제거 후 실제 번역할 고유 텍스트는 {len(unique_texts)}개 입니다. 일괄 번역 시작!")
                     
+                    # 용어 자동 추출: 실제로 새로 번역할 텍스트가 충분히 많을 때만 실행
+                    uncached_patchouli = [t for t in unique_texts if translation_memory.get_cached_translation(t, target_lang) is None]
                     try:
                         import random
-                        samples = unique_texts.copy()
-                        if len(samples) > 0:
+                        if len(uncached_patchouli) >= 50:
+                            samples = uncached_patchouli.copy()
                             random.shuffle(samples)
                             sample_subset = samples[:100]
                             self.log("🧠 [AI 자동 추출] 번역 시작 전 가이드북의 핵심 단어를 추출하여 단어장을 진화시킵니다...")
@@ -453,6 +462,10 @@ class TranslationMixin:
                                 self.app_state.glossaries_by_lang[target_lang].update(commented_glossary)
                                 if hasattr(self, "save_user_settings"):
                                     self.save_user_settings()
+                        elif len(uncached_patchouli) > 0:
+                            self.log(f"💾 새로 번역할 텍스트가 {len(uncached_patchouli)}개로 적어 용어 추출을 건너뜁니다.")
+                        else:
+                            self.log("💾 모든 가이드북 텍스트가 캐시에 있어 용어 추출이 필요 없습니다.")
                     except Exception as e:
                         self.log(f"⚠️ 용어 추출 중 오류가 발생했으나 번역은 계속 진행합니다: {e}")
                     
@@ -529,20 +542,14 @@ class TranslationMixin:
             def check_cancel():
                 return getattr(self.app_state, 'cancel_requested', False)
                 
-            final_custom_map = {"xnet": {}, "forestry": {}, "markdown": {}}
+            final_custom_map = {"mcjty": {}, "forestry": {}, "markdown": {}, "eu2": {}, "pi_xml": {}}
             
-            # --- 1. XNet ---
-            xnet_map = books_map.get("xnet", {})
-            if xnet_map:
-                self.log("📖 XNet 매뉴얼 텍스트 추출 중...")
-                unique_texts, parsed_map = custom_book_processor.extract_xnet_texts(xnet_map)
-                
             def do_translation(texts, log_prefix):
                 if not texts: return []
-                self.log(f"📖 {log_prefix}: 고유 문장 {len(texts)}개 번역 시작...")
+                self.log(f"🔎 {log_prefix}: 고유 문장 {len(texts)}개 번역 시작...")
                 def prog_cb(c, t):
                     self.update_progress(c / t if t > 0 else 1)
-                    self.set_status(f"⏳ {log_prefix} 매뉴얼 번역 중... [{c}/{t}]")
+                    self.set_status(f"💬 {log_prefix} 매뉴얼 번역 중... [{c}/{t}]")
                 glossary_map = self.app_state.glossaries_by_lang.get(target_lang, {})
                 
                 if engine_key in ("gemini_batch", "local_ai"):
@@ -566,19 +573,19 @@ class TranslationMixin:
                         if idx % 5 == 0: prog_cb(idx, len(texts))
                 return translated
 
-            # --- 1. XNet ---
-            xnet_map = books_map.get("xnet", {})
-            if xnet_map:
-                self.log("📖 XNet 매뉴얼 텍스트 추출 중...")
-                unique_texts, parsed_map = custom_book_processor.extract_xnet_texts(xnet_map)
+            # --- 1. McJty (XNet, RFTools, etc) ---
+            mcjty_map = books_map.get("mcjty", {})
+            if mcjty_map:
+                self.log("🔎 McJty 매뉴얼 텍스트 추출 중...")
+                unique_texts, parsed_map = custom_book_processor.extract_mcjty_texts(mcjty_map)
                 
                 if unique_texts:
-                    translated_unique = do_translation(unique_texts, "XNet")
+                    translated_unique = do_translation(unique_texts, "McJty")
                     if check_cancel(): return {}
                     
                     trans_dict = {orig: trans for orig, trans in zip(unique_texts, translated_unique)}
-                    final_custom_map["xnet"] = custom_book_processor.assemble_xnet_books(parsed_map, trans_dict)
-                    self.log("✅ XNet 번역 및 조립 완료!")
+                    final_custom_map["mcjty"] = custom_book_processor.assemble_mcjty_books(parsed_map, trans_dict)
+                    self.log("✅ McJty 번역 재조립 완료!")
                     
             # --- 2. Forestry ---
             forestry_map = books_map.get("forestry", {})
@@ -607,7 +614,35 @@ class TranslationMixin:
                     
                     trans_dict = {orig: trans for orig, trans in zip(unique_texts, translated_unique)}
                     final_custom_map["markdown"] = custom_book_processor.assemble_markdown_books(markdown_map, trans_dict)
-                    self.log("✅ 마크다운 번역 및 조립 완료!")
+                    self.log("✅ 마크다운 번역 재조립 완료!")
+
+            # --- 4. Extra Utilities 2 (en_us.json) ---
+            eu2_map = books_map.get("eu2", {})
+            if eu2_map:
+                self.log("🔎 Extra Utilities 2 매뉴얼 텍스트 추출 중...")
+                unique_texts = custom_book_processor.extract_eu2_texts(eu2_map)
+                
+                if unique_texts:
+                    translated_unique = do_translation(unique_texts, "EU2")
+                    if check_cancel(): return {}
+                    
+                    trans_dict = {orig: trans for orig, trans in zip(unique_texts, translated_unique)}
+                    final_custom_map["eu2"] = custom_book_processor.assemble_eu2_books(eu2_map, trans_dict)
+                    self.log("✅ Extra Utilities 2 번역 재조립 완료!")
+
+            # --- 5. Project Intelligence (Draconic Evolution XML) ---
+            pi_xml_map = books_map.get("pi_xml", {})
+            if pi_xml_map:
+                self.log("🔎 Project Intelligence XML 텍스트 추출 중...")
+                unique_texts = custom_book_processor.extract_pi_xml_texts(pi_xml_map)
+                
+                if unique_texts:
+                    translated_unique = do_translation(unique_texts, "ProjectIntel")
+                    if check_cancel(): return {}
+                    
+                    trans_dict = {orig: trans for orig, trans in zip(unique_texts, translated_unique)}
+                    final_custom_map["pi_xml"] = custom_book_processor.assemble_pi_xml_books(pi_xml_map, trans_dict)
+                    self.log("✅ Project Intelligence 번역 재조립 완료!")
 
             return final_custom_map
             
@@ -770,14 +805,21 @@ class TranslationMixin:
             if self.is_cancelled():
                 raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
                 
-            texts = [item[2].replace('\\"', '"') if job["kind"] == "snbt" else item[2] for job, item in chunk]
-            translated_texts = translate_gemini_batch(texts, api_key, is_paid, self.route_log, self.is_cancelled, ai_model=ai_model, target_lang=target_lang)
+            orig_texts = [item[2].replace('\\"', '"') if job["kind"] == "snbt" else item[2] for job, item in chunk]
+            translated_texts = translate_gemini_batch(orig_texts, api_key, is_paid, self.route_log, self.is_cancelled, ai_model=ai_model, target_lang=target_lang)
             
             jobs_to_check = []
-            for (job, item), trans in zip(chunk, translated_texts):
+            for (job, item), orig_text, trans in zip(chunk, orig_texts, translated_texts):
+                # 캐시에 번역 결과 저장
+                if trans:
+                    translation_memory.add_to_memory(orig_text, trans, target_lang)
+                    
                 if job["kind"] == "snbt":
                     line_idx, prefix, _, suffix = item
                     job["translated_map"][line_idx] = f'{prefix}"{str(trans).replace(chr(34), chr(92)+chr(34))}"{suffix}'
+                elif job["kind"] == "lang":
+                    line_idx, prefix, _, suffix = item
+                    job["translated_map"][line_idx] = f'{prefix}{trans}{suffix}'
                 else:
                     parent_node, key, _ = item
                     parent_node[key] = trans
@@ -806,30 +848,60 @@ class TranslationMixin:
                 self.update_progress(completed_items / total_items if total_items else 1)
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
+            translation_memory.save_memory()
 
     def _translate_jobs_sequential(self, jobs, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", on_job_completed=None, custom_url=None):
         total_files = len(jobs)
-        for idx, job in enumerate(jobs, 1):
-            if self.is_cancelled():
-                raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-            self.set_status(f"📂 [{idx}/{total_files}] 파일 처리 중...")
+        try:
+            for idx, job in enumerate(jobs, 1):
+                if self.is_cancelled():
+                    raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+                self.set_status(f"📂 [{idx}/{total_files}] 파일 처리 중...")
 
-            def progress_cb(current, total, _idx=idx):
-                base = (_idx - 1) / total_files
-                inner = (current / total) / total_files if total > 0 else 0
-                self.update_progress(base + inner)
+                def progress_cb(current, total, _idx=idx):
+                    base = (_idx - 1) / total_files
+                    inner = (current / total) / total_files if total > 0 else 0
+                    self.update_progress(base + inner)
 
-            if job["kind"] == "snbt":
-                job["final_text"] = process_snbt_with_progress(
-                    "\n".join(job["lines"]), engine_key, api_key, is_paid,
-                    progress_cb, self.route_log, self.is_cancelled, verbose=False, reference_map=None, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
-            else:
-                process_json_safely(
-                    job["data"], engine_key, api_key, is_paid,
-                    progress_cb, self.route_log, self.is_cancelled, verbose=False, reference_map=None, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
-            
-            if on_job_completed:
-                on_job_completed(job)
+                if job["kind"] == "snbt":
+                    job["final_text"] = process_snbt_with_progress(
+                        "\n".join(job["lines"]), engine_key, api_key, is_paid,
+                        progress_cb, self.route_log, self.is_cancelled, verbose=False, reference_map=None, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
+                elif job["kind"] == "lang":
+                    from translation_engines import translate_with_builtin_fallback
+                    def get_translator():
+                        if engine_key == "openai":
+                            from translation_engines import _translate_openai_request
+                            return lambda v, k: _translate_openai_request(v, k, getattr(self, 'glossary', {}), ai_model, target_lang)
+                        elif engine_key == "claude":
+                            from translation_engines import _translate_claude_request
+                            return lambda v, k: _translate_claude_request(v, k, getattr(self, 'glossary', {}), ai_model, target_lang)
+                        elif engine_key == "deepl":
+                            from translation_engines import translate_deepl
+                            return lambda v, k: translate_deepl(v, k)
+                        elif engine_key == "local_ai":
+                            from translation_engines import translate_local_ai
+                            return lambda v, k: translate_local_ai([v], custom_url, ai_model, target_lang=target_lang)[0]
+                        else:
+                            return lambda v, k: v
+                            
+                    trans_func = get_translator()
+                    total_targets = len(job["targets"])
+                    for i, (line_idx, prefix, orig_text, suffix) in enumerate(job["targets"]):
+                        if self.is_cancelled():
+                            raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+                        trans = translate_with_builtin_fallback(orig_text, api_key, None, trans_func, target_lang)
+                        job["translated_map"][line_idx] = f'{prefix}{trans}{suffix}'
+                        progress_cb(i + 1, total_targets, idx)
+                else:
+                    process_json_safely(
+                        job["data"], engine_key, api_key, is_paid,
+                        progress_cb, self.route_log, self.is_cancelled, verbose=False, reference_map=None, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
+                
+                if on_job_completed:
+                    on_job_completed(job)
+        finally:
+            translation_memory.save_memory()
 
     # ====================================================================
     # 스레드 안전 다이얼로그 & 백업 헬퍼
@@ -1217,7 +1289,14 @@ class TranslationMixin:
                 output_zip = os.path.join(modpack_dir, "QuestTranslatorPro_Pack.zip")
                 mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map)
                 self.log(f"🎉 통합 리소스팩 생성 완료!\n경로: {output_zip}")
-                mb.showinfo("번역 완료", "모드팩 전체 번역이 완료되었습니다!\n마인크래프트 리소스팩 설정에서 'QuestTranslatorPro_Pack.zip' 하나만 적용해주세요.")
+                
+                msg = "모드팩 전체 번역이 완료되었습니다!\n마인크래프트 리소스팩 설정에서 'QuestTranslatorPro_Pack.zip' 하나만 적용해주세요."
+                if not custom_map.get("pi_xml"):
+                    mods_dir = os.path.join(modpack_dir, "mods")
+                    if os.path.isdir(mods_dir) and any('draconic' in f.lower() or 'projectintelligence' in f.lower() for f in os.listdir(mods_dir)):
+                        msg += "\n\n⚠️ 주의: 드라코닉 에볼루션 등(Project Intelligence)은 매뉴얼을 게임 내에서 실시간 다운로드합니다.\n게임을 켜서 인게임 태블릿을 한 번 연 뒤, 툴을 다시 돌려주셔야 해당 매뉴얼 한글화가 적용됩니다!"
+                
+                mb.showinfo("번역 완료", msg)
             
             self.toggle_buttons(True)
             self.update_progress(1.0)

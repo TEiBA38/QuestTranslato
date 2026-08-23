@@ -60,14 +60,15 @@ def find_patchouli_books_in_jars(mods_dir, log_callback=None):
 
 def find_custom_guidebooks_in_jars(mods_dir, log_callback=None):
     """
-    XNet, Forestry, OpenComputers 등 독자적인 포맷을 쓰는 가이드북 파일을 찾습니다.
-    반환값: dict - { 
-        "xnet": { "jar_filename": { "zip_path": text_content_string } },
+    McJty(XNet/RFTools), Forestry, OpenComputers, EU2 등의 커스텀 가이드북을 찾습니다.
+    반환값 dict - { 
+        "mcjty": { "jar_filename": { "zip_path": text_content_string } },
         "forestry": { "jar_filename": { "zip_path": json_data } },
-        "markdown": { "jar_filename": { "zip_path": text_content_string } }
+        "markdown": { "jar_filename": { "zip_path": text_content_string } },
+        "eu2": { "jar_filename": { "zip_path": json_data } }
     }
     """
-    found_books = {"xnet": {}, "forestry": {}, "markdown": {}}
+    found_books = {"mcjty": {}, "forestry": {}, "markdown": {}, "eu2": {}, "pi_xml": {}}
     if not os.path.isdir(mods_dir):
         return found_books
 
@@ -79,15 +80,17 @@ def find_custom_guidebooks_in_jars(mods_dir, log_callback=None):
             with zipfile.ZipFile(jar_path, 'r') as zf:
                 all_names = zf.namelist()
                 
-                # 1. XNet (text file)
-                if 'xnet' in jar_file.lower():
-                    xnet_files = [n for n in all_names if n.lower() == 'assets/xnet/text/manual_xnet.txt']
-                    for f in xnet_files:
+                # 1. McJty (XNet, RFTools, RFToolsDim, etc)
+                if any(x in jar_file.lower() for x in ['xnet', 'rftools']):
+                    # 텍스트 매뉴얼 파일들
+                    mcjty_files = [n for n in all_names if n.lower().startswith('assets/') and '/text/manual' in n.lower() and n.endswith('.txt')]
+                    for f in mcjty_files:
                         content = zf.read(f).decode('utf-8', errors='ignore')
-                        if jar_file not in found_books["xnet"]:
-                            found_books["xnet"][jar_file] = {}
-                        found_books["xnet"][jar_file][f] = content
-                        if log_callback: log_callback(f"📚 {jar_file} 에서 XNet 매뉴얼을 찾았습니다.")
+                        if jar_file not in found_books["mcjty"]:
+                            found_books["mcjty"][jar_file] = {}
+                        found_books["mcjty"][jar_file][f] = content
+                    if jar_file in found_books["mcjty"] and log_callback:
+                        log_callback(f"🔍 {jar_file} 에서 McJty 매뉴얼을 찾았습니다.")
                         
                 # 2. Forestry (json files)
                 if 'forestry' in jar_file.lower():
@@ -101,30 +104,53 @@ def find_custom_guidebooks_in_jars(mods_dir, log_callback=None):
                         except Exception:
                             pass
                     if jar_file in found_books["forestry"] and log_callback:
-                        log_callback(f"📚 {jar_file} 에서 Forestry 매뉴얼을 찾았습니다.")
+                        log_callback(f"🔍 {jar_file} 에서 Forestry 매뉴얼을 찾았습니다.")
                         
                 # 3. Markdown (OpenComputers, BuildCraft)
-                if 'opencomputers' in jar_file.lower():
-                    md_files = [n for n in all_names if n.lower().startswith('assets/opencomputers/doc/en_us/') and n.endswith('.md')]
+                if 'opencomputers' in jar_file.lower() or 'buildcraft' in jar_file.lower():
+                    md_files = [n for n in all_names if n.lower().startswith('assets/') and n.endswith('.md')]
                     for f in md_files:
                         content = zf.read(f).decode('utf-8', errors='ignore')
                         if jar_file not in found_books["markdown"]:
                             found_books["markdown"][jar_file] = {}
                         found_books["markdown"][jar_file][f] = content
                     if jar_file in found_books["markdown"] and log_callback:
-                        log_callback(f"📚 {jar_file} 에서 OpenComputers 매뉴얼을 찾았습니다.")
-                        
-                if 'buildcraft' in jar_file.lower():
-                    md_files = [n for n in all_names if 'guide/en_us/' in n.lower() and n.endswith('.md')]
-                    for f in md_files:
-                        content = zf.read(f).decode('utf-8', errors='ignore')
-                        if jar_file not in found_books["markdown"]:
-                            found_books["markdown"][jar_file] = {}
-                        found_books["markdown"][jar_file][f] = content
-                    if jar_file in found_books["markdown"] and log_callback:
-                        log_callback(f"📚 {jar_file} 에서 BuildCraft 매뉴얼을 찾았습니다.")
-        except Exception:
-            pass
+                        log_callback(f"🔍 {jar_file} 에서 마크다운 매뉴얼을 찾았습니다.")
+
+                # 4. Extra Utilities 2 (en_us.json book)
+                if 'extrautils2' in jar_file.lower():
+                    eu2_files = [n for n in all_names if n.lower().startswith('assets/extrautils2/lang/book/') and n.endswith('.json')]
+                    for f in eu2_files:
+                        try:
+                            content = json.loads(zf.read(f).decode('utf-8', errors='ignore'))
+                            if jar_file not in found_books["eu2"]:
+                                found_books["eu2"][jar_file] = {}
+                            found_books["eu2"][jar_file][f] = content
+                        except Exception:
+                            pass
+                    if jar_file in found_books["eu2"] and log_callback:
+                        log_callback(f"🔍 {jar_file} 에서 EU2 매뉴얼을 찾았습니다.")
+
+        except Exception as e:
+            if log_callback: log_callback(f"⚠️ {jar_file} 읽기 오류: {e}")
+            
+    # 5. Project Intelligence (Draconic Evolution XML)
+    # config/brandon3055/ProjectIntelligence/ModDocs/
+    config_dir = os.path.join(os.path.dirname(mods_dir), "config")
+    pi_docs_dir = os.path.join(config_dir, "brandon3055", "ProjectIntelligence", "ModDocs")
+    if os.path.isdir(pi_docs_dir):
+        for root, dirs, files in os.walk(pi_docs_dir):
+            for file in files:
+                if file.endswith('.xml'):
+                    file_path = os.path.join(root, file)
+                    try:
+                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                        found_books["pi_xml"][file_path] = content
+                    except Exception:
+                        pass
+        if found_books["pi_xml"] and log_callback:
+            log_callback(f"🔍 Project Intelligence에서 다운로드된 XML 매뉴얼 {len(found_books['pi_xml'])}개를 찾았습니다.")
 
     return found_books
 
@@ -225,7 +251,12 @@ def extract_lang_files_from_jars(mods_dir, log_callback=None):
                 # assets/.../lang/en_us.lang 또는 en_us.json 찾기
                 lang_files = [
                     name for name in zf.namelist() 
-                    if (name.lower().endswith('en_us.lang') or name.lower().endswith('en_us.json') or name.lower().endswith('en_us.json5')) and name.startswith('assets/') and '/lang/' in name.lower()
+                    if (name.lower().endswith('en_us.lang') or name.lower().endswith('en_us.json') or name.lower().endswith('en_us.json5')) 
+                    and name.startswith('assets/') 
+                    and '/lang/' in name.lower()
+                    and '/book/' not in name.lower()
+                    and '/patchouli_books/' not in name.lower()
+                    and '/lexicon/' not in name.lower()
                 ]
                 
                 if lang_files:
@@ -322,18 +353,33 @@ def create_combined_resource_pack(translated_langs, translated_books_map, output
                     if zip_path in written_paths:
                         continue
                     written_paths.add(zip_path)
-                    zf.writestr(zip_path, json.dumps(json_data, ensure_ascii=False, indent=2))
+                    zf.writestr(zip_path, json.dumps(json_data, ensure_ascii=True, indent=2))
         
-        # 3. Custom Books (XNet, Forestry, etc)
+        # 3. Custom Books (McJty, Forestry, etc)
         if custom_map:
             for book_type, type_dict in custom_map.items():
+                if book_type == "pi_xml":
+                    # PI XML은 리소스팩이 아닌 로컬 파일 시스템(config 폴더)에 직접 저장합니다.
+                    for path, content in type_dict.items():
+                        # en_US를 ko_KR로 변경하여 저장
+                        new_path = path.replace('en_US', 'ko_KR')
+                        try:
+                            with open(new_path, 'w', encoding='utf-8') as f:
+                                f.write(content)
+                        except Exception:
+                            pass
+                    continue
+                
                 for jar_name, files in type_dict.items():
                     for zip_path, content in files.items():
-                        if zip_path in written_paths:
+                        new_path = zip_path.replace('en_us', 'ko_kr').replace('en_US', 'ko_kr')
+                        if new_path in written_paths:
                             continue
-                        written_paths.add(zip_path)
-                        # Content is either string (XNet) or dict (Forestry)
-                        if isinstance(content, dict):
-                            zf.writestr(zip_path, json.dumps(content, ensure_ascii=False, indent=2))
+                        written_paths.add(new_path)
+                        
+                        # 중요: EU2는 JSON 파일을 읽을 때 시스템 기본 인코딩(CP949)을 사용해서 깨짐 현상이 발생합니다.
+                        # 이를 방지하기 위해 ensure_ascii=True로 설정하여 순수 ASCII와 \uXXXX 유니코드 이스케이프로 저장합니다.
+                        if isinstance(content, dict) or isinstance(content, list):
+                            zf.writestr(new_path, json.dumps(content, ensure_ascii=True, indent=2))
                         else:
-                            zf.writestr(zip_path, content.encode('utf-8'))
+                            zf.writestr(new_path, content.encode('utf-8'))

@@ -3,6 +3,7 @@ import json
 import shutil
 import zipfile
 from constants import has_non_latin
+import translation_memory
 from translation_engines import ENGINES, QuotaExceededError, TranslationCancelledError
 from file_processors import (
     extract_snbt_targets,
@@ -230,7 +231,35 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                 completed_set.add(rel_path)
                 _save_progress(out_dir, completed_set)
                 continue
-            elif file_path.lower().endswith(('.json', '.lang')):
+            elif file_path.lower().endswith('.lang'):
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    lines = f.read().splitlines()
+                
+                content = '\n'.join(lines)
+                if has_non_latin(content):
+                    skipped_translated += 1
+                    shutil.copy2(file_path, target_path)
+                    completed_set.add(rel_path)
+                    _save_progress(out_dir, completed_set)
+                    continue
+
+                targets = []
+                for i, line in enumerate(lines):
+                    if '=' in line and not line.strip().startswith('#'):
+                        parts = line.split('=', 1)
+                        if len(parts) == 2 and parts[1].strip() and not is_code_or_id(parts[1]):
+                            targets.append((i, parts[0] + "=", parts[1], ""))
+                
+                if not targets:
+                    skipped_no_targets += 1
+                    shutil.copy2(file_path, target_path)
+                    completed_set.add(rel_path)
+                    _save_progress(out_dir, completed_set)
+                    continue
+                
+                jobs.append({"kind": "lang", "target_path": target_path, "rel_path": rel_path,
+                             "lines": lines, "targets": targets, "translated_map": {}})
+            elif file_path.lower().endswith('.json'):
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     try:
                         data = json.load(f)
@@ -276,9 +305,11 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                             samples.append(t[2])
                 
                 import random
-                if len(samples) > 0:
-                    random.shuffle(samples)
-                    sample_subset = samples[:100]
+                # 캐시에 없는 텍스트만 추출하여 용어 추출 필요 여부 판단
+                uncached_samples = [s for s in samples if translation_memory.get_cached_translation(s, target_lang) is None]
+                if len(uncached_samples) >= 50:
+                    random.shuffle(uncached_samples)
+                    sample_subset = uncached_samples[:100]
                     
                     context.log("🧠 [AI 자동 추출] 번역 시작 전 모드팩 핵심 단어를 추출하여 단어장을 진화시킵니다...")
                     from translation_engines import auto_extract_glossary
@@ -301,6 +332,10 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                             app.app_state.glossaries_by_lang[target_lang].update(commented_glossary)
                             if hasattr(app, "save_user_settings"):
                                 app.save_user_settings()
+                elif len(uncached_samples) > 0:
+                    context.log(f"💾 새로 번역할 텍스트가 {len(uncached_samples)}개로 적어 용어 추출을 건너뜁니다.")
+                else:
+                    context.log("💾 모든 텍스트가 캐시에 있어 용어 추출이 필요 없습니다.")
             except Exception as e:
                 context.log(f"⚠️ 용어 추출 중 오류가 발생했으나 번역은 계속 진행합니다: {e}")
 
@@ -311,6 +346,12 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                     text = job.get("final_text") or rebuild_snbt(job["lines"], job["translated_map"])
                     with open(job["target_path"], 'w', encoding='utf-8', newline='\n') as f:
                         f.write(text)
+                elif job["kind"] == "lang":
+                    lines = job["lines"].copy()
+                    for i, trans_text in job["translated_map"].items():
+                        lines[i] = trans_text
+                    with open(job["target_path"], 'w', encoding='utf-8', newline='\n') as f:
+                        f.write('\n'.join(lines))
                 else:
                     with open(job["target_path"], 'w', encoding='utf-8') as f:
                         json.dump(job["data"], f, ensure_ascii=False, indent=2)
