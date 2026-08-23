@@ -234,21 +234,15 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
             elif file_path.lower().endswith('.lang'):
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     lines = f.read().splitlines()
-                
-                content = '\n'.join(lines)
-                if has_non_latin(content):
-                    skipped_translated += 1
-                    shutil.copy2(file_path, target_path)
-                    completed_set.add(rel_path)
-                    _save_progress(out_dir, completed_set)
-                    continue
 
                 targets = []
                 for i, line in enumerate(lines):
                     if '=' in line and not line.strip().startswith('#'):
                         parts = line.split('=', 1)
                         if len(parts) == 2 and parts[1].strip() and not is_code_or_id(parts[1]):
-                            targets.append((i, parts[0] + "=", parts[1], ""))
+                            # 한글이 이미 포함되어 있다면 번역 건너뛰기
+                            if not has_non_latin(parts[1]):
+                                targets.append((i, parts[0] + "=", parts[1], ""))
                 
                 if not targets:
                     skipped_no_targets += 1
