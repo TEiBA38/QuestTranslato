@@ -99,9 +99,9 @@ class TranslationMixin:
                     rel_path = os.path.relpath(full_path, modpack_dir)
                     norm_path = rel_path.lower().replace('\\', '/')
                     
-                    # 특수 예외: 외부 퀘스트 lang 파일 (예: kubejs/assets/ftbquests/lang/en_us.json, resources/betterquesting/lang/en_us.lang)
+                    # 언어 파일들 (translation_core.py에서 내용 기반으로 안전하게 퀘스트 관련 텍스트만 깐깐하게 필터링하므로 모두 포함해도 안전함)
                     is_quest_lang = (filename.lower() in ["en_us.json", "en_us.lang"] and 
-                                     any(q in norm_path for q in ["ftbquests", "betterquesting", "hqm", "heracles"]))
+                                     ("lang" in norm_path or "resources" in norm_path))
                     
                     if not is_quest_lang:
                         # 나머지 퀘스트 파일들은 무조건 config/ 하위에 있어야 함
