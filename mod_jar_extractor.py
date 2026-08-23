@@ -28,7 +28,10 @@ def find_patchouli_books_in_jars(mods_dir, log_callback=None):
                 book_files = [
                     name for name in zf.namelist() 
                     if name.lower().endswith('.json') and 
-                       ('patchouli_books/' in name.lower() or 'guideapi/' in name.lower())
+                       ('patchouli_books/' in name.lower() or 'guideapi/' in name.lower()) and
+                       'models/' not in name.lower() and
+                       'blockstates/' not in name.lower() and
+                       'textures/' not in name.lower()
                 ]
                 
                 if book_files:
@@ -52,6 +55,76 @@ def find_patchouli_books_in_jars(mods_dir, log_callback=None):
         except Exception as e:
             if log_callback:
                 log_callback(f"⚠️ {jar_file} 스캔 중 오류 발생: {e}")
+
+    return found_books
+
+def find_custom_guidebooks_in_jars(mods_dir, log_callback=None):
+    """
+    XNet, Forestry, OpenComputers 등 독자적인 포맷을 쓰는 가이드북 파일을 찾습니다.
+    반환값: dict - { 
+        "xnet": { "jar_filename": { "zip_path": text_content_string } },
+        "forestry": { "jar_filename": { "zip_path": json_data } },
+        "markdown": { "jar_filename": { "zip_path": text_content_string } }
+    }
+    """
+    found_books = {"xnet": {}, "forestry": {}, "markdown": {}}
+    if not os.path.isdir(mods_dir):
+        return found_books
+
+    jar_files = [f for f in os.listdir(mods_dir) if f.lower().endswith('.jar')]
+    
+    for jar_file in jar_files:
+        jar_path = os.path.join(mods_dir, jar_file)
+        try:
+            with zipfile.ZipFile(jar_path, 'r') as zf:
+                all_names = zf.namelist()
+                
+                # 1. XNet (text file)
+                if 'xnet' in jar_file.lower():
+                    xnet_files = [n for n in all_names if n.lower() == 'assets/xnet/text/manual_xnet.txt']
+                    for f in xnet_files:
+                        content = zf.read(f).decode('utf-8', errors='ignore')
+                        if jar_file not in found_books["xnet"]:
+                            found_books["xnet"][jar_file] = {}
+                        found_books["xnet"][jar_file][f] = content
+                        if log_callback: log_callback(f"📚 {jar_file} 에서 XNet 매뉴얼을 찾았습니다.")
+                        
+                # 2. Forestry (json files)
+                if 'forestry' in jar_file.lower():
+                    forestry_files = [n for n in all_names if n.lower().startswith('assets/forestry/manual/en_us/') and n.endswith('.json')]
+                    for f in forestry_files:
+                        try:
+                            content = json.loads(zf.read(f).decode('utf-8', errors='ignore'))
+                            if jar_file not in found_books["forestry"]:
+                                found_books["forestry"][jar_file] = {}
+                            found_books["forestry"][jar_file][f] = content
+                        except Exception:
+                            pass
+                    if jar_file in found_books["forestry"] and log_callback:
+                        log_callback(f"📚 {jar_file} 에서 Forestry 매뉴얼을 찾았습니다.")
+                        
+                # 3. Markdown (OpenComputers, BuildCraft)
+                if 'opencomputers' in jar_file.lower():
+                    md_files = [n for n in all_names if n.lower().startswith('assets/opencomputers/doc/en_us/') and n.endswith('.md')]
+                    for f in md_files:
+                        content = zf.read(f).decode('utf-8', errors='ignore')
+                        if jar_file not in found_books["markdown"]:
+                            found_books["markdown"][jar_file] = {}
+                        found_books["markdown"][jar_file][f] = content
+                    if jar_file in found_books["markdown"] and log_callback:
+                        log_callback(f"📚 {jar_file} 에서 OpenComputers 매뉴얼을 찾았습니다.")
+                        
+                if 'buildcraft' in jar_file.lower():
+                    md_files = [n for n in all_names if 'guide/en_us/' in n.lower() and n.endswith('.md')]
+                    for f in md_files:
+                        content = zf.read(f).decode('utf-8', errors='ignore')
+                        if jar_file not in found_books["markdown"]:
+                            found_books["markdown"][jar_file] = {}
+                        found_books["markdown"][jar_file][f] = content
+                    if jar_file in found_books["markdown"] and log_callback:
+                        log_callback(f"📚 {jar_file} 에서 BuildCraft 매뉴얼을 찾았습니다.")
+        except Exception:
+            pass
 
     return found_books
 
@@ -109,27 +182,25 @@ def create_resource_pack(output_zip_path, translated_books_map, pack_description
                 "description": pack_description
             }
         }
-        zf.writestr('pack.mcmeta', json.dumps(pack_mcmeta, ensure_ascii=False, indent=2))
+        zf.writestr('pack.mcmeta', json.dumps(pack_mcmeta, ensure_ascii=True, indent=2))
+        # 1x1 투명 PNG (pack.png 없으면 1.12.2에서 비호환 판정 받을 수 있음)
+        import base64
+        BLANK_PNG = base64.b64decode(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+        )
+        zf.writestr('pack.png', BLANK_PNG)
 
-        # 2. 번역된 파일들을 원래 경로에서 언어 코드만 ko_kr로 변경하여 zip에 쓰기
+        # 2. 번역된 파일들을 원본 경로 그대로(en_us) 덮어쓰기하여 zip에 쓰기
+        # 클라이언트 언어가 영어이거나 모드가 en_us를 하드코딩한 경우를 위해 en_us 경로를 유지하는 것이 가장 안전합니다.
         written_paths = set()
         for jar_name, files in translated_books_map.items():
             for zip_path, json_data in files.items():
-                # 언어 폴더명을 ko_kr로 변경 (예: .../en_us/entries/... -> .../ko_kr/entries/...)
-                # 대소문자 모두 처리
-                new_zip_path = zip_path.replace('/en_us/', '/ko_kr/').replace('/en_US/', '/ko_kr/')
-                
-                # 추가적으로 최상단 폴더가 다른 언어일 가능성도 대비 (거의 없지만 방어적 코드)
-                if '/en_us/' not in zip_path.lower():
-                    # 만약 언어 코드가 명시되지 않았다면 그냥 원본 덮어쓰기
-                    pass
-                    
-                if new_zip_path in written_paths:
+                if zip_path in written_paths:
                     continue
-                written_paths.add(new_zip_path)
+                written_paths.add(zip_path)
                 
                 json_str = json.dumps(json_data, ensure_ascii=False, indent=2)
-                zf.writestr(new_zip_path, json_str)
+                zf.writestr(zip_path, json_str)
 
 def extract_lang_files_from_jars(mods_dir, log_callback=None):
     """
@@ -151,10 +222,10 @@ def extract_lang_files_from_jars(mods_dir, log_callback=None):
         jar_path = os.path.join(mods_dir, jar_file)
         try:
             with zipfile.ZipFile(jar_path, 'r') as zf:
-                # assets/.../lang/en_us.lang 찾기
+                # assets/.../lang/en_us.lang 또는 en_us.json 찾기
                 lang_files = [
                     name for name in zf.namelist() 
-                    if name.lower().endswith('en_us.lang') and name.startswith('assets/')
+                    if (name.lower().endswith('en_us.lang') or name.lower().endswith('en_us.json') or name.lower().endswith('en_us.json5')) and name.startswith('assets/') and '/lang/' in name.lower()
                 ]
                 
                 if lang_files:
@@ -188,7 +259,13 @@ def create_lang_resource_pack(translated_langs, output_zip_path, modpack_dir=Non
                 "description": "QuestTranslatorPro Lang Translations"
             }
         }
-        zf.writestr("pack.mcmeta", json.dumps(pack_mcmeta, indent=4, ensure_ascii=False))
+        zf.writestr("pack.mcmeta", json.dumps(pack_mcmeta, indent=4, ensure_ascii=True))
+        # 1x1 투명 PNG (pack.png 없으면 1.12.2에서 비호환 판정 받을 수 있음)
+        import base64
+        BLANK_PNG = base64.b64decode(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+        )
+        zf.writestr('pack.png', BLANK_PNG)
 
         # 번역된 파일 추가
         written_paths = set()
@@ -200,3 +277,63 @@ def create_lang_resource_pack(translated_langs, output_zip_path, modpack_dir=Non
                     continue
                 written_paths.add(ko_kr_path)
                 zf.writestr(ko_kr_path, translated_content)
+
+def create_combined_resource_pack(translated_langs, translated_books_map, output_zip_path, modpack_dir=None, custom_map=None):
+    """
+    .lang 번역본과 Patchouli 가이드북 번역본을 하나의 리소스팩 zip으로 통합 생성합니다.
+    translated_langs: { "jar_name": { "assets/modid/lang/en_us.lang": "번역내용" } }
+    translated_books_map: { "jar_name": { "zip_path": json_data } }
+    """
+    import base64
+    BLANK_PNG = base64.b64decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+    )
+    p_format = get_pack_format(modpack_dir)
+    with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        pack_mcmeta = {
+            "pack": {
+                "pack_format": p_format,
+                "description": "QuestTranslatorPro Korean Translation"
+            }
+        }
+        zf.writestr("pack.mcmeta", json.dumps(pack_mcmeta, indent=2, ensure_ascii=True))
+        zf.writestr("pack.png", BLANK_PNG)
+
+        written_paths = set()
+
+        # 1. .lang 및 .json 파일 (en_us -> ko_kr)
+        if translated_langs:
+            for jar_name, lang_dict in translated_langs.items():
+                for original_zip_path, translated_content in lang_dict.items():
+                    ko_kr_path = original_zip_path
+                    for ext in ['.lang', '.json', '.json5']:
+                        if ko_kr_path.lower().endswith('en_us' + ext):
+                            ko_kr_path = ko_kr_path[:-len('en_us' + ext)] + 'ko_kr' + ext
+                            break
+                    if ko_kr_path in written_paths:
+                        continue
+                    written_paths.add(ko_kr_path)
+                    zf.writestr(ko_kr_path, translated_content)
+
+        # 2. Patchouli JSON 파일 (원본 경로 en_us 그대로 덮어쓰기)
+        if translated_books_map:
+            for jar_name, files in translated_books_map.items():
+                for zip_path, json_data in files.items():
+                    if zip_path in written_paths:
+                        continue
+                    written_paths.add(zip_path)
+                    zf.writestr(zip_path, json.dumps(json_data, ensure_ascii=False, indent=2))
+        
+        # 3. Custom Books (XNet, Forestry, etc)
+        if custom_map:
+            for book_type, type_dict in custom_map.items():
+                for jar_name, files in type_dict.items():
+                    for zip_path, content in files.items():
+                        if zip_path in written_paths:
+                            continue
+                        written_paths.add(zip_path)
+                        # Content is either string (XNet) or dict (Forestry)
+                        if isinstance(content, dict):
+                            zf.writestr(zip_path, json.dumps(content, ensure_ascii=False, indent=2))
+                        else:
+                            zf.writestr(zip_path, content.encode('utf-8'))

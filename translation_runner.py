@@ -173,7 +173,7 @@ class TranslationMixin:
                 
         threading.Thread(target=run_instance_translation, daemon=True).start()
 
-    def _translate_lang_files(self, engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir):
+    def _translate_lang_files(self, engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url=None):
         try:
                 self.log("🗂️ 전체 모드(.lang) 번역 및 리소스팩 생성을 시작합니다...")
                 import mod_jar_extractor
@@ -211,22 +211,34 @@ class TranslationMixin:
                 for jar_name, zip_dict in langs_map.items():
                     parsed_langs_map[jar_name] = {}
                     for zip_path, content in zip_dict.items():
-                        lines = content.splitlines()
-                        parsed_lines = []
-                        for idx, line in enumerate(lines):
-                            if '=' in line and not line.strip().startswith('#'):
-                                k, v = line.split('=', 1)
-                                k = k.strip()
-                                v = v.strip()
-                                if v:
-                                    # 포맷 기호(%s, %d 등)가 있으면 번역을 생략하거나 복잡해짐.
-                                    # 여기서는 최대한 안전하게 번역하되 포맷은 유지.
-                                    is_short = should_append_english(k, v)
-                                    all_targets.append((jar_name, zip_path, idx, k, v, is_short))
-                                parsed_lines.append([k, v]) # [0] key, [1] value
-                            else:
-                                parsed_lines.append(line) # 그냥 텍스트
-                        parsed_langs_map[jar_name][zip_path] = parsed_lines
+                        if zip_path.lower().endswith('.json') or zip_path.lower().endswith('.json5'):
+                            try:
+                                import json
+                                json_data = json.loads(content)
+                                parsed_lines = {}
+                                for k, v in json_data.items():
+                                    if isinstance(v, str) and v.strip():
+                                        is_short = should_append_english(k, v)
+                                        all_targets.append((jar_name, zip_path, k, k, v, is_short))
+                                        parsed_lines[k] = v
+                                parsed_langs_map[jar_name][zip_path] = ('json', parsed_lines, json_data)
+                            except Exception as e:
+                                self.log(f"⚠️ {jar_name}의 {zip_path} 파싱 실패: {e}")
+                        else:
+                            lines = content.splitlines()
+                            parsed_lines = []
+                            for idx, line in enumerate(lines):
+                                if '=' in line and not line.strip().startswith('#'):
+                                    k, v = line.split('=', 1)
+                                    k = k.strip()
+                                    v = v.strip()
+                                    if v:
+                                        is_short = should_append_english(k, v)
+                                        all_targets.append((jar_name, zip_path, idx, k, v, is_short))
+                                    parsed_lines.append([k, v]) # [0] key, [1] value
+                                else:
+                                    parsed_lines.append(line) # 그냥 텍스트
+                            parsed_langs_map[jar_name][zip_path] = ('lang', parsed_lines, None)
                 
                 # 중복 제거 (Batch 번역 최적화)
                 unique_texts = list(dict.fromkeys([t[4] for t in all_targets]))
@@ -277,37 +289,60 @@ class TranslationMixin:
                 translation_dict = dict(zip(unique_texts, translated_unique))
                 
                 self.log("📦 번역된 텍스트를 .lang 구조에 맞게 조립합니다...")
+                import re
+                def validate_format_specifiers(orig, trans):
+                    if not orig or not trans: return False
+                    # Minecraft uses Java String.format, e.g., %s, %d, %1$s, %.2f, %%
+                    pattern = re.compile(r'%(\d+\$)?[-+#0 ]*\d*(?:\.\d+)?[a-zA-Z%]')
+                    orig_matches = sorted(pattern.findall(orig))
+                    trans_matches = sorted(pattern.findall(trans))
+                    return orig_matches == trans_matches
+
                 # 재조립
                 for (jar_name, zip_path, idx, k, v, is_short) in all_targets:
                     trans_v = translation_dict.get(v, v)
+                    
+                    # 🚀 크래시 방지 로직: 원본에 %s 같은 포맷 문자가 있는데 번역본에서 누락되었거나 변형되었다면 원본으로 복구
+                    if trans_v != v and not validate_format_specifiers(v, trans_v):
+                        trans_v = v
+
                     if trans_v and is_short and str(trans_v).strip() != str(v).strip():
                         # 아이템 이름이면 영어 병기 (한국어 이름 (English Name))
-                        final_v = f"{trans_v} ({v})"
+                        # 단, 원본에 %s 등 포맷 지정자가 있으면 병기하면 안됨 (개수가 2배로 불어나서 크래시)
+                        has_fmt = re.search(r'%(\d+\$)?[a-zA-Z]', v)
+                        if has_fmt:
+                            final_v = trans_v
+                        else:
+                            final_v = f"{trans_v} ({v})"
                     else:
                         final_v = trans_v if trans_v else v
-                    parsed_langs_map[jar_name][zip_path][idx][1] = final_v
+                    
+                    if parsed_langs_map[jar_name][zip_path][0] == 'lang':
+                        parsed_langs_map[jar_name][zip_path][1][idx][1] = final_v
+                    else:
+                        parsed_langs_map[jar_name][zip_path][1][idx] = final_v
 
                 # 다시 문자열로 합치기
                 final_langs_map = {}
                 for jar_name, zip_dict in parsed_langs_map.items():
                     final_langs_map[jar_name] = {}
-                    for zip_path, lines in zip_dict.items():
-                        out_lines = []
-                        for line in lines:
-                            if isinstance(line, list):
-                                out_lines.append(f"{line[0]}={line[1]}")
-                            else:
-                                out_lines.append(line)
-                        final_langs_map[jar_name][zip_path] = "\n".join(out_lines)
+                    for zip_path, (file_type, lines_or_dict, orig_json) in zip_dict.items():
+                        if file_type == 'lang':
+                            out_lines = []
+                            for line in lines_or_dict:
+                                if isinstance(line, list):
+                                    out_lines.append(f"{line[0]}={line[1]}")
+                                else:
+                                    out_lines.append(line)
+                            final_langs_map[jar_name][zip_path] = "\n".join(out_lines)
+                        else:
+                            import json
+                            for k, v in lines_or_dict.items():
+                                orig_json[k] = v
+                            final_langs_map[jar_name][zip_path] = json.dumps(orig_json, ensure_ascii=False, indent=2)
                 
-                output_zip = os.path.join(modpack_dir, "QuestTranslatorPro_Lang_Pack.zip")
-                mod_jar_extractor.create_lang_resource_pack(final_langs_map, output_zip, modpack_dir=modpack_dir)
-                
-                self.log("✨ 전체 모드(.lang) 번역 및 리소스팩 생성이 완료되었습니다!")
-                self.log(f"저장 위치: {output_zip}")
-                
-                import tkinter.messagebox as mb
-                mb.showinfo("번역 완료", "모드팩 전체 언어 파일(.lang) 번역이 완료되었습니다!\n마인크래프트 리소스팩 설정에서 'QuestTranslatorPro_Lang_Pack.zip'을 적용해주세요.")
+                self.log("✨ 전체 모드(.lang) 번역 처리가 완료되었습니다!")
+                return final_langs_map
 
         except Exception as exc:
             if "사용자에 의해 번역이 취소되었습니다" in str(exc) or getattr(self.app_state, 'cancel_requested', False):
@@ -316,7 +351,7 @@ class TranslationMixin:
                 self.log(f"❌ 언어 파일 번역 중 오류: {exc}")
                 self.show_messagebox("error", "오류", f"언어 파일 번역 중 오류가 발생했습니다:\n{exc}")
 
-    def _translate_patchouli_books(self, engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir):
+    def _translate_patchouli_books(self, engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url=None):
         try:
                 self.log("📚 가이드북(Patchouli) 전용 번역 및 리소스팩 생성을 시작합니다...")
                 import mod_jar_extractor
@@ -325,12 +360,12 @@ class TranslationMixin:
                 mods_dir = os.path.join(modpack_dir, "mods")
                 if not os.path.isdir(mods_dir):
                     self.log("⚠️ mods 폴더를 찾을 수 없어 가이드북을 번역할 수 없습니다.")
-                    return
+                    return {}
                     
                 books_map = mod_jar_extractor.find_patchouli_books_in_jars(mods_dir, log_callback=self.log)
                 if not books_map:
                     self.log("⚠️ 번역할 가이드북을 찾지 못했습니다.")
-                    return
+                    return {}
                 
                 total_pages = sum(len(pages) for pages in books_map.values())
                 
@@ -461,32 +496,129 @@ class TranslationMixin:
                             node[k] = t_text
                 
                 if not check_cancel():
-                    resource_pack_path = os.path.join(modpack_dir, "QuestTranslatorPro_Patchouli_Pack.zip")
-                    mod_jar_extractor.create_resource_pack(resource_pack_path, translated_books_map, "Translated Guidebooks by QuestTranslatorPro", modpack_dir=modpack_dir)
-                    self.log(f"🎉 가이드북 리소스팩 생성 완료!\n경로: {resource_pack_path}")
-                    self.show_messagebox("info", "완료", f"가이드북 리소스팩이 생성되었습니다.\n\n인게임의 리소스팩 설정에서 'QuestTranslatorPro_Patchouli_Pack.zip'을 활성화해주세요!")
+                    self.log(f"🎉 가이드북 번역 데이터 생성 완료!")
+                    return translated_books_map
                 else:
                     self.log("⚠️ 번역이 취소되었습니다.")
-                    if translated_books_map:
-                        import tkinter.messagebox as mb
-                        if mb.askyesno("부분 저장", f"지금까지 번역된 페이지라도 리소스팩으로 묶어서 저장하시겠습니까?\n(API 비용 낭비를 막을 수 있습니다)"):
-                            partial_pack_path = os.path.join(modpack_dir, "QuestTranslatorPro_Patchouli_Pack_Partial.zip")
-                            mod_jar_extractor.create_resource_pack(partial_pack_path, translated_books_map, "Partially Translated Guidebooks", modpack_dir=modpack_dir)
-                            self.log(f"💾 부분 번역 리소스팩이 저장되었습니다!\n경로: {partial_pack_path}")
+                    return translated_books_map
         except Exception as exc:
             if "취소" in str(exc) or getattr(self.app_state, 'cancel_requested', False):
                 self.log("⚠️ 번역이 취소되었습니다.")
-                if 'translated_books_map' in locals() and translated_books_map:
-                    import tkinter.messagebox as mb
-                    if mb.askyesno("부분 저장", f"지금까지 번역된 페이지라도 리소스팩으로 묶어서 저장하시겠습니까?\n(API 비용 낭비를 막을 수 있습니다)"):
-                        partial_pack_path = os.path.join(modpack_dir, "QuestTranslatorPro_Patchouli_Pack_Partial.zip")
-                        import mod_jar_extractor
-                        mod_jar_extractor.create_resource_pack(partial_pack_path, translated_books_map, "Partially Translated Guidebooks")
-                        self.log(f"💾 부분 번역 리소스팩이 저장되었습니다!\n경로: {partial_pack_path}")
-                else:
-                    self.log(f"❌ 가이드북 번역 중 오류: {exc}")
-                    self.show_messagebox("error", "오류", f"가이드북 번역 중 오류가 발생했습니다:\n{exc}")
+                return locals().get('translated_books_map', {})
+            else:
+                self.log(f"❌ 가이드북 번역 중 오류: {exc}")
+                self.show_messagebox("error", "오류", f"가이드북 번역 중 오류가 발생했습니다:\n{exc}")
+                return {}
 
+    def _translate_custom_books(self, engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url=None):
+        try:
+            import mod_jar_extractor
+            import custom_book_processor
+            import file_processors
+            from translation_engines import translate_deepl, translate_openai, translate_google
+            
+            mods_dir = os.path.join(modpack_dir, "mods")
+            if not os.path.isdir(mods_dir):
+                return {}
+                
+            books_map = mod_jar_extractor.find_custom_guidebooks_in_jars(mods_dir, log_callback=self.log)
+            if not books_map or not any(books_map.values()):
+                self.log("⚠️ 번역할 커스텀 가이드북을 찾지 못했습니다.")
+                return {}
+                
+            def check_cancel():
+                return getattr(self.app_state, 'cancel_requested', False)
+                
+            final_custom_map = {"xnet": {}, "forestry": {}, "markdown": {}}
+            
+            # --- 1. XNet ---
+            xnet_map = books_map.get("xnet", {})
+            if xnet_map:
+                self.log("📖 XNet 매뉴얼 텍스트 추출 중...")
+                unique_texts, parsed_map = custom_book_processor.extract_xnet_texts(xnet_map)
+                
+            def do_translation(texts, log_prefix):
+                if not texts: return []
+                self.log(f"📖 {log_prefix}: 고유 문장 {len(texts)}개 번역 시작...")
+                def prog_cb(c, t):
+                    self.update_progress(c / t if t > 0 else 1)
+                    self.set_status(f"⏳ {log_prefix} 매뉴얼 번역 중... [{c}/{t}]")
+                glossary_map = self.app_state.glossaries_by_lang.get(target_lang, {})
+                
+                if engine_key in ("gemini_batch", "local_ai"):
+                    translated = file_processors._run_batch_jobs(
+                        texts, lambda x: x, engine_key, api_key, is_paid,
+                        log_callback=lambda m: None, cancel_checker=check_cancel, progress_callback=prog_cb,
+                        reference_map=glossary_map, glossary=glossary_map,
+                        ai_model=ai_model, target_lang=target_lang, log_prefix=log_prefix, custom_url=custom_url
+                    )
+                else:
+                    translated = []
+                    for idx, t in enumerate(texts, 1):
+                        if check_cancel(): break
+                        if engine_key == "deepl":
+                            trans = translate_deepl(t, api_key, reference_map=glossary_map, target_lang=target_lang)
+                        elif engine_key == "openai":
+                            trans = translate_openai(t, api_key, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang)
+                        else:
+                            trans = translate_google(t, api_key, reference_map=glossary_map, target_lang=target_lang)
+                        translated.append(trans)
+                        if idx % 5 == 0: prog_cb(idx, len(texts))
+                return translated
+
+            # --- 1. XNet ---
+            xnet_map = books_map.get("xnet", {})
+            if xnet_map:
+                self.log("📖 XNet 매뉴얼 텍스트 추출 중...")
+                unique_texts, parsed_map = custom_book_processor.extract_xnet_texts(xnet_map)
+                
+                if unique_texts:
+                    translated_unique = do_translation(unique_texts, "XNet")
+                    if check_cancel(): return {}
+                    
+                    trans_dict = {orig: trans for orig, trans in zip(unique_texts, translated_unique)}
+                    final_custom_map["xnet"] = custom_book_processor.assemble_xnet_books(parsed_map, trans_dict)
+                    self.log("✅ XNet 번역 및 조립 완료!")
+                    
+            # --- 2. Forestry ---
+            forestry_map = books_map.get("forestry", {})
+            if forestry_map:
+                self.log("📖 Forestry 매뉴얼 텍스트 추출 중...")
+                unique_texts = custom_book_processor.extract_forestry_texts(forestry_map)
+                
+                if unique_texts:
+                    translated_unique = do_translation(unique_texts, "Forestry")
+                    if check_cancel(): return {}
+                    
+                    trans_dict = {orig: trans for orig, trans in zip(unique_texts, translated_unique)}
+                    final_custom_map["forestry"] = custom_book_processor.assemble_forestry_books(forestry_map, trans_dict)
+                    self.log("✅ Forestry 번역 및 조립 완료!")
+            
+
+            # --- 3. Markdown (OpenComputers, BuildCraft) ---
+            markdown_map = books_map.get("markdown", {})
+            if markdown_map:
+                self.log("📖 마크다운 매뉴얼(OpenComputers 등) 텍스트 추출 중...")
+                unique_texts = custom_book_processor.extract_markdown_texts(markdown_map)
+                
+                if unique_texts:
+                    translated_unique = do_translation(unique_texts, "마크다운")
+                    if check_cancel(): return {}
+                    
+                    trans_dict = {orig: trans for orig, trans in zip(unique_texts, translated_unique)}
+                    final_custom_map["markdown"] = custom_book_processor.assemble_markdown_books(markdown_map, trans_dict)
+                    self.log("✅ 마크다운 번역 및 조립 완료!")
+
+            return final_custom_map
+            
+        except Exception as exc:
+            if "취소" in str(exc) or getattr(self.app_state, 'cancel_requested', False):
+                self.log("⚠️ 번역이 취소되었습니다.")
+                return {}
+            else:
+                self.log(f"❌ 커스텀 가이드북 번역 중 오류: {exc}")
+                self.show_messagebox("error", "오류", f"커스텀 가이드북 번역 중 오류가 발생했습니다:\n{exc}")
+                return {}
 
     # ====================================================================
     # 단일 파일 번역
@@ -1054,21 +1186,38 @@ class TranslationMixin:
             # 1. Patchouli Books
             self.update_progress(0.0)
             self.log("\n==========================================")
-            self.log("📚 [1/2단계] 가이드북(Patchouli) 전용 번역 시작...")
-            self._translate_patchouli_books(engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir)
+            self.log("📚 [1/3단계] 가이드북(Patchouli) 전용 번역 시작...")
+            patchouli_map = self._translate_patchouli_books(engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url)
             
             if getattr(self.app_state, 'cancel_requested', False):
                 self.log("⚠️ 사용자가 번역을 취소했습니다.")
-                self.toggle_buttons(True)
-                self.update_progress(1.0)
-                self.set_status("대기 중")
-                return
-                
-            # 2. Lang Files
-            self.update_progress(0.0)
-            self.log("\n==========================================")
-            self.log("🗂️ [2/2단계] 전체 모드(.lang) 텍스트 번역 시작...")
-            self._translate_lang_files(engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir)
+            else:
+                # 1.5 Custom Books
+                self.update_progress(0.0)
+                self.log("\n==========================================")
+                self.log("📖 [2/3단계] 커스텀 가이드북(XNet 등) 번역 시작...")
+                custom_map = self._translate_custom_books(engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url)
+            
+            if getattr(self.app_state, 'cancel_requested', False):
+                self.log("⚠️ 사용자가 번역을 취소했습니다.")
+            else:
+                # 2. Lang Files
+                self.update_progress(0.0)
+                self.log("\n==========================================")
+                self.log("🗂️ [3/3단계] 전체 모드(.lang) 텍스트 번역 시작...")
+                lang_map = self._translate_lang_files(engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url)
+
+            # 3. Create Combined Pack (Even if cancelled, save what we have)
+            if 'lang_map' not in locals(): lang_map = {}
+            if 'custom_map' not in locals(): custom_map = {}
+            if patchouli_map or lang_map or custom_map:
+                import mod_jar_extractor
+                import os
+                import tkinter.messagebox as mb
+                output_zip = os.path.join(modpack_dir, "QuestTranslatorPro_Pack.zip")
+                mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map)
+                self.log(f"🎉 통합 리소스팩 생성 완료!\n경로: {output_zip}")
+                mb.showinfo("번역 완료", "모드팩 전체 번역이 완료되었습니다!\n마인크래프트 리소스팩 설정에서 'QuestTranslatorPro_Pack.zip' 하나만 적용해주세요.")
             
             self.toggle_buttons(True)
             self.update_progress(1.0)
