@@ -248,7 +248,18 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                     if '=' in line and not line.strip().startswith('#'):
                         parts = line.split('=', 1)
                         if len(parts) == 2 and parts[1].strip() and not is_code_or_id(parts[1]):
-                            # 한글이 이미 포함되어 있다면 번역 건너뛰기
+                            key_lower = parts[0].strip().lower()
+                            
+                            # 1. 아이템/블록 이름 등은 번역에서 강제 제외 (호환성 보호)
+                            if key_lower.endswith('.name') or key_lower.startswith('itemgroup.') or key_lower.startswith('key.'):
+                                continue
+                                
+                            # 2. 퀘스트, 가이드북, 툴팁, 설명문 관련 키워드만 번역 허용 (쓸데없는 모드 번역 방지)
+                            valid_keywords = ['quest', 'advancement', 'title', 'desc', 'text', 'book', 'page', 'tooltip', 'info', 'dialog', 'chapter', 'interactions']
+                            if not any(kw in key_lower for kw in valid_keywords):
+                                continue
+
+                            # 3. 한글이 이미 포함되어 있다면 번역 건너뛰기
                             if not has_non_latin(parts[1]):
                                 targets.append((i, parts[0] + "=", parts[1], ""))
                 
