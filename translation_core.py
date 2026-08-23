@@ -4,7 +4,7 @@ import shutil
 import zipfile
 from constants import has_non_latin
 import translation_memory
-from translation_engines import ENGINES, QuotaExceededError, TranslationCancelledError
+from translation_engines import ENGINES, QuotaExceededError, TranslationCancelledError, is_code_or_id
 from file_processors import (
     extract_snbt_targets,
     rebuild_snbt,
