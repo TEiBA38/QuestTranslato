@@ -175,6 +175,14 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
 
         for idx, file_path in enumerate(target_files, 1):
             rel_path = os.path.relpath(file_path, raw_dir)
+            
+            # en_us.lang 등의 영어 언어 파일을 ko_kr.lang으로 변환하여 생성
+            base_name = os.path.basename(rel_path).lower()
+            if base_name in ('en_us.lang', 'en_us.json') and ('lang' in rel_path.lower() or 'resources' in rel_path.lower()):
+                new_ext = '.json' if base_name.endswith('.json') else '.lang'
+                dir_name = os.path.dirname(rel_path)
+                rel_path = os.path.join(dir_name, f"ko_kr{new_ext}") if dir_name else f"ko_kr{new_ext}"
+
             target_path = os.path.join(out_dir, rel_path)
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
 
