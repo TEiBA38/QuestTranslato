@@ -72,6 +72,10 @@ def find_patchouli_books_in_jars(mods_dir, log_callback=None):
                             return True
                     return False
                     
+                # ⚠️ 이미 공식 한국어(ko_kr) 가이드북이 내장된 모드(Botania, Ars Nouveau 등)는 추출을 건너뛰어 인게임 중복 엔트리 버그 방지
+                if any('/patchouli_books/' in n.lower() and '/ko_kr/' in n.lower() for n in zf.namelist()) or 'botania' in jar_file.lower():
+                    continue
+
                 book_files = [
                     name for name in zf.namelist() 
                     if name.lower().endswith('.json') and 
