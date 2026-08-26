@@ -300,7 +300,6 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
 
         if not is_paid:
             with _gemini_api_rate_lock:
-                import time
                 global _last_gemini_api_call
                 elapsed = time.time() - _last_gemini_api_call
                 if elapsed < 6.5:
@@ -343,10 +342,19 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
                     raise call_err
 
             raw_text = res.text.strip() if res.text else ""
+            if raw_text.startswith("```"):
+                raw_text = re.sub(r"^```[a-zA-Z]*\s*", "", raw_text)
+                raw_text = re.sub(r"\s*```$", "", raw_text).strip()
             match = re.search(r'\[.*\]', raw_text, re.DOTALL)
             if match:
                 raw_text = match.group(0)
-            translated_array = json.loads(raw_text)
+            
+            try:
+                translated_array = json.loads(raw_text, strict=False)
+            except Exception:
+                # 불완전한 제어 문자나 이스케이프 오류 방어
+                cleaned = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', raw_text)
+                translated_array = json.loads(cleaned, strict=False)
             if isinstance(translated_array, list) and len(translated_array) == len(unique_unresolved):
                 with _gemini_cache_lock:
                     if len(_gemini_cache) >= _GEMINI_CACHE_MAX:
@@ -581,7 +589,6 @@ def auto_extract_glossary(text_samples, engine_key, api_key, ai_model=None, targ
             headers = {"Content-Type": "application/json"}
             if api_key: headers["Authorization"] = f"Bearer {api_key}"
             payload = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}
-            import requests
             res = requests.post(url, headers=headers, json=payload, timeout=30)
             res.raise_for_status()
             raw_text = res.json()['choices'][0]['message']['content'].strip()

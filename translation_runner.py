@@ -8,6 +8,8 @@ import threading
 import tempfile
 import zipfile
 import time
+import random
+import re
 import translation_memory
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
