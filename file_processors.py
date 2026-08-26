@@ -18,17 +18,26 @@ from translation_engines import (
 
 import translation_memory
 
-def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary=None, ai_model=None, target_lang="한국어 (Korean)", log_prefix="API 번역 진행 중", custom_url=None):
+def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary=None, ai_model=None, target_lang="한국어 (Korean)", log_prefix="API 번역 진행 중", custom_url=None, is_item_flags=None, is_book_flags=None):
     total = len(items)
     translated_results = [None] * total
 
-    # 1단계: 글로벌 번역 메모리 조회
+    # 1단계: 글로벌/모드팩/아이템/가이드북 번역 메모리 조회
     uncached_indices = []
     uncached_texts = []
     
     for i, item in enumerate(items):
         original_text = text_extractor(item)
-        cached_val = translation_memory.get_cached_translation(original_text, target_lang)
+        is_item = is_item_flags[i] if is_item_flags else False
+        is_book = is_book_flags[i] if is_book_flags else False
+        
+        if is_item:
+            cached_val = translation_memory.get_cached_item_translation(original_text, target_lang)
+        elif is_book:
+            cached_val = translation_memory.get_cached_book_translation(original_text, target_lang)
+        else:
+            cached_val = translation_memory.get_cached_translation(original_text, target_lang)
+            
         if cached_val is not None:
             translated_results[i] = cached_val
         else:
@@ -65,7 +74,14 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                     
                     for idx_in_global, orig, res in zip(indices_chunk, texts_chunk, res_texts):
                         translated_results[idx_in_global] = res
-                        translation_memory.add_to_memory(orig, res, target_lang)
+                        is_item = is_item_flags[idx_in_global] if is_item_flags else False
+                        is_book = is_book_flags[idx_in_global] if is_book_flags else False
+                        if is_item:
+                            translation_memory.add_item_to_memory(orig, res, target_lang)
+                        elif is_book:
+                            translation_memory.add_book_to_memory(orig, res, target_lang)
+                        else:
+                            translation_memory.add_to_memory(orig, res, target_lang)
                     
                     completed_items += len(indices_chunk)
                     if progress_callback:
@@ -95,7 +111,14 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                 
                 for idx_in_global, orig, res in zip(indices_chunk, texts_chunk, res_texts):
                     translated_results[idx_in_global] = res
-                    translation_memory.add_to_memory(orig, res, target_lang)
+                    is_item = is_item_flags[idx_in_global] if is_item_flags else False
+                    is_book = is_book_flags[idx_in_global] if is_book_flags else False
+                    if is_item:
+                        translation_memory.add_item_to_memory(orig, res, target_lang)
+                    elif is_book:
+                        translation_memory.add_book_to_memory(orig, res, target_lang)
+                    else:
+                        translation_memory.add_to_memory(orig, res, target_lang)
 
                 if progress_callback:
                     progress_callback(current_count, total_uncached)

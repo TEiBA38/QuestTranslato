@@ -106,8 +106,8 @@ def apply_builtin_quest_style_translation(text):
 
 import translation_memory
 
-def translate_with_builtin_fallback(text, api_key, reference_map, translate_fn, target_lang="한국어 (Korean)"):
-    if text is None:
+def _translate_wrapper(text, api_key, translate_fn, reference_map=None, target_lang="한국어 (Korean)", is_item=False, is_book=False):
+    if not text or not str(text).strip():
         return text
     if MOCK_MODE:
         return _mock_translate(text)
@@ -116,7 +116,13 @@ def translate_with_builtin_fallback(text, api_key, reference_map, translate_fn, 
     if cached_translation is not None:
         return cached_translation
         
-    global_cached = translation_memory.get_cached_translation(text, target_lang)
+    if is_item:
+        global_cached = translation_memory.get_cached_item_translation(text, target_lang)
+    elif is_book:
+        global_cached = translation_memory.get_cached_book_translation(text, target_lang)
+    else:
+        global_cached = translation_memory.get_cached_translation(text, target_lang)
+        
     if global_cached is not None:
         return global_cached
 
@@ -129,7 +135,12 @@ def translate_with_builtin_fallback(text, api_key, reference_map, translate_fn, 
             return apply_builtin_quest_style_translation(text)
         return text
         
-    translation_memory.add_to_memory(text, translated, target_lang)
+    if is_item:
+        translation_memory.add_item_to_memory(text, translated, target_lang)
+    elif is_book:
+        translation_memory.add_book_to_memory(text, translated, target_lang)
+    else:
+        translation_memory.add_to_memory(text, translated, target_lang)
 
     return translated
 
@@ -141,99 +152,63 @@ def is_code_or_id(text):
     return (":" in t and " " not in t) or t.isdigit() or bool(re.match(r'^[0-9A-Fa-f]{8,}$', t))
 
 
-def translate_deepl(text, api_key, reference_map=None, target_lang="한국어 (Korean)"):
-    return translate_with_builtin_fallback(text, api_key, reference_map, lambda value, key: _translate_deepl_request(value, key, target_lang), target_lang)
+def translate_deepl(text, api_key, is_pro=False, reference_map=None, target_lang="한국어 (Korean)", is_item=False, is_book=False):
+    def do_translate(t, key):
+        url = "https://api.deepl.com/v2/translate" if is_pro else "https://api-free.deepl.com/v2/translate"
+        headers = {"Authorization": f"DeepL-Auth-Key {key}", "Content-Type": "application/json"}
+        lang_code = "KO" if "Korean" in target_lang or "한국어" in target_lang else "EN-US"
+        data = {"text": [t], "target_lang": lang_code, "tag_handling": "xml"}
+        response = requests.post(url, headers=headers, json=data, timeout=10)
+        response.raise_for_status()
+        return response.json()["translations"][0]["text"]
+    return _translate_wrapper(text, api_key, do_translate, reference_map, target_lang, is_item, is_book)
 
 
-def _translate_deepl_request(text, api_key, target_lang="한국어 (Korean)"):
-    url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
-    target_code = LANG_CODES.get(target_lang, ("KO", "ko", "natural Korean"))[0]
-    res = requests.post(
-        url,
-        headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
-        data={"text": [text], "source_lang": "EN", "target_lang": target_code},
-        timeout=10,
-    )
-    if res.status_code in (456, 429):
-        raise QuotaExceededError("DeepL API 사용량 한도가 초과되었습니다.")
-    elif res.status_code == 403:
-        raise Exception("DeepL API 키가 유효하지 않습니다.")
-    elif res.status_code == 200:
-        return res.json()["translations"][0]["text"]
-    return text
-
-
-def translate_google(text, _, reference_map=None, target_lang="한국어 (Korean)"):
-    return translate_with_builtin_fallback(text, _, reference_map, lambda value, key: _translate_google_request(value, target_lang), target_lang)
-
-
-def _translate_google_request(text, target_lang="한국어 (Korean)"):
-    if GoogleTranslator is None:
-        return text
-
-    target_code = LANG_CODES.get(target_lang, ("KO", "ko", "natural Korean"))[1]
-    cache_key = (text, target_lang)
-
-    cached = _google_cache.get(cache_key)
-    if cached is not None:
-        return cached
-
-    try:
+def translate_google(text, api_key, reference_map=None, target_lang="한국어 (Korean)", is_item=False, is_book=False):
+    def do_translate(t, key):
+        if GoogleTranslator is None:
+            return t
+        target_code = LANG_CODES.get(target_lang, ("KO", "ko", "natural Korean"))[1]
         translator = GoogleTranslator(source='en', target=target_code)
-        translated = translator.translate(text)
-        result = translated if translated else text
-
-        if len(_google_cache) >= _GOOGLE_CACHE_MAX:
-            _google_cache.clear()
-        _google_cache[cache_key] = result
-
-        return result
-    except Exception as e:
-        import logging
-        logging.warning(f"Google Translate failed for text '{text[:30]}...': {e}")
-        return text
+        translated = translator.translate(t)
+        return translated if translated else t
+    return _translate_wrapper(text, api_key, do_translate, reference_map, target_lang, is_item, is_book)
 
 
-def translate_openai(text, api_key, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
-    return translate_with_builtin_fallback(text, api_key, reference_map, lambda value, key: _translate_openai_request(value, key, glossary, ai_model, target_lang), target_lang)
-
-
-def _translate_openai_request(text, api_key, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
-    url = "https://api.openai.com/v1/chat/completions"
-    model = ai_model if ai_model else "gpt-4o-mini"
-    target_prompt = LANG_CODES.get(target_lang, ("KO", "ko", "natural Korean"))[2]
-    system_prompt = (
-        f"You are a professional Minecraft quest translator. Translate the given text from English to {target_prompt}.\n"
-        "Rules:\n"
-        "- Preserve Minecraft formatting and color codes (e.g., &a, §c) exactly without changing them.\n"
-        "- NEVER use square brackets [] around translated words (e.g., WRONG: '[철] [검]', RIGHT: '철 검').\n"
-        "- Preserve game abbreviations and formats exactly without translating (e.g., 'Lv.', 'HP', 'MP', 'ATK', 'DEF', 'x2', '+10%').\n"
-        "- Output ONLY the translated text without explanation."
-    )
-    if glossary:
-        clean_glossary = [f"'{k}' as '{v.split('#')[0].strip()}'" for k, v in glossary.items()]
-        glossary_text = ", ".join(clean_glossary)
-        system_prompt += f"\nGlossary (Strictly replace these words): {glossary_text}"
-        
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": system_prompt
-            },
-            {"role": "user", "content": text}
-        ],
-        "temperature": 0.3,
-    }
-    res = requests.post(url, headers={"Authorization": f"Bearer {api_key}"}, json=payload, timeout=12)
-    if res.status_code == 429:
-        raise QuotaExceededError("OpenAI API 할당량이 초과되었거나 요청이 너무 빠릅니다.")
-    elif res.status_code == 401:
-        raise Exception("OpenAI API 키가 유효하지 않습니다.")
-    elif res.status_code == 200:
-        return res.json()["choices"][0]["message"]["content"].strip()
-    return text
+def translate_openai(text, api_key, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)", is_item=False, is_book=False):
+    def do_translate(t, key):
+        url = "https://api.openai.com/v1/chat/completions"
+        model = ai_model if ai_model else "gpt-4o-mini"
+        target_prompt = LANG_CODES.get(target_lang, ("KO", "ko", "natural Korean"))[2]
+        system_prompt = (
+            f"You are a professional Minecraft quest translator. Translate the given text from English to {target_prompt}.\n"
+            "Rules:\n"
+            "- Preserve Minecraft formatting and color codes (e.g., &a, §c) exactly without changing them.\n"
+            "- NEVER use square brackets [] around translated words (e.g., WRONG: '[철] [검]', RIGHT: '철 검').\n"
+            "- Preserve game abbreviations and formats exactly without translating (e.g., 'Lv.', 'HP', 'MP', 'ATK', 'DEF', 'x2', '+10%').\n"
+            "- Output ONLY the translated text without explanation."
+        )
+        if glossary:
+            clean_glossary = [f"'{k}' as '{v.split('#')[0].strip()}'" for k, v in glossary.items()]
+            glossary_text = ", ".join(clean_glossary)
+            system_prompt += f"\nGlossary (Strictly replace these words): {glossary_text}"
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": t}
+            ],
+            "temperature": 0.3,
+        }
+        res = requests.post(url, headers={"Authorization": f"Bearer {key}"}, json=payload, timeout=12)
+        if res.status_code == 429:
+            raise QuotaExceededError("OpenAI API 할당량이 초과되었거나 요청이 너무 빠릅니다.")
+        elif res.status_code == 401:
+            raise Exception("OpenAI API 키가 유효하지 않습니다.")
+        elif res.status_code == 200:
+            return res.json()["choices"][0]["message"]["content"].strip()
+        return t
+    return _translate_wrapper(text, api_key, do_translate, reference_map, target_lang, is_item, is_book)
 
 
 def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
