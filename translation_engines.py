@@ -13,8 +13,10 @@ except Exception:
 
 try:
     from google import genai
+    from google.genai import types
 except Exception:
     genai = None
+    types = None
 
 
 _google_cache = {}
@@ -198,9 +200,12 @@ def translate_openai(text, api_key, reference_map=None, glossary=None, ai_model=
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": t}
             ],
-            "temperature": 0.3,
         }
-        res = requests.post(url, headers={"Authorization": f"Bearer {key}"}, json=payload, timeout=12)
+        if any(model.startswith(p) for p in ("o1", "o3", "o4")):
+            payload["reasoning_effort"] = "low"
+        else:
+            payload["temperature"] = 0.2
+        res = requests.post(url, headers={"Authorization": f"Bearer {key}"}, json=payload, timeout=15)
         if res.status_code == 429:
             raise QuotaExceededError("OpenAI API 할당량이 초과되었거나 요청이 너무 빠릅니다.")
         elif res.status_code == 401:
@@ -307,10 +312,36 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
                 _last_gemini_api_call = time.time()
 
         try:
-            res = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-            )
+            config = None
+            if types:
+                config_params = {"response_mime_type": "application/json"}
+                if hasattr(types, "ThinkingConfig") and ("2.5" in model_name or "thinking" in model_name or "2.0-flash" in model_name):
+                    try:
+                        config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+                    except Exception:
+                        pass
+                try:
+                    config = types.GenerateContentConfig(**config_params)
+                except Exception:
+                    config = None
+
+            try:
+                res = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=config,
+                )
+            except Exception as call_err:
+                err_msg = str(call_err)
+                if ("400" in err_msg or "INVALID_ARGUMENT" in err_msg or "not supported" in err_msg) and config is not None:
+                    # 설정 호환성 문제일 경우 설정 없이 기본 호출로 자동 재시도
+                    res = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                    )
+                else:
+                    raise call_err
+
             raw_text = res.text.strip() if res.text else ""
             match = re.search(r'\[.*\]', raw_text, re.DOTALL)
             if match:
@@ -356,11 +387,13 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
                         time.sleep(0.1)
                 else:
                     raise QuotaExceededError("Gemini API 한도(RPM/RPD) 초과로 더 이상 진행할 수 없습니다. 작업을 중단합니다.")
-            elif "API_KEY_INVALID" in err or "400" in err:
-                raise Exception("Gemini API 키가 유효하지 않거나 모델 권한이 없습니다.")
+            elif "API_KEY_INVALID" in err or "401" in err or "UNAUTHENTICATED" in err:
+                raise Exception("Gemini API 키가 유효하지 않습니다. 올바른 API 키인지 확인해주세요.")
+            elif "404" in err or "NOT_FOUND" in err:
+                raise Exception(f"선택한 AI 모델({model_name})을 찾을 수 없습니다. 지원되는 모델명을 선택해주세요.")
             else:
                 if attempt == max_retries:
-                    raise Exception(f"Gemini 번역 연속 실패: {err}")
+                    raise Exception(f"Gemini 번역 실패 ({err})")
 
     return [item if item is not None else text for item, text in zip(resolved, text_list)]
 
@@ -383,17 +416,19 @@ def translate_local_ai(text_list, base_url, model_name, api_key=None, log_callba
         if cached is not None:
             resolved.append(cached)
         else:
-            # We don't cache local AI calls aggressively to save memory, as it's free anyway
-            # but we could use _gemini_cache for simplicity if we wanted. Let's just use it.
-            cache_key = (text, target_lang)
-            with _gemini_cache_lock:
-                cached_local = _gemini_cache.get(cache_key)
-            if cached_local is not None:
-                resolved.append(cached_local)
+            mem_cached = translation_memory.get_cached_translation(text, target_lang)
+            if mem_cached is not None:
+                resolved.append(mem_cached)
             else:
-                resolved.append(None)
-                unresolved_indices.append(len(resolved) - 1)
-                unresolved_raw.append(text)
+                cache_key = (text, target_lang)
+                with _gemini_cache_lock:
+                    cached_local = _gemini_cache.get(cache_key)
+                if cached_local is not None:
+                    resolved.append(cached_local)
+                else:
+                    resolved.append(None)
+                    unresolved_indices.append(len(resolved) - 1)
+                    unresolved_raw.append(text)
 
     if not unresolved_raw:
         return resolved
@@ -519,7 +554,26 @@ def auto_extract_glossary(text_samples, engine_key, api_key, ai_model=None, targ
         if engine_key == "gemini_batch":
             client = genai.Client(api_key=api_key)
             model_name = ai_model if ai_model else 'gemini-3.5-flash-lite'
-            res = client.models.generate_content(model=model_name, contents=prompt)
+            config = None
+            if types:
+                config_params = {"response_mime_type": "application/json"}
+                if hasattr(types, "ThinkingConfig"):
+                    try:
+                        config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+                    except Exception:
+                        pass
+                try:
+                    config = types.GenerateContentConfig(**config_params)
+                except Exception:
+                    config = None
+            try:
+                res = client.models.generate_content(model=model_name, contents=prompt, config=config)
+            except Exception as call_err:
+                err_msg = str(call_err)
+                if ("400" in err_msg or "INVALID_ARGUMENT" in err_msg or "not supported" in err_msg) and config is not None:
+                    res = client.models.generate_content(model=model_name, contents=prompt)
+                else:
+                    raise call_err
             raw_text = res.text.strip() if res.text else ""
         elif engine_key in ("openai", "local_ai"):
             url = custom_url.strip().rstrip("/") + "/chat/completions" if engine_key == "local_ai" and custom_url else "https://api.openai.com/v1/chat/completions"

@@ -45,10 +45,20 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
             uncached_texts.append(original_text)
             
     if not uncached_texts:
+        if log_callback and total > 0:
+            log_callback(f"✨ [캐시 100% 적중] 전체 {total:,}개 문장 모두가 클라우드/캐시에 이미 번역되어 있어 즉시 복원되었습니다! (0초 소요, 0토큰)")
+        if progress_callback:
+            progress_callback(total, total)
         return translated_results
         
-    if log_callback and len(uncached_texts) < total:
-        log_callback(f"💾 이전에 번역된 {total - len(uncached_texts)}개의 텍스트를 캐시에서 불러왔습니다.")
+    if log_callback:
+        cached_count = total - len(uncached_texts)
+        remaining_count = len(uncached_texts)
+        pct = (cached_count / total) * 100
+        if cached_count > 0:
+            log_callback(f"💾 [캐시 복원] 전체 {total:,}개 중 {cached_count:,}개({pct:.1f}%)를 클라우드/캐시에서 즉시 불러왔습니다! ➡️ 실제 번역 대상: {remaining_count:,}개")
+        else:
+            log_callback(f"📝 [신규 번역] 캐시된 문장이 없어 전체 {total:,}개 문장을 AI로 번역합니다.")
 
     total_uncached = len(uncached_texts)
 
