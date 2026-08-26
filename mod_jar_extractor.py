@@ -2,7 +2,45 @@ import os
 import zipfile
 import json
 import logging
+import re
 from io import BytesIO
+
+def _load_relaxed_json(json_string):
+    """
+    Minecraft 모드 JSON 파일들은 종종 주석(//, /* */)이나 후행 쉼표(trailing commas)를 포함합니다.
+    이를 제거하고 파싱하여 JSONDecodeError를 방지합니다.
+    """
+    # 1. /* ... */ 다중 줄 주석 제거
+    json_string = re.sub(r'/\*.*?\*/', '', json_string, flags=re.DOTALL)
+    
+    # 2. // 한 줄 주석 제거
+    lines = []
+    for line in json_string.splitlines():
+        in_string = False
+        escape = False
+        comment_idx = -1
+        for i, char in enumerate(line):
+            if escape:
+                escape = False
+                continue
+            if char == '\\':
+                escape = True
+            elif char == '"':
+                in_string = not in_string
+            elif char == '/' and i + 1 < len(line) and line[i+1] == '/' and not in_string:
+                comment_idx = i
+                break
+        
+        if comment_idx != -1:
+            line = line[:comment_idx]
+        lines.append(line)
+        
+    json_string = '\n'.join(lines)
+    
+    # 3. Trailing commas (], 또는 }, 전에 있는 ,) 제거
+    json_string = re.sub(r',\s*([\]}])', r'\1', json_string)
+    
+    return json.loads(json_string)
 
 def find_patchouli_books_in_jars(mods_dir, log_callback=None):
     """
@@ -39,8 +77,8 @@ def find_patchouli_books_in_jars(mods_dir, log_callback=None):
                     for bf in book_files:
                         try:
                             data = zf.read(bf)
-                            # 간단한 JSON 검증
-                            json_data = json.loads(data.decode('utf-8', errors='ignore'))
+                            # 간단한 JSON 검증 및 주석 제거
+                            json_data = _load_relaxed_json(data.decode('utf-8', errors='ignore'))
                             jar_books[bf] = json_data
                         except Exception as e:
                             if log_callback:
@@ -97,7 +135,7 @@ def find_custom_guidebooks_in_jars(mods_dir, log_callback=None):
                     forestry_files = [n for n in all_names if n.lower().startswith('assets/forestry/manual/en_us/') and n.endswith('.json')]
                     for f in forestry_files:
                         try:
-                            content = json.loads(zf.read(f).decode('utf-8', errors='ignore'))
+                            content = _load_relaxed_json(zf.read(f).decode('utf-8', errors='ignore'))
                             if jar_file not in found_books["forestry"]:
                                 found_books["forestry"][jar_file] = {}
                             found_books["forestry"][jar_file][f] = content
@@ -122,7 +160,7 @@ def find_custom_guidebooks_in_jars(mods_dir, log_callback=None):
                     eu2_files = [n for n in all_names if n.lower().startswith('assets/extrautils2/lang/book/') and n.endswith('.json')]
                     for f in eu2_files:
                         try:
-                            content = json.loads(zf.read(f).decode('utf-8', errors='ignore'))
+                            content = _load_relaxed_json(zf.read(f).decode('utf-8', errors='ignore'))
                             if jar_file not in found_books["eu2"]:
                                 found_books["eu2"][jar_file] = {}
                             found_books["eu2"][jar_file][f] = content
