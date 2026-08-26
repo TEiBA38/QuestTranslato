@@ -228,15 +228,20 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
         if cached is not None:
             resolved.append(cached)
         else:
-            cache_key = (text, target_lang)
-            with _gemini_cache_lock:
-                gemini_cached = _gemini_cache.get(cache_key)
-            if gemini_cached is not None:
-                resolved.append(gemini_cached)
+            # 파일 기반 영구 캐시(translation_memory) 조회 - API 비용 절감 핵심!
+            mem_cached = translation_memory.get_cached_translation(text, target_lang)
+            if mem_cached is not None:
+                resolved.append(mem_cached)
             else:
-                resolved.append(None)
-                unresolved_indices.append(len(resolved) - 1)
-                unresolved_raw.append(text)
+                cache_key = (text, target_lang)
+                with _gemini_cache_lock:
+                    gemini_cached = _gemini_cache.get(cache_key)
+                if gemini_cached is not None:
+                    resolved.append(gemini_cached)
+                else:
+                    resolved.append(None)
+                    unresolved_indices.append(len(resolved) - 1)
+                    unresolved_raw.append(text)
 
     if not unresolved_raw:
         return resolved

@@ -63,13 +63,23 @@ def find_patchouli_books_in_jars(mods_dir, log_callback=None):
         try:
             with zipfile.ZipFile(jar_path, 'r') as zf:
                 # patchouli_books 경로를 포함하는 .json 파일 찾기 (1.12.2는 assets/, 1.14+는 data/)
+                # ⚠️ en_us 폴더와 book.json(메타데이터)만 추출. ko_kr, zh_cn 등 이미 번역된 다른 언어 파일은 제외하여 API 낭비 방지
+                _OTHER_LANG_FOLDERS = {'ko_kr','zh_cn','zh_tw','ja_jp','pt_br','ru_ru','de_de','fr_fr','es_es','it_it','pl_pl','nl_nl','sv_se','da_dk','nb_no','fi_fi','hu_hu','cs_cz','ro_ro','tr_tr','th_th','vi_vn','uk_ua','el_gr','bg_bg','hr_hr','lt_lt','lv_lv','sk_sk','sl_si','et_ee','ga_ie','mt_mt','ca_es','gl_es','eu_es'}
+                def _is_non_english_lang_path(path):
+                    parts = path.split('/')
+                    for part in parts:
+                        if part in _OTHER_LANG_FOLDERS:
+                            return True
+                    return False
+                    
                 book_files = [
                     name for name in zf.namelist() 
                     if name.lower().endswith('.json') and 
                        ('patchouli_books/' in name.lower() or 'guideapi/' in name.lower()) and
                        'models/' not in name.lower() and
                        'blockstates/' not in name.lower() and
-                       'textures/' not in name.lower()
+                       'textures/' not in name.lower() and
+                       not _is_non_english_lang_path(name.lower())
                 ]
                 
                 if book_files:
