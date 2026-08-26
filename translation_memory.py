@@ -7,13 +7,16 @@ import logging
 
 MEMORY_FILE = "translation_memory.json"
 BACKUP_FILE = "translation_memory.json.bak"
+ITEMS_MEMORY_FILE = "translation_memory_items.json"
 SHORT_TEXT_THRESHOLD = 30
 
 _global_cache = {}
 _modpack_cache = {}
+_items_cache = {}
 _lock = threading.Lock()
 _global_loaded = False
 _modpack_loaded = False
+_items_loaded = False
 _current_modpack_id = None
 _current_modpack_file = None
 
@@ -124,6 +127,17 @@ def _load_modpack_memory():
     _modpack_loaded = True
 
 
+def _load_items_memory():
+    """아이템 전용 메모리 로드 (락 내부에서 호출)."""
+    global _items_cache, _items_loaded
+    if _items_loaded:
+        return
+    data = _read_file(ITEMS_MEMORY_FILE)
+    data = _migrate_legacy_keys(data)
+    _items_cache = data
+    _items_loaded = True
+
+
 def get_cached_translation(text, target_lang="한국어(Korean)"):
     """
     하이브리드 캐시 조회:
@@ -164,6 +178,23 @@ def add_to_memory(text, translated_text, target_lang="한국어(Korean)"):
         else:
             _store(_global_cache, text, translated_text, target_lang_norm)
 
+
+def get_cached_item_translation(text, target_lang="한국어(Korean)"):
+    """아이템 이름 전용 캐시 조회 (글로벌, 모드팩 간 공유)."""
+    target_lang_norm = target_lang.replace(" ", "")
+    with _lock:
+        _load_items_memory()
+    return _lookup(_items_cache, text, target_lang_norm)
+
+
+def add_item_to_memory(text, translated_text, target_lang="한국어(Korean)"):
+    """아이템 이름 전용 캐시 저장 (글로벌, 모드팩 간 공유)."""
+    if not text or not translated_text:
+        return
+    target_lang_norm = target_lang.replace(" ", "")
+    with _lock:
+        _load_items_memory()
+        _store(_items_cache, text, translated_text, target_lang_norm)
 
 def _safe_save_file(filepath, data):
     """디스크 기존 데이터와 병합 후 안전하게 저장."""
@@ -210,3 +241,10 @@ def save_memory():
             if merged_modpack is not None:
                 _modpack_cache.clear()
                 _modpack_cache.update(merged_modpack)
+
+        # 아이템 캐시 저장
+        if _items_cache:
+            merged_items = _safe_save_file(ITEMS_MEMORY_FILE, _items_cache)
+            if merged_items is not None:
+                _items_cache.clear()
+                _items_cache.update(merged_items)
