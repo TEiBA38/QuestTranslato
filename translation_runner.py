@@ -216,8 +216,7 @@ class TranslationMixin:
                     for zip_path, content in zip_dict.items():
                         if zip_path.lower().endswith('.json') or zip_path.lower().endswith('.json5'):
                             try:
-                                import json
-                                json_data = json.loads(content)
+                                json_data = mod_jar_extractor._load_relaxed_json(content)
                                 parsed_lines = {}
                                 for k, v in json_data.items():
                                     if isinstance(v, str) and v.strip():
