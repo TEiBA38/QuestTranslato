@@ -314,7 +314,7 @@ class TranslationMixin:
                 def validate_format_specifiers(orig, trans):
                     if not orig or not trans: return False
                     # Minecraft uses Java String.format, e.g., %s, %d, %1$s, %.2f, %%
-                    pattern = re.compile(r'%(\d+\$)?[-+#0 ]*\d*(?:\.\d+)?[a-zA-Z%]')
+                    pattern = re.compile(r'%(?:\d+\$)?[-+#0 ]*\d*(?:\.\d+)?[a-zA-Z%]')
                     orig_matches = sorted(pattern.findall(orig))
                     trans_matches = sorted(pattern.findall(trans))
                     return orig_matches == trans_matches
@@ -454,7 +454,7 @@ class TranslationMixin:
                     self.log(f"✂️ 중복 제거 후 실제 번역할 고유 텍스트는 {len(unique_texts)}개 입니다. 일괄 번역 시작!")
                     
                     # 용어 자동 추출: 실제로 새로 번역할 텍스트가 충분히 많을 때만 실행
-                    uncached_patchouli = [t for t in unique_texts if translation_memory.get_cached_translation(t, target_lang) is None]
+                    uncached_patchouli = [t for t in unique_texts if translation_memory.get_cached_book_translation(t, target_lang) is None]
                     try:
                         import random
                         if len(uncached_patchouli) >= 50:
@@ -800,8 +800,6 @@ class TranslationMixin:
                          args=(zip_path, engine_key, api_key, is_paid, ai_model, target_lang), daemon=True).start()
 
     def _translate_jobs_parallel(self, jobs, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", on_job_completed=None):
-        batch_size = 500 if is_paid else 150
-        
         all_targets = []
         for job in jobs:
             job["tasks_total"] = len(job["targets"])
@@ -810,61 +808,57 @@ class TranslationMixin:
                 all_targets.append((job, item))
                 
         total_items = len(all_targets)
-        completed_items = 0
-        lock = threading.Lock()
-        
-        chunks = []
-        for i in range(0, total_items, batch_size):
-            chunks.append(all_targets[i:i + batch_size])
-
-        def run_chunk(chunk):
-            if self.is_cancelled():
-                raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                
-            orig_texts = [item[2].replace('\\"', '"') if job["kind"] == "snbt" else item[2] for job, item in chunk]
-            translated_texts = translate_gemini_batch(orig_texts, api_key, is_paid, self.route_log, self.is_cancelled, ai_model=ai_model, target_lang=target_lang)
-            
-            jobs_to_check = []
-            for (job, item), orig_text, trans in zip(chunk, orig_texts, translated_texts):
-                # 캐시에 번역 결과 저장
-                if trans:
-                    translation_memory.add_to_memory(orig_text, trans, target_lang)
-                    
-                if job["kind"] == "snbt":
-                    line_idx, prefix, _, suffix = item
-                    job["translated_map"][line_idx] = f'{prefix}"{str(trans).replace(chr(34), chr(92)+chr(34))}"{suffix}'
-                elif job["kind"] == "lang":
-                    line_idx, prefix, _, suffix = item
-                    job["translated_map"][line_idx] = f'{prefix}{trans}{suffix}'
-                else:
-                    parent_node, key, _ = item
-                    parent_node[key] = trans
-                
-                with lock:
-                    job["tasks_done"] += 1
-                    if job["tasks_done"] == job["tasks_total"]:
-                        jobs_to_check.append(job)
-                        
-            for job in jobs_to_check:
+        if total_items == 0:
+            for job in jobs:
                 if on_job_completed:
                     on_job_completed(job)
-            
-            return len(chunk)
+            return
 
-        max_w = min(8, len(chunks)) if is_paid else 1
-        max_w = max_w or 1
-        executor = ThreadPoolExecutor(max_workers=max_w)
-        try:
-            futures = [executor.submit(run_chunk, c) for c in chunks]
-            for future in as_completed(futures):
-                n = future.result()
-                with lock:
-                    completed_items += n
-                self.set_status(f"⏳ Gemini API 묶음 번역 진행 중... [{completed_items}/{total_items}]")
-                self.update_progress(completed_items / total_items if total_items else 1)
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
-            translation_memory.save_memory()
+        def extract_text(item_tuple):
+            job, item = item_tuple
+            return item[2].replace('\\"', '"') if job["kind"] == "snbt" else item[2]
+
+        def check_cancel():
+            return self.is_cancelled()
+
+        def prog_cb(c, t):
+            self.set_status(f"⏳ Gemini 묶음 번역 진행 중... [{c}/{t}]")
+            self.update_progress(c / t if t > 0 else 1)
+
+        glossary_map = getattr(self, 'glossary', {}) or {}
+
+        import file_processors
+        translated_texts = file_processors._run_batch_jobs(
+            all_targets,
+            extract_text,
+            "gemini_batch",
+            api_key,
+            is_paid,
+            log_callback=self.route_log,
+            cancel_checker=check_cancel,
+            progress_callback=prog_cb,
+            reference_map=glossary_map,
+            glossary=glossary_map,
+            ai_model=ai_model,
+            target_lang=target_lang,
+            log_prefix="모드팩 퀘스트 번역 중"
+        )
+
+        for (job, item), trans in zip(all_targets, translated_texts):
+            if job["kind"] == "snbt":
+                line_idx, prefix, _, suffix = item
+                job["translated_map"][line_idx] = f'{prefix}"{str(trans).replace(chr(34), chr(92)+chr(34))}"{suffix}'
+            elif job["kind"] == "lang":
+                line_idx, prefix, _, suffix = item
+                job["translated_map"][line_idx] = f'{prefix}{trans}{suffix}'
+            else:
+                parent_node, key, _ = item
+                parent_node[key] = trans
+
+            job["tasks_done"] += 1
+            if job["tasks_done"] == job["tasks_total"]:
+                if on_job_completed:
+                    on_job_completed(job)
 
     def _translate_jobs_sequential(self, jobs, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", on_job_completed=None, custom_url=None):
         total_files = len(jobs)
@@ -884,31 +878,43 @@ class TranslationMixin:
                         "\n".join(job["lines"]), engine_key, api_key, is_paid,
                         progress_cb, self.route_log, self.is_cancelled, verbose=False, reference_map=None, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
                 elif job["kind"] == "lang":
-                    from translation_engines import translate_with_builtin_fallback
-                    def get_translator():
-                        if engine_key == "openai":
-                            from translation_engines import _translate_openai_request
-                            return lambda v, k: _translate_openai_request(v, k, getattr(self, 'glossary', {}), ai_model, target_lang)
-                        elif engine_key == "claude":
-                            from translation_engines import _translate_claude_request
-                            return lambda v, k: _translate_claude_request(v, k, getattr(self, 'glossary', {}), ai_model, target_lang)
-                        elif engine_key == "deepl":
-                            from translation_engines import translate_deepl
-                            return lambda v, k: translate_deepl(v, k)
-                        elif engine_key == "local_ai":
-                            from translation_engines import translate_local_ai
-                            return lambda v, k: translate_local_ai([v], custom_url, ai_model, target_lang=target_lang)[0]
-                        else:
-                            return lambda v, k: v
-                            
-                    trans_func = get_translator()
+                    from translation_engines import translate_deepl, translate_openai, translate_google, translate_local_ai
                     total_targets = len(job["targets"])
-                    for i, (line_idx, prefix, orig_text, suffix) in enumerate(job["targets"]):
-                        if self.is_cancelled():
-                            raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                        trans = translate_with_builtin_fallback(orig_text, api_key, None, trans_func, target_lang)
-                        job["translated_map"][line_idx] = f'{prefix}{trans}{suffix}'
-                        progress_cb(i + 1, total_targets, idx)
+                    glossary_map = getattr(self, 'glossary', {}) or {}
+                    
+                    if engine_key in ("gemini_batch", "local_ai"):
+                        import file_processors
+                        translated_texts = file_processors._run_batch_jobs(
+                            job["targets"],
+                            lambda it: it[2],
+                            engine_key,
+                            api_key,
+                            is_paid,
+                            log_callback=self.route_log,
+                            cancel_checker=self.is_cancelled,
+                            progress_callback=lambda c, t: progress_cb(c, t, idx),
+                            reference_map=glossary_map,
+                            glossary=glossary_map,
+                            ai_model=ai_model,
+                            target_lang=target_lang,
+                            log_prefix="언어 파일 번역 중",
+                            custom_url=custom_url
+                        )
+                        for item, trans in zip(job["targets"], translated_texts):
+                            line_idx, prefix, orig_text, suffix = item
+                            job["translated_map"][line_idx] = f'{prefix}{trans}{suffix}'
+                    else:
+                        for i, (line_idx, prefix, orig_text, suffix) in enumerate(job["targets"]):
+                            if self.is_cancelled():
+                                raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+                            if engine_key == "deepl":
+                                trans = translate_deepl(orig_text, api_key, reference_map=glossary_map, target_lang=target_lang)
+                            elif engine_key == "openai":
+                                trans = translate_openai(orig_text, api_key, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang)
+                            else:
+                                trans = translate_google(orig_text, api_key, reference_map=glossary_map, target_lang=target_lang)
+                            job["translated_map"][line_idx] = f'{prefix}{trans}{suffix}'
+                            progress_cb(i + 1, total_targets, idx)
                 else:
                     process_json_safely(
                         job["data"], engine_key, api_key, is_paid,

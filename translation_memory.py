@@ -4,12 +4,27 @@ import hashlib
 import shutil
 import threading
 import logging
+import re
+import requests
+from constants import has_hangul
 
 MEMORY_FILE = "translation_memory.json"
 BACKUP_FILE = "translation_memory.json.bak"
 ITEMS_MEMORY_FILE = "translation_memory_items.json"
 BOOKS_MEMORY_FILE = "translation_memory_books.json"
 SHORT_TEXT_THRESHOLD = 30
+
+# ====================================================================
+# Supabase 클라우드 설정
+# ====================================================================
+SUPABASE_URL = "https://oanjweqyvvdrbmvqoqrs.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9hbmp3ZXF5dnZkcmJtdnFvcXJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc3NTkwMDgsImV4cCI6MjEwMzMzNTAwOH0.3HbUVkupPoyMfzjMPSkAmGQ0qydp6yjDrxfSoGAghC8"
+
+TABLE_MAP = {
+    "general": "translation_memory",
+    "items": "translation_memory_items",
+    "books": "translation_memory_books",
+}
 
 _global_cache = {}
 _modpack_cache = {}
@@ -25,7 +40,7 @@ _current_modpack_file = None
 
 
 def set_current_modpack(modpack_path):
-    """모드팩 컨텍스트를 설정. 짧은 문장은 이 모드팩 전용 메모리에 저장/조회됨."""
+    """모드팩 컨텍스트 설정 (짧은 문장 격리)"""
     global _current_modpack_id, _current_modpack_file, _modpack_cache, _modpack_loaded
     with _lock:
         if modpack_path:
@@ -40,7 +55,6 @@ def set_current_modpack(modpack_path):
 
 
 def get_current_modpack_id():
-    """현재 설정된 모드팩 ID 반환 (없으면 None)."""
     return _current_modpack_id
 
 
@@ -48,147 +62,114 @@ def _is_short_text(text):
     return isinstance(text, str) and len(text.strip()) < SHORT_TEXT_THRESHOLD
 
 
-def _migrate_legacy_keys(data):
-    """하위 호환성: '한국어 (Korean)' → '한국어(Korean)' 마이그레이션"""
-    old_key = "한국어 (Korean)"
-    new_key = "한국어(Korean)"
-    if old_key in data:
-        if new_key not in data:
-            data[new_key] = {}
-        data[new_key].update(data[old_key])
-        del data[old_key]
-    return data
+def is_valid_translation(src, tgt, target_lang="한국어 (Korean)"):
+    """번역문 유효성 검증: 원문과 같거나 한글이 누락된 오염 데이터 차단"""
+    if not src or not tgt:
+        return False
+    s_clean = str(src).strip()
+    t_clean = str(tgt).strip()
+    if s_clean == t_clean:
+        return False
+    if "한국어" in target_lang or "Korean" in target_lang:
+        if re.search(r'[A-Za-z]', s_clean) and not has_hangul(t_clean):
+            return False
+    return True
 
 
-def _read_file(filepath):
+def _read_and_clean_file(filepath):
+    """파일 로드 시 오염된 항목(원문==번역문) 자동 제거"""
     if not filepath or not os.path.exists(filepath):
         return {}
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        cleaned = {}
+        for lang, translations in data.items():
+            if not isinstance(translations, dict):
+                continue
+            cleaned[lang] = {}
+            for src, tgt in translations.items():
+                if is_valid_translation(src, tgt, lang):
+                    cleaned[lang][src] = tgt
+        return cleaned
     except Exception:
         return {}
 
 
-def _merge_caches(base, overlay):
-    """base 위에 overlay를 병합. 기존 데이터는 절대 삭제되지 않음."""
-    merged = {}
-    all_keys = set(list(base.keys()) + list(overlay.keys()))
-    for lang in all_keys:
-        merged[lang] = {}
-        if lang in base and isinstance(base[lang], dict):
-            merged[lang].update(base[lang])
-        if lang in overlay and isinstance(overlay[lang], dict):
-            merged[lang].update(overlay[lang])
-    return merged
-
-
-def _find_lang_key(cache, target_lang_norm):
-    """캐시 딕셔너리에서 공백을 무시하고 언어 키를 찾음."""
-    for k in cache.keys():
-        if k.replace(" ", "") == target_lang_norm:
-            return k
+def _lookup_safe(cache, text, target_lang_norm):
+    """캐시 조회 및 오염된 데이터 발견 시 즉시 자가 치유(삭제)"""
+    for lang_key, entries in cache.items():
+        if lang_key.replace(" ", "") == target_lang_norm:
+            if text in entries:
+                val = entries[text]
+                if is_valid_translation(text, val, lang_key):
+                    return val
+                else:
+                    with _lock:
+                        entries.pop(text, None)
+            break
     return None
 
 
-def _lookup(cache, text, target_lang_norm):
-    """캐시에서 번역 결과를 조회."""
-    lang_key = _find_lang_key(cache, target_lang_norm)
-    if not lang_key:
-        return None
-    return cache[lang_key].get(text)
-
-
 def _store(cache, text, translated_text, target_lang_norm):
-    """캐시에 번역 결과를 저장."""
-    lang_key = _find_lang_key(cache, target_lang_norm) or target_lang_norm
-    if lang_key not in cache:
-        cache[lang_key] = {}
-    cache[lang_key][text] = translated_text
+    target_lang_key = target_lang_norm
+    for k in cache.keys():
+        if k.replace(" ", "") == target_lang_norm:
+            target_lang_key = k
+            break
+    if target_lang_key not in cache:
+        cache[target_lang_key] = {}
+    cache[target_lang_key][text] = translated_text
 
 
 def load_memory():
-    """글로벌 메모리 로드."""
-    global _global_cache, _global_loaded
+    """로컬 메모리 로드 및 Supabase 최신 데이터 동기화"""
+    global _global_cache, _global_loaded, _items_cache, _items_loaded, _books_cache, _books_loaded
     with _lock:
-        if _global_loaded:
-            return
-        data = _read_file(MEMORY_FILE)
-        data = _migrate_legacy_keys(data)
-        _global_cache = data
-        _global_loaded = True
+        if not _global_loaded:
+            _global_cache = _read_and_clean_file(MEMORY_FILE)
+            _global_loaded = True
+        if not _items_loaded:
+            _items_cache = _read_and_clean_file(ITEMS_MEMORY_FILE)
+            _items_loaded = True
+        if not _books_loaded:
+            _books_cache = _read_and_clean_file(BOOKS_MEMORY_FILE)
+            _books_loaded = True
+
+    sync_from_supabase()
 
 
 def _load_modpack_memory():
-    """모드팩별 메모리 로드 (락 내부에서 호출)."""
     global _modpack_cache, _modpack_loaded
     if _modpack_loaded or not _current_modpack_file:
         return
-    data = _read_file(_current_modpack_file)
-    data = _migrate_legacy_keys(data)
-    _modpack_cache = data
+    _modpack_cache = _read_and_clean_file(_current_modpack_file)
     _modpack_loaded = True
 
 
-def _load_items_memory():
-    """아이템 전용 메모리 로드 (락 내부에서 호출)."""
-    global _items_cache, _items_loaded
-    if _items_loaded:
-        return
-    data = _read_file(ITEMS_MEMORY_FILE)
-    data = _migrate_legacy_keys(data)
-    _items_cache = data
-    _items_loaded = True
-
-
-def _load_books_memory():
-    """가이드북 전용 메모리 로드 (락 내부에서 호출)."""
-    global _books_cache, _books_loaded
-    if _books_loaded:
-        return
-    data = _read_file(BOOKS_MEMORY_FILE)
-    data = _migrate_legacy_keys(data)
-    _books_cache = data
-    _books_loaded = True
-
-
-def get_cached_translation(text, target_lang="한국어(Korean)"):
-    """
-    하이브리드 캐시 조회:
-    - 짧은 문장 (30자 미만) + 모드팩 설정됨 → 모드팩 전용 캐시만 조회
-    - 긴 문장 (30자 이상) 또는 모드팩 미설정 → 글로벌 캐시 조회
-    """
+def get_cached_translation(text, target_lang="한국어 (Korean)"):
     if not _global_loaded:
         load_memory()
-
     target_lang_norm = target_lang.replace(" ", "")
 
     if _is_short_text(text) and _current_modpack_id:
         with _lock:
             _load_modpack_memory()
-        result = _lookup(_modpack_cache, text, target_lang_norm)
+        result = _lookup_safe(_modpack_cache, text, target_lang_norm)
         if result is not None:
             return result
-        # Fallback to global cache for backward compatibility
-        return _lookup(_global_cache, text, target_lang_norm)
-    else:
-        return _lookup(_global_cache, text, target_lang_norm)
+
+    return _lookup_safe(_global_cache, text, target_lang_norm)
 
 
-def add_to_memory(text, translated_text, target_lang="한국어(Korean)"):
-    """
-    하이브리드 캐시 저장:
-    - 짧은 문장 (30자 미만) + 모드팩 설정됨 → 모드팩 전용 캐시에 저장
-    - 긴 문장 (30자 이상) 또는 모드팩 미설정 → 글로벌 캐시에 저장
-    """
+def add_to_memory(text, translated_text, target_lang="한국어 (Korean)"):
+    if not is_valid_translation(text, translated_text, target_lang):
+        return
+
     if not _global_loaded:
         load_memory()
 
-    if not text or not translated_text:
-        return
-
     target_lang_norm = target_lang.replace(" ", "")
-
     with _lock:
         if _is_short_text(text) and _current_modpack_id:
             _load_modpack_memory()
@@ -197,64 +178,57 @@ def add_to_memory(text, translated_text, target_lang="한국어(Korean)"):
             _store(_global_cache, text, translated_text, target_lang_norm)
 
 
-def get_cached_item_translation(text, target_lang="한국어(Korean)"):
-    """아이템 이름 전용 캐시 조회 (글로벌, 모드팩 간 공유)."""
+def get_cached_item_translation(text, target_lang="한국어 (Korean)"):
+    if not _items_loaded:
+        load_memory()
     target_lang_norm = target_lang.replace(" ", "")
-    with _lock:
-        _load_items_memory()
-        if not _global_loaded:
-            load_memory()
-    
-    result = _lookup(_items_cache, text, target_lang_norm)
+    result = _lookup_safe(_items_cache, text, target_lang_norm)
     if result is not None:
         return result
-    
-    # Fallback to global cache for backward compatibility
-    return _lookup(_global_cache, text, target_lang_norm)
+    return _lookup_safe(_global_cache, text, target_lang_norm)
 
 
-def add_item_to_memory(text, translated_text, target_lang="한국어(Korean)"):
-    """아이템 이름 전용 캐시 저장 (글로벌, 모드팩 간 공유)."""
-    if not text or not translated_text:
+def add_item_to_memory(text, translated_text, target_lang="한국어 (Korean)"):
+    if not is_valid_translation(text, translated_text, target_lang):
         return
+    if not _items_loaded:
+        load_memory()
     target_lang_norm = target_lang.replace(" ", "")
     with _lock:
-        _load_items_memory()
         _store(_items_cache, text, translated_text, target_lang_norm)
 
 
-def get_cached_book_translation(text, target_lang="한국어(Korean)"):
-    """가이드북 전용 캐시 조회 (글로벌 공유, 오역 방지)."""
+def get_cached_book_translation(text, target_lang="한국어 (Korean)"):
+    if not _books_loaded:
+        load_memory()
     target_lang_norm = target_lang.replace(" ", "")
-    with _lock:
-        _load_books_memory()
-        if not _global_loaded:
-            load_memory()
-            
-    result = _lookup(_books_cache, text, target_lang_norm)
+    result = _lookup_safe(_books_cache, text, target_lang_norm)
     if result is not None:
         return result
-        
-    # 가이드북도 기존 메모리(global)를 폴백으로 사용
-    return _lookup(_global_cache, text, target_lang_norm)
+    return _lookup_safe(_global_cache, text, target_lang_norm)
 
 
-def add_book_to_memory(text, translated_text, target_lang="한국어(Korean)"):
-    """가이드북 전용 캐시 저장 (글로벌 공유)."""
-    if not text or not translated_text:
+def add_book_to_memory(text, translated_text, target_lang="한국어 (Korean)"):
+    if not is_valid_translation(text, translated_text, target_lang):
         return
+    if not _books_loaded:
+        load_memory()
     target_lang_norm = target_lang.replace(" ", "")
     with _lock:
-        _load_books_memory()
         _store(_books_cache, text, translated_text, target_lang_norm)
 
+
 def _safe_save_file(filepath, data):
-    """디스크 기존 데이터와 병합 후 안전하게 저장."""
     if not filepath:
         return None
     try:
-        disk_data = _read_file(filepath)
-        merged = _merge_caches(disk_data, data)
+        disk_data = _read_and_clean_file(filepath)
+        merged = {}
+        all_keys = set(list(disk_data.keys()) + list(data.keys()))
+        for lang in all_keys:
+            merged[lang] = {}
+            if lang in disk_data: merged[lang].update(disk_data[lang])
+            if lang in data: merged[lang].update(data[lang])
 
         if os.path.exists(filepath):
             try:
@@ -268,42 +242,121 @@ def _safe_save_file(filepath, data):
         os.replace(tmp_file, filepath)
         return merged
     except Exception as e:
-        tmp_file = filepath + ".tmp"
-        if os.path.exists(tmp_file):
-            try:
-                os.remove(tmp_file)
-            except Exception:
-                pass
-        logging.error(f"Failed to save memory file {filepath}: {e}")
+        logging.error(f"메모리 파일 저장 실패 ({filepath}): {e}")
         return data
 
 
 def save_memory():
-    """글로벌 + 모드팩별 메모리를 모두 안전하게 저장."""
+    """로컬 4개 파일 저장 및 Supabase 3개 개별 테이블에 비동기 업로드 (UPSERT)"""
     with _lock:
-        # 글로벌 캐시 저장
         merged_global = _safe_save_file(MEMORY_FILE, _global_cache)
         if merged_global is not None:
             _global_cache.clear()
             _global_cache.update(merged_global)
 
-        # 모드팩 캐시 저장
         if _current_modpack_file and _modpack_cache:
             merged_modpack = _safe_save_file(_current_modpack_file, _modpack_cache)
             if merged_modpack is not None:
                 _modpack_cache.clear()
                 _modpack_cache.update(merged_modpack)
 
-        # 아이템 캐시 저장
-        if _items_cache:
-            merged_items = _safe_save_file(ITEMS_MEMORY_FILE, _items_cache)
-            if merged_items is not None:
-                _items_cache.clear()
-                _items_cache.update(merged_items)
-                
-        # 가이드북 캐시 저장
-        if _books_cache:
-            merged_books = _safe_save_file(BOOKS_MEMORY_FILE, _books_cache)
-            if merged_books is not None:
-                _books_cache.clear()
-                _books_cache.update(merged_books)
+        merged_items = _safe_save_file(ITEMS_MEMORY_FILE, _items_cache)
+        if merged_items is not None:
+            _items_cache.clear()
+            _items_cache.update(merged_items)
+
+        merged_books = _safe_save_file(BOOKS_MEMORY_FILE, _books_cache)
+        if merged_books is not None:
+            _books_cache.clear()
+            _books_cache.update(merged_books)
+
+    # Supabase 3개 개별 테이블로 자동 업로드
+    upload_to_supabase(_global_cache, "general")
+    upload_to_supabase(_items_cache, "items")
+    upload_to_supabase(_books_cache, "books")
+
+
+# ====================================================================
+# Supabase 클라우드 동기화 (3개 테이블 분리 REST API 통신)
+# ====================================================================
+
+def sync_from_supabase():
+    """Supabase의 3개 개별 테이블에서 번역 메모리 다운로드 및 로컬 캐시 병합"""
+    if "YOUR_PROJECT_REF" in SUPABASE_URL:
+        return
+
+    def _sync_single_table(table_name, target_cache):
+        headers = {
+            "apikey": SUPABASE_ANON_KEY,
+            "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+        }
+        url = f"{SUPABASE_URL}/rest/v1/{table_name}?select=lang,src,tgt&limit=50000"
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                rows = res.json()
+                with _lock:
+                    for row in rows:
+                        lang = row.get("lang", "한국어 (Korean)")
+                        src = row.get("src")
+                        tgt = row.get("tgt")
+
+                        if not is_valid_translation(src, tgt, lang):
+                            continue
+
+                        if lang not in target_cache:
+                            target_cache[lang] = {}
+                        if src not in target_cache[lang]:
+                            target_cache[lang][src] = tgt
+        except Exception as e:
+            logging.warning(f"Supabase [{table_name}] 동기화 실패: {e}")
+
+    def _async_download_all():
+        _sync_single_table(TABLE_MAP["general"], _global_cache)
+        _sync_single_table(TABLE_MAP["items"], _items_cache)
+        _sync_single_table(TABLE_MAP["books"], _books_cache)
+
+    threading.Thread(target=_async_download_all, daemon=True).start()
+
+
+def upload_to_supabase(cache_dict, category="general"):
+    """Supabase 해당 테이블에 번역 데이터 일괄 업로드 (중복 자동 병합 - UPSERT)"""
+    if "YOUR_PROJECT_REF" in SUPABASE_URL or not cache_dict:
+        return
+
+    table_name = TABLE_MAP.get(category, "translation_memory")
+
+    def _async_upload():
+        records = []
+        for lang, entries in cache_dict.items():
+            if not isinstance(entries, dict):
+                continue
+            for src, tgt in entries.items():
+                if is_valid_translation(src, tgt, lang):
+                    records.append({
+                        "lang": lang,
+                        "src": src,
+                        "tgt": tgt,
+                    })
+
+        if not records:
+            return
+
+        headers = {
+            "apikey": SUPABASE_ANON_KEY,
+            "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates",  # 충돌 시 자동 업데이트 (UPSERT)
+        }
+        url = f"{SUPABASE_URL}/rest/v1/{table_name}"
+
+        # 500개씩 청크 단위로 분할 업로드
+        batch_size = 500
+        for i in range(0, len(records), batch_size):
+            chunk = records[i:i + batch_size]
+            try:
+                requests.post(url, headers=headers, json=chunk, timeout=15)
+            except Exception as e:
+                logging.warning(f"Supabase 업로드 실패 ({table_name}): {e}")
+
+    threading.Thread(target=_async_upload, daemon=True).start()
