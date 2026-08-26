@@ -78,8 +78,8 @@ def collect_patchouli_targets(node, target_list):
     """
     if isinstance(node, dict):
         for k, v in node.items():
-            # Patchouli 번역 대상 키: name, text, title, landing_text, subtitle, header, caption
-            if k in ["name", "text", "title", "landing_text", "subtitle", "header", "caption"] and isinstance(v, str) and v.strip():
+            # Patchouli 번역 대상 키: name, description, text, title, landing_text, subtitle, header, caption, link_text
+            if k in ["name", "description", "text", "title", "landing_text", "subtitle", "header", "caption", "link_text"] and isinstance(v, str) and v.strip():
                 # 마인크래프트 I18N 언어 키는 번역하지 않고 원본 키를 유지 (책 안 열리는 치명적 버그 방지)
                 if is_i18n_key(v):
                     continue
