@@ -497,18 +497,19 @@ class TranslationMixin:
                             unique_texts, lambda x: x, engine_key, api_key, is_paid,
                             log_callback=lambda m: None, cancel_checker=check_cancel, progress_callback=prog_cb,
                             reference_map=glossary_map, glossary=glossary_map,
-                            ai_model=ai_model, target_lang=target_lang, log_prefix="가이드북 번역", custom_url=custom_url
+                            ai_model=ai_model, target_lang=target_lang, log_prefix="가이드북 번역", custom_url=custom_url,
+                            is_book_flags=[True] * len(unique_texts)
                         )
                     else:
                         translated_unique = []
                         for idx, t in enumerate(unique_texts, 1):
                             if check_cancel(): break
                             if engine_key == "deepl":
-                                trans = translate_deepl(t, api_key, reference_map=glossary_map, target_lang=target_lang)
+                                trans = translate_deepl(t, api_key, reference_map=glossary_map, target_lang=target_lang, is_book=True)
                             elif engine_key == "openai":
-                                trans = translate_openai(t, api_key, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang)
+                                trans = translate_openai(t, api_key, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang, is_book=True)
                             else:
-                                trans = translate_google(t, api_key, reference_map=glossary_map, target_lang=target_lang)
+                                trans = translate_google(t, api_key, reference_map=glossary_map, target_lang=target_lang, is_book=True)
                             translated_unique.append(trans)
                             if idx % 5 == 0:
                                 prog_cb(idx, len(unique_texts))
@@ -572,18 +573,19 @@ class TranslationMixin:
                         texts, lambda x: x, engine_key, api_key, is_paid,
                         log_callback=lambda m: None, cancel_checker=check_cancel, progress_callback=prog_cb,
                         reference_map=glossary_map, glossary=glossary_map,
-                        ai_model=ai_model, target_lang=target_lang, log_prefix=log_prefix, custom_url=custom_url
+                        ai_model=ai_model, target_lang=target_lang, log_prefix=log_prefix, custom_url=custom_url,
+                        is_book_flags=[True] * len(texts)
                     )
                 else:
                     translated = []
                     for idx, t in enumerate(texts, 1):
                         if check_cancel(): break
                         if engine_key == "deepl":
-                            trans = translate_deepl(t, api_key, reference_map=glossary_map, target_lang=target_lang)
+                            trans = translate_deepl(t, api_key, reference_map=glossary_map, target_lang=target_lang, is_book=True)
                         elif engine_key == "openai":
-                            trans = translate_openai(t, api_key, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang)
+                            trans = translate_openai(t, api_key, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang, is_book=True)
                         else:
-                            trans = translate_google(t, api_key, reference_map=glossary_map, target_lang=target_lang)
+                            trans = translate_google(t, api_key, reference_map=glossary_map, target_lang=target_lang, is_book=True)
                         translated.append(trans)
                         if idx % 5 == 0: prog_cb(idx, len(texts))
                 return translated
