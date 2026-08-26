@@ -377,17 +377,13 @@ def upload_to_supabase(cache_dict, category="general"):
         else:
             url = f"{SUPABASE_URL}/rest/v1/{table_name}?on_conflict=lang,src"
 
-        # 1000개씩 청크 단위로 병렬 업로드
+        # 1000개씩 청크 단위로 분할 업로드
         batch_size = 1000
-        chunks = [records[i:i + batch_size] for i in range(0, len(records), batch_size)]
-        
-        def _post_chunk(chunk):
+        for i in range(0, len(records), batch_size):
+            chunk = records[i:i + batch_size]
             try:
                 requests.post(url, headers=headers, json=chunk, timeout=20)
             except Exception as e:
                 logging.warning(f"Supabase 업로드 실패 ({table_name}): {e}")
-
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            list(executor.map(_post_chunk, chunks))
 
     threading.Thread(target=_async_upload, daemon=True).start()
