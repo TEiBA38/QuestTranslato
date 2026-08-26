@@ -409,14 +409,35 @@ def create_combined_resource_pack(translated_langs, translated_books_map, output
                     written_paths.add(ko_kr_path)
                     zf.writestr(ko_kr_path, translated_content)
 
-        # 2. Patchouli JSON 파일 (원본 경로 en_us 그대로 덮어쓰기)
+        # 2. Patchouli JSON 파일 (assets/ 경로로 매핑하여 리소스팩에서 로드 가능하게 처리)
         if translated_books_map:
             for jar_name, files in translated_books_map.items():
                 for zip_path, json_data in files.items():
-                    if zip_path in written_paths:
-                        continue
-                    written_paths.add(zip_path)
-                    zf.writestr(zip_path, json.dumps(json_data, ensure_ascii=True, indent=2))
+                    write_path = zip_path
+                    
+                    # Patchouli 1.14+ 가이드북은 data/ 폴더에 존재하지만,
+                    # 유저가 리소스팩으로 적용하기 위해서는 assets/ 경로로 매핑해야 엔진이 인식합니다.
+                    if write_path.startswith("data/") and "/patchouli_books/" in write_path:
+                        parts = write_path.split('/')
+                        if len(parts) >= 5:
+                            namespace = parts[1]
+                            book_id = parts[3]
+                            if parts[4] == 'en_us':
+                                write_path = "assets/" + "/".join(parts[1:])
+                            else:
+                                rest = "/".join(parts[4:])
+                                write_path = f"assets/{namespace}/patchouli_books/{book_id}/en_us/{rest}"
+                    
+                    if write_path not in written_paths:
+                        written_paths.add(write_path)
+                        zf.writestr(write_path, json.dumps(json_data, ensure_ascii=False, indent=2))
+                    
+                    # ko_kr 경로로도 복사본 저장 (한국어 클라이언트 완벽 호환)
+                    if "/en_us/" in write_path:
+                        ko_path = write_path.replace("/en_us/", "/ko_kr/")
+                        if ko_path not in written_paths:
+                            written_paths.add(ko_path)
+                            zf.writestr(ko_path, json.dumps(json_data, ensure_ascii=False, indent=2))
         
         # 3. Custom Books (McJty, Forestry, etc)
         if custom_map:
