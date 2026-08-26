@@ -150,6 +150,8 @@ class TranslationMixin:
         def run_instance_translation():
             temp_zip_path = None
             try:
+                import translation_memory
+                translation_memory.set_current_modpack(modpack_dir)
                 temp_zip_path, file_count = self._create_temp_zip_from_modpack(modpack_dir)
                 if file_count > 0:
                     self.log(f"🚀 선택 모드팩 퀘스트 자동 번역 시작: {os.path.basename(modpack_dir)} ({file_count} files)")
@@ -1252,6 +1254,8 @@ class TranslationMixin:
 
         def run_translation_task():
             self.app_state.cancel_requested = False
+            import translation_memory
+            translation_memory.set_current_modpack(modpack_dir)
             self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
             self.toggle_buttons(False)
             

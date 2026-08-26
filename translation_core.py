@@ -115,6 +115,9 @@ def _generate_zip_review_report(context, raw_dir, out_dir, report_title):
 
 
 def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_key, api_key, is_paid, ai_model, target_lang, modpack_path, apply_mode, reference_map, glossary, custom_url=None):
+    # 모드팩 컨텍스트 설정 (짧은 문장의 모드팩별 메모리 분리)
+    translation_memory.set_current_modpack(modpack_path or zip_path)
+    
     base_zip_name = os.path.basename(zip_path)
     base_no_ext = os.path.splitext(base_zip_name)[0]
     origin_dir = os.path.dirname(zip_path)
