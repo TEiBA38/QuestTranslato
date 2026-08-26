@@ -221,12 +221,27 @@ def create_resource_pack(output_zip_path, translated_books_map, pack_description
         written_paths = set()
         for jar_name, files in translated_books_map.items():
             for zip_path, json_data in files.items():
-                if zip_path in written_paths:
+                write_path = zip_path
+                
+                # Patchouli 1.14+ 가이드북은 data/ 폴더에 존재하지만,
+                # 유저가 리소스팩으로 적용하기 위해서는 assets/ 경로로 매핑해야 엔진이 인식합니다.
+                if write_path.startswith("data/") and "/patchouli_books/" in write_path:
+                    parts = write_path.split('/')
+                    if len(parts) >= 5:
+                        namespace = parts[1]
+                        book_id = parts[3]
+                        if parts[4] == 'en_us':
+                            write_path = "assets/" + "/".join(parts[1:])
+                        else:
+                            rest = "/".join(parts[4:])
+                            write_path = f"assets/{namespace}/patchouli_books/{book_id}/en_us/{rest}"
+                            
+                if write_path in written_paths:
                     continue
-                written_paths.add(zip_path)
+                written_paths.add(write_path)
                 
                 json_str = json.dumps(json_data, ensure_ascii=False, indent=2)
-                zf.writestr(zip_path, json_str)
+                zf.writestr(write_path, json_str)
 
 def extract_lang_files_from_jars(mods_dir, log_callback=None):
     """
