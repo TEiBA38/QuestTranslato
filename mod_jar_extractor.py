@@ -409,10 +409,24 @@ def create_combined_resource_pack(translated_langs, translated_books_map, output
                     written_paths.add(ko_kr_path)
                     zf.writestr(ko_kr_path, translated_content)
 
-        # 2. Patchouli JSON 파일 (assets/ 경로로 매핑하여 리소스팩에서 로드 가능하게 처리)
+        # 2. Patchouli JSON 파일 (assets/ 경로 리소스팩 + 1.16+ kubejs/data/ 자동 동기화)
         if translated_books_map:
+            kubejs_data_dir = os.path.join(modpack_dir, "kubejs", "data") if modpack_dir else None
+            
             for jar_name, files in translated_books_map.items():
                 for zip_path, json_data in files.items():
+                    # 1. KubeJS 데이터팩 폴더가 있으면 직접 주입 (1.16+ 패출리 인게임 100% 적용 핵심!)
+                    if kubejs_data_dir and os.path.isdir(os.path.dirname(kubejs_data_dir)):
+                        rel_path = zip_path[5:] if zip_path.startswith("data/") else zip_path
+                        target_file = os.path.join(kubejs_data_dir, rel_path.replace('/', os.sep))
+                        try:
+                            os.makedirs(os.path.dirname(target_file), exist_ok=True)
+                            with open(target_file, "w", encoding="utf-8") as kf:
+                                json.dump(json_data, kf, ensure_ascii=False, indent=2)
+                        except Exception:
+                            pass
+
+                    # 2. 리소스팩 ZIP 내에 쓰기
                     write_path = zip_path
                     
                     # Patchouli 1.14+ 가이드북은 data/ 폴더에 존재하지만,
