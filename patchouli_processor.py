@@ -66,8 +66,8 @@ def collect_patchouli_targets(node, target_list):
     """
     if isinstance(node, dict):
         for k, v in node.items():
-            # 보통 Patchouli 번역 대상 키: name, text, title, pages 배열 안의 text/title
-            if k in ["name", "text", "title"] and isinstance(v, str) and v.strip():
+            # Patchouli 번역 대상 키: name, text, title, landing_text, subtitle, header, caption
+            if k in ["name", "text", "title", "landing_text", "subtitle", "header", "caption"] and isinstance(v, str) and v.strip():
                 # 순수 숫자나 코드 같은건 스킵
                 if re.search(r'[a-zA-Z가-힣]', v):
                     target_list.append((node, k, v))
