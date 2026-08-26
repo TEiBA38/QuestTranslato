@@ -60,6 +60,18 @@ def restore_patchouli_formatting(translated_text, mapping):
     # 간혹 띄어쓰기가 남았을 경우 (예: "안녕 $(l) 세계") 처리 - 한국어 조사나 띄어쓰기에 맞춰 보정할 수도 있으나 원본 유지 우선
     return restored_text
 
+def is_i18n_key(text):
+    """마인크래프트 내부 언어 키(예: item.twilightforest.guide)인지 확인"""
+    if not isinstance(text, str):
+        return False
+    t = text.strip()
+    prefixes = ['item.', 'block.', 'tile.', 'entity.', 'advancements.', 'gui.', 'container.', 'effect.', 'biome.', 'key.', 'patchouli.', 'stat.']
+    if any(t.startswith(p) for p in prefixes):
+        return True
+    if t.count('.') >= 2 and ' ' not in t and '\n' not in t:
+        return True
+    return False
+
 def collect_patchouli_targets(node, target_list):
     """
     Patchouli JSON 구조에서 번역해야 할 텍스트 노드들을 재귀적으로 수집합니다.
@@ -68,7 +80,9 @@ def collect_patchouli_targets(node, target_list):
         for k, v in node.items():
             # Patchouli 번역 대상 키: name, text, title, landing_text, subtitle, header, caption
             if k in ["name", "text", "title", "landing_text", "subtitle", "header", "caption"] and isinstance(v, str) and v.strip():
-                # 순수 숫자나 코드 같은건 스킵
+                # 마인크래프트 I18N 언어 키는 번역하지 않고 원본 키를 유지 (책 안 열리는 치명적 버그 방지)
+                if is_i18n_key(v):
+                    continue
                 if re.search(r'[a-zA-Z가-힣]', v):
                     target_list.append((node, k, v))
             elif isinstance(v, (dict, list)):
