@@ -152,7 +152,11 @@ def get_cached_translation(text, target_lang="한국어(Korean)"):
     if _is_short_text(text) and _current_modpack_id:
         with _lock:
             _load_modpack_memory()
-        return _lookup(_modpack_cache, text, target_lang_norm)
+        result = _lookup(_modpack_cache, text, target_lang_norm)
+        if result is not None:
+            return result
+        # Fallback to global cache for backward compatibility
+        return _lookup(_global_cache, text, target_lang_norm)
     else:
         return _lookup(_global_cache, text, target_lang_norm)
 
@@ -184,7 +188,15 @@ def get_cached_item_translation(text, target_lang="한국어(Korean)"):
     target_lang_norm = target_lang.replace(" ", "")
     with _lock:
         _load_items_memory()
-    return _lookup(_items_cache, text, target_lang_norm)
+        if not _global_loaded:
+            load_memory()
+    
+    result = _lookup(_items_cache, text, target_lang_norm)
+    if result is not None:
+        return result
+    
+    # Fallback to global cache for backward compatibility
+    return _lookup(_global_cache, text, target_lang_norm)
 
 
 def add_item_to_memory(text, translated_text, target_lang="한국어(Korean)"):
