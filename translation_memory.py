@@ -160,7 +160,15 @@ def get_cached_translation(text, target_lang="한국어 (Korean)"):
         if result is not None:
             return result
 
-    return _lookup_safe(_global_cache, text, target_lang_norm)
+    result = _lookup_safe(_global_cache, text, target_lang_norm)
+    if result is not None:
+        return result
+
+    result = _lookup_safe(_items_cache, text, target_lang_norm)
+    if result is not None:
+        return result
+
+    return _lookup_safe(_books_cache, text, target_lang_norm)
 
 
 def add_to_memory(text, translated_text, target_lang="한국어 (Korean)"):
@@ -186,7 +194,10 @@ def get_cached_item_translation(text, target_lang="한국어 (Korean)"):
     result = _lookup_safe(_items_cache, text, target_lang_norm)
     if result is not None:
         return result
-    return _lookup_safe(_global_cache, text, target_lang_norm)
+    result = _lookup_safe(_global_cache, text, target_lang_norm)
+    if result is not None:
+        return result
+    return _lookup_safe(_books_cache, text, target_lang_norm)
 
 
 def add_item_to_memory(text, translated_text, target_lang="한국어 (Korean)"):
@@ -206,7 +217,10 @@ def get_cached_book_translation(text, target_lang="한국어 (Korean)"):
     result = _lookup_safe(_books_cache, text, target_lang_norm)
     if result is not None:
         return result
-    return _lookup_safe(_global_cache, text, target_lang_norm)
+    result = _lookup_safe(_global_cache, text, target_lang_norm)
+    if result is not None:
+        return result
+    return _lookup_safe(_items_cache, text, target_lang_norm)
 
 
 def add_book_to_memory(text, translated_text, target_lang="한국어 (Korean)"):
