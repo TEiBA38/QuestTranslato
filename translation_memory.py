@@ -493,14 +493,11 @@ def upload_to_supabase(cache_dict, category="general"):
                 continue
             for src, tgt in entries.items():
                 if is_valid_translation(src, tgt, lang):
-                    rec = {
+                    records.append({
                         "lang": lang,
                         "src": src,
                         "tgt": tgt,
-                    }
-                    if category == "general":
-                        rec["category"] = "general"
-                    records.append(rec)
+                    })
 
         if not records:
             return
@@ -512,11 +509,8 @@ def upload_to_supabase(cache_dict, category="general"):
             "Prefer": "resolution=merge-duplicates",  # 충돌 시 자동 업데이트 (UPSERT)
         }
         
-        # PostgREST UPSERT는 on_conflict 매개변수가 필수입니다.
-        if category == "general":
-            url = f"{SUPABASE_URL}/rest/v1/{table_name}?on_conflict=category,lang,src"
-        else:
-            url = f"{SUPABASE_URL}/rest/v1/{table_name}?on_conflict=lang,src"
+        # 3개 분리 테이블 모두 on_conflict=lang,src 입니다.
+        url = f"{SUPABASE_URL}/rest/v1/{table_name}?on_conflict=lang,src"
 
         # 1000개씩 청크 단위로 분할 업로드
         batch_size = 1000
