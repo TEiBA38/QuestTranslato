@@ -6,6 +6,7 @@ import threading
 import logging
 import re
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from constants import has_hangul
 
 MEMORY_FILE = "translation_memory.json"
@@ -281,40 +282,58 @@ def save_memory():
 # ====================================================================
 
 def sync_from_supabase():
-    """Supabase의 3개 개별 테이블에서 번역 메모리 다운로드 및 로컬 캐시 병합"""
+    """Supabase의 3개 개별 테이블에서 번역 메모리 고속 병렬 다운로드 및 로컬 캐시 병합"""
     if "YOUR_PROJECT_REF" in SUPABASE_URL:
         return
 
-    def _sync_single_table(table_name, target_cache):
+    def _sync_single_table(category, table_name, target_cache):
         headers = {
             "apikey": SUPABASE_ANON_KEY,
             "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+            "Prefer": "count=exact",
         }
-        url = f"{SUPABASE_URL}/rest/v1/{table_name}?select=lang,src,tgt&limit=50000"
         try:
-            res = requests.get(url, headers=headers, timeout=10)
-            if res.status_code == 200:
-                rows = res.json()
-                with _lock:
-                    for row in rows:
-                        lang = row.get("lang", "한국어 (Korean)")
-                        src = row.get("src")
-                        tgt = row.get("tgt")
+            # 1. 전체 행 수 확인
+            res = requests.get(f"{SUPABASE_URL}/rest/v1/{table_name}?select=src&limit=1", headers=headers, timeout=10)
+            if res.status_code not in (200, 206):
+                return
+            content_range = res.headers.get("content-range", "")
+            total_count = int(content_range.split('/')[-1]) if '/' in content_range else 0
+            if total_count <= 0:
+                return
 
-                        if not is_valid_translation(src, tgt, lang):
-                            continue
+            def fetch_page(offset):
+                url = f"{SUPABASE_URL}/rest/v1/{table_name}?select=lang,src,tgt&limit=1000&offset={offset}"
+                r = requests.get(url, headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {SUPABASE_ANON_KEY}"}, timeout=15)
+                return r.json() if r.status_code == 200 else []
 
-                        if lang not in target_cache:
-                            target_cache[lang] = {}
-                        if src not in target_cache[lang]:
-                            target_cache[lang][src] = tgt
+            offsets = list(range(0, total_count, 1000))
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                for page in executor.map(fetch_page, offsets):
+                    with _lock:
+                        for row in page:
+                            lang = row.get("lang", "한국어 (Korean)")
+                            src = row.get("src")
+                            tgt = row.get("tgt")
+
+                            if not is_valid_translation(src, tgt, lang):
+                                continue
+
+                            if lang not in target_cache:
+                                target_cache[lang] = {}
+                            if src not in target_cache[lang]:
+                                target_cache[lang][src] = tgt
         except Exception as e:
             logging.warning(f"Supabase [{table_name}] 동기화 실패: {e}")
 
     def _async_download_all():
-        _sync_single_table(TABLE_MAP["general"], _global_cache)
-        _sync_single_table(TABLE_MAP["items"], _items_cache)
-        _sync_single_table(TABLE_MAP["books"], _books_cache)
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            executor.submit(_sync_single_table, "general", TABLE_MAP["general"], _global_cache)
+            executor.submit(_sync_single_table, "items", TABLE_MAP["items"], _items_cache)
+            executor.submit(_sync_single_table, "books", TABLE_MAP["books"], _books_cache)
+
+        # 동기화 완료 후 로컬 파일에도 안전하게 자동 저장
+        save_memory()
 
     threading.Thread(target=_async_download_all, daemon=True).start()
 
@@ -333,11 +352,14 @@ def upload_to_supabase(cache_dict, category="general"):
                 continue
             for src, tgt in entries.items():
                 if is_valid_translation(src, tgt, lang):
-                    records.append({
+                    rec = {
                         "lang": lang,
                         "src": src,
                         "tgt": tgt,
-                    })
+                    }
+                    if category == "general":
+                        rec["category"] = "general"
+                    records.append(rec)
 
         if not records:
             return
@@ -348,15 +370,24 @@ def upload_to_supabase(cache_dict, category="general"):
             "Content-Type": "application/json",
             "Prefer": "resolution=merge-duplicates",  # 충돌 시 자동 업데이트 (UPSERT)
         }
-        url = f"{SUPABASE_URL}/rest/v1/{table_name}"
+        
+        # PostgREST UPSERT는 on_conflict 매개변수가 필수입니다.
+        if category == "general":
+            url = f"{SUPABASE_URL}/rest/v1/{table_name}?on_conflict=category,lang,src"
+        else:
+            url = f"{SUPABASE_URL}/rest/v1/{table_name}?on_conflict=lang,src"
 
-        # 500개씩 청크 단위로 분할 업로드
-        batch_size = 500
-        for i in range(0, len(records), batch_size):
-            chunk = records[i:i + batch_size]
+        # 1000개씩 청크 단위로 병렬 업로드
+        batch_size = 1000
+        chunks = [records[i:i + batch_size] for i in range(0, len(records), batch_size)]
+        
+        def _post_chunk(chunk):
             try:
-                requests.post(url, headers=headers, json=chunk, timeout=15)
+                requests.post(url, headers=headers, json=chunk, timeout=20)
             except Exception as e:
                 logging.warning(f"Supabase 업로드 실패 ({table_name}): {e}")
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            list(executor.map(_post_chunk, chunks))
 
     threading.Thread(target=_async_upload, daemon=True).start()
