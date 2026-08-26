@@ -89,27 +89,153 @@ def _read_and_clean_file(filepath):
             if not isinstance(translations, dict):
                 continue
             cleaned[lang] = {}
+            lang_norm = lang.replace(" ", "")
             for src, tgt in translations.items():
                 if is_valid_translation(src, tgt, lang):
                     cleaned[lang][src] = tgt
+                    _index_template(src, tgt, lang_norm)
         return cleaned
     except Exception:
         return {}
 
 
+# ====================================================================
+# 스마트 퍼지 & 템플릿 캐싱 헬퍼
+# ====================================================================
+
+def _extract_formatting(text):
+    """문장 앞뒤 및 내부의 마인크래프트 색상/스타일 서식 코드 분리"""
+    if not isinstance(text, str) or not text.strip():
+        return "", text, ""
+    prefix_match = re.match(r'^([&§][0-9a-fk-orA-FK-OR]|\s)+', text)
+    prefix = prefix_match.group(0) if prefix_match else ""
+    suffix_match = re.search(r'([&§][0-9a-fk-orA-FK-OR]|\s)+$', text)
+    suffix = suffix_match.group(0) if suffix_match else ""
+    clean = re.sub(r'[&§][0-9a-fk-orA-FK-OR]', '', text).strip()
+    return prefix, clean, suffix
+
+
+def _restore_formatting(clean_trans, prefix, suffix):
+    """분리되었던 원본 서식 코드를 번역문에 다시 씌움"""
+    p = prefix.strip()
+    s = suffix.strip()
+    res = clean_trans
+    if p and not res.startswith(p):
+        res = f"{p}{res}"
+    if s and not res.endswith(s):
+        res = f"{res}{s}"
+    return res.strip()
+
+
+_template_index = {}  # (lang_norm, tmpl_src) -> (tmpl_tgt, num_count)
+
+def _index_template(src, tgt, lang_norm):
+    """문장 번역 쌍을 숫자 정규화 템플릿 인덱스에 O(1) 저장"""
+    if len(src) < 10 or len(tgt) < 4:
+        return
+    nums_src = re.findall(r'\d+', src)
+    if not nums_src or len(nums_src) > 4:
+        return
+    nums_tgt = re.findall(r'\d+', tgt)
+    if len(nums_tgt) != len(nums_src):
+        return
+    tmpl_src = re.sub(r'\d+', '<NUM>', src)
+    tmpl_tgt = re.sub(r'\d+', '<NUM>', tgt)
+    _template_index[(lang_norm, tmpl_src)] = (tmpl_tgt, len(nums_src))
+
+
+def _lookup_template(text, target_lang_norm):
+    """숫자만 변경된 문장을 템플릿 인덱스에서 O(1)로 조회 및 자동 치환"""
+    nums = re.findall(r'\d+', text)
+    if not nums or len(nums) > 4:
+        return None
+    tmpl = re.sub(r'\d+', '<NUM>', text)
+    entry = _template_index.get((target_lang_norm, tmpl))
+    if not entry:
+        return None
+    tmpl_tgt, count = entry
+    if len(nums) != count:
+        return None
+    res = tmpl_tgt
+    for n in nums:
+        res = res.replace('<NUM>', str(n), 1)
+    return res
+
+
 def _lookup_safe(cache, text, target_lang_norm):
-    """캐시 조회 및 오염된 데이터 발견 시 즉시 자가 치유(삭제)"""
+    """
+    3단계 스마트 캐시 조회:
+    1단계: 100% 완전 일치 (Exact Match)
+    2단계: 색상/서식 코드 무시 일치 (Formatting-Agnostic Match)
+    3단계: O(1) 초고속 숫자 템플릿 일치 (Number-Template Match)
+    """
     for lang_key, entries in cache.items():
-        if lang_key.replace(" ", "") == target_lang_norm:
-            if text in entries:
-                val = entries[text]
-                if is_valid_translation(text, val, lang_key):
-                    return val
-                else:
-                    with _lock:
-                        entries.pop(text, None)
-            break
+        if lang_key.replace(" ", "") != target_lang_norm:
+            continue
+
+        # 1단계: 완전 일치
+        if text in entries:
+            val = entries[text]
+            if is_valid_translation(text, val, lang_key):
+                return val
+            else:
+                with _lock:
+                    entries.pop(text, None)
+
+        # 2단계: 색상 및 서식 코드 무시 매칭
+        prefix, clean, suffix = _extract_formatting(text)
+        if clean and clean != text and clean in entries:
+            clean_val = entries[clean]
+            if is_valid_translation(clean, clean_val, lang_key):
+                return _restore_formatting(clean_val, prefix, suffix)
+
+        # 3단계: 숫자 템플릿 매칭 (O(1) 인덱스 조회)
+        template_res = _lookup_template(clean if clean else text, target_lang_norm)
+        if template_res and is_valid_translation(text, template_res, lang_key):
+            return _restore_formatting(template_res, prefix, suffix) if clean else template_res
+        break
+
     return None
+
+
+def find_few_shot_examples(query_texts, target_lang="한국어 (Korean)", max_examples=3):
+    """11.5만 개 메모리에서 가장 유사한 이전 번역 예시를 고속 추출하여 AI 프롬프트에 주입"""
+    if not query_texts:
+        return []
+    if not _global_loaded:
+        load_memory()
+    target_lang_norm = target_lang.replace(" ", "")
+    cache = _global_cache.get(target_lang_norm, {})
+    if not cache:
+        cache = _global_cache.get("한국어(Korean)", {})
+    if not cache:
+        return []
+
+    # 쿼리에서 핵심 단어 추출
+    all_words = set()
+    for q in query_texts:
+        if isinstance(q, str):
+            words = re.findall(r'[a-zA-Z]{3,}', q.lower())
+            all_words.update(words)
+
+    stop_words = {'the', 'and', 'for', 'you', 'with', 'this', 'that', 'have', 'from', 'your', 'are', 'can', 'not', 'will', 'all'}
+    meaningful_words = all_words - stop_words
+    if not meaningful_words:
+        return []
+
+    scored = []
+    for src, tgt in cache.items():
+        if len(src) < 15 or len(src) > 140 or '{' in src or '<' in src:
+            continue
+        src_lower = src.lower()
+        match_count = sum(1 for w in meaningful_words if w in src_lower)
+        if match_count >= 2:
+            scored.append((match_count, src, tgt))
+            if len(scored) >= 20:
+                break
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [(s, t) for _, s, t in scored[:max_examples]]
 
 
 def _store(cache, text, translated_text, target_lang_norm):
@@ -121,6 +247,7 @@ def _store(cache, text, translated_text, target_lang_norm):
     if target_lang_key not in cache:
         cache[target_lang_key] = {}
     cache[target_lang_key][text] = translated_text
+    _index_template(text, translated_text, target_lang_norm)
 
 
 def load_memory():

@@ -194,6 +194,17 @@ def translate_openai(text, api_key, reference_map=None, glossary=None, ai_model=
             clean_glossary = [f"'{k}' as '{v.split('#')[0].strip()}'" for k, v in glossary.items()]
             glossary_text = ", ".join(clean_glossary)
             system_prompt += f"\nGlossary (Strictly replace these words): {glossary_text}"
+
+        try:
+            from translation_memory import find_few_shot_examples
+            few_shots = find_few_shot_examples([t], target_lang, max_examples=2)
+            if few_shots:
+                system_prompt += "\nStyle Reference Examples from previous quests (Follow this tone and style):\n"
+                for src_ex, tgt_ex in few_shots:
+                    system_prompt += f"- \"{src_ex}\" -> \"{tgt_ex}\"\n"
+        except Exception:
+            pass
+
         payload = {
             "model": model,
             "messages": [
@@ -290,6 +301,17 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
         if clean_glossary:
             glossary_text = ", ".join(clean_glossary)
             prompt += f"- Glossary (Strictly replace these words): {glossary_text}\n"
+
+    try:
+        from translation_memory import find_few_shot_examples
+        few_shots = find_few_shot_examples(unique_unresolved, target_lang, max_examples=2)
+        if few_shots:
+            prompt += "- Style Reference Examples from previous quests (Follow this tone, formatting, and style):\n"
+            for src_ex, tgt_ex in few_shots:
+                prompt += f"  * \"{src_ex}\" -> \"{tgt_ex}\"\n"
+    except Exception:
+        pass
+
     prompt += f"Input JSON: {input_json}"
 
     model_name = ai_model if ai_model else 'gemini-3.5-flash-lite'
