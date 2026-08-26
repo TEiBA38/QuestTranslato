@@ -423,6 +423,13 @@ def create_combined_resource_pack(translated_langs, translated_books_map, output
                             os.makedirs(os.path.dirname(target_file), exist_ok=True)
                             with open(target_file, "w", encoding="utf-8") as kf:
                                 json.dump(json_data, kf, ensure_ascii=False, indent=2)
+                                
+                            # ko_kr 폴더로도 추가 저장 (마인크래프트 한국어 클라이언트 완벽 호환)
+                            if os.sep + "en_us" + os.sep in target_file:
+                                ko_target = target_file.replace(os.sep + "en_us" + os.sep, os.sep + "ko_kr" + os.sep)
+                                os.makedirs(os.path.dirname(ko_target), exist_ok=True)
+                                with open(ko_target, "w", encoding="utf-8") as kf2:
+                                    json.dump(json_data, kf2, ensure_ascii=False, indent=2)
                         except Exception:
                             pass
 
