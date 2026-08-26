@@ -623,12 +623,21 @@ if ctk is not None and TkinterDnD is not None:
                 logging.error(f"설정 저장 실패: {e}")
 
         def on_close(self):
-            self.save_user_settings()
-            import translation_memory
-            translation_memory.save_memory()
-            if not self.do_backup_on_close():
-                return  # 사용자가 종료를 취소함
-            self.destroy()
+            try:
+                self.save_user_settings()
+                import translation_memory
+                translation_memory.save_memory()
+                if not self.do_backup_on_close():
+                    return  # 사용자가 종료를 취소함
+            except Exception:
+                pass
+            finally:
+                try:
+                    self.destroy()
+                except Exception:
+                    pass
+                import os
+                os._exit(0)
 
 else:
     class QuestTranslatorApp:
