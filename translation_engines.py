@@ -296,9 +296,15 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
         "- Preserve game abbreviations and formats exactly without translating (e.g., 'Lv.', 'HP', 'MP', 'ATK', 'DEF', 'x2', '+10%').\n"
     )
     if glossary:
-        clean_glossary = [f"'{k}' as '{v.split('#')[0].strip()}'" for k, v in glossary.items()]
-        glossary_text = ", ".join(clean_glossary)
-        prompt += f"- Glossary (Strictly replace these words): {glossary_text}\n"
+        input_text_lower = " ".join(unique_unresolved).lower()
+        clean_glossary = []
+        for k, v in glossary.items():
+            if k.lower() in input_text_lower:
+                clean_glossary.append(f"'{k}' as '{v.split('#')[0].strip()}'")
+        
+        if clean_glossary:
+            glossary_text = ", ".join(clean_glossary)
+            prompt += f"- Glossary (Strictly replace these words): {glossary_text}\n"
     prompt += f"Input JSON: {input_json}"
 
     model_name = ai_model if ai_model else 'gemini-3.5-flash-lite'
