@@ -78,3 +78,4 @@ ex) "D:\MODE\Instances\FTB StoneBlock 4\config\ftbquests\quests\lang"
    - **changed**: 정상적으로 번역되어 변경된 개수
    - **unchanged**: 원문과 동일하게 번역되지 않은 개수
    - **suspect_untranslated**: (경고) 미번역이 강력히 의심되는 항목 개수
+"# QuestTranslator_Sever" 
