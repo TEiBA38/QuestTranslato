@@ -488,10 +488,10 @@ def upload_to_supabase(cache_dict, category="general"):
 
     def _async_upload():
         records = []
-        for lang, entries in cache_dict.items():
+        for lang, entries in list(cache_dict.items()):
             if not isinstance(entries, dict):
                 continue
-            for src, tgt in entries.items():
+            for src, tgt in list(entries.items()):
                 if is_valid_translation(src, tgt, lang):
                     records.append({
                         "lang": lang,
