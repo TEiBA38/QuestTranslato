@@ -493,12 +493,20 @@ def check_and_auto_compact(log_callback=None):
             for cat, table_name in TABLE_MAP.items():
                 target_cache = _global_cache if cat == "general" else (_items_cache if cat == "items" else _books_cache)
                 try:
+                    h_t = dict(headers)
+                    h_t["Prefer"] = "count=planned"
+                    res = requests.get(f"{SUPABASE_URL}/rest/v1/{table_name}?select=src&limit=1", headers=h_t, timeout=10)
+                    cr = res.headers.get("content-range", "")
+                    table_count = int(cr.split('/')[-1]) if '/' in cr else 0
+                    if table_count <= 0:
+                        continue
+
                     def fetch_p(offset):
                         u = f"{SUPABASE_URL}/rest/v1/{table_name}?select=lang,src,tgt&limit=1000&offset={offset}"
                         r = requests.get(u, headers=headers, timeout=15)
                         return r.json() if r.status_code == 200 else []
 
-                    offsets = list(range(0, total_db_rows + 1000, 1000))
+                    offsets = list(range(0, table_count, 1000))
                     with ThreadPoolExecutor(max_workers=8) as ex:
                         for page in ex.map(fetch_p, offsets):
                             with _lock:
@@ -510,7 +518,7 @@ def check_and_auto_compact(log_callback=None):
                                         if lang not in target_cache: target_cache[lang] = {}
                                         target_cache[lang][src] = tgt
                 except Exception as e:
-                    logging.warning(f"컴팩션 중 DB 다운로드 실패: {e}")
+                    logging.warning(f"컴팩션 중 DB [{table_name}] 다운로드 실패: {e}")
                     return
 
             # 3. 마스터 압축 파일(master_*.json.gz) 생성 및 Storage 업로드
