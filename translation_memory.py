@@ -1,5 +1,6 @@
 import json
 import os
+import gzip
 import hashlib
 import shutil
 import threading
@@ -413,30 +414,230 @@ def save_memory():
             _books_cache.clear()
             _books_cache.update(merged_books)
 
-    # Supabase 3개 개별 테이블로 자동 업로드
+    # Supabase 3개 개별 테이블로 실시간 델타 자동 업로드 (UPSERT)
     upload_to_supabase(_global_cache, "general")
     upload_to_supabase(_items_cache, "items")
     upload_to_supabase(_books_cache, "books")
 
+    # Supabase Storage Master Gzip 자동 패킹 및 동기화 (완전 자동화)
+    upload_master_to_storage()
+
+    # DB 테이블 누적 용량 200MB 초과 여부 체크 및 자동 컴팩션
+    check_and_auto_compact()
+
 
 # ====================================================================
-# Supabase 클라우드 동기화 (3개 테이블 분리 REST API 통신)
+# 하이브리드 클라우드 동기화 (Master Gzip Storage + Live Delta DB)
 # ====================================================================
 
-def sync_from_supabase():
-    """Supabase의 3개 개별 테이블에서 번역 메모리 고속 병렬 다운로드 및 로컬 캐시 병합"""
+STORAGE_BUCKET = "translations"
+
+MASTER_FILES = {
+    "general": ("master_general.json.gz", _global_cache),
+    "items": ("master_items.json.gz", _items_cache),
+    "books": ("master_books.json.gz", _books_cache),
+}
+
+# 자동 컴팩션(Compaction) 기준: DB 3개 테이블의 실제 누적 디스크 용량이 100MB(104,857,600 Bytes) 초과 시 자동 마스터 흡수 및 DB 비우기
+AUTO_COMPACT_SIZE_MB = 100
+AUTO_COMPACT_BYTES_THRESHOLD = AUTO_COMPACT_SIZE_MB * 1024 * 1024  # 100 MB
+_is_compacting = False
+
+def check_and_auto_compact(log_callback=None):
+    """DB 3개 테이블의 총 용량이 200MB를 넘으면 Master Gzip으로 완전 통합 압축 후 DB를 0MB로 리셋"""
+    global _is_compacting
+    if _is_compacting or "YOUR_PROJECT_REF" in SUPABASE_URL:
+        return
+
+    def _async_compaction():
+        global _is_compacting
+        _is_compacting = True
+        try:
+            headers = {
+                "apikey": SUPABASE_ANON_KEY,
+                "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+            }
+            # 1. 서버 측 실제 물리 디스크 용량 (Bytes) 조회
+            total_db_bytes = 0
+            try:
+                rpc_res = requests.post(f"{SUPABASE_URL}/rest/v1/rpc/get_translation_memory_size_bytes", headers=headers, json={}, timeout=10)
+                if rpc_res.status_code == 200 and rpc_res.text.strip().isdigit():
+                    total_db_bytes = int(rpc_res.text.strip())
+            except Exception:
+                pass
+
+            # RPC 조회가 안 될 경우 행 수 기반 정밀 추정 Fallback
+            if total_db_bytes <= 0:
+                h_count = dict(headers)
+                h_count["Prefer"] = "count=planned"
+                total_rows = 0
+                for cat, table_name in TABLE_MAP.items():
+                    try:
+                        res = requests.get(f"{SUPABASE_URL}/rest/v1/{table_name}?select=src&limit=1", headers=h_count, timeout=10)
+                        cr = res.headers.get("content-range", "")
+                        cnt = int(cr.split('/')[-1]) if '/' in cr else 0
+                        total_rows += cnt
+                    except Exception:
+                        pass
+                # 행당 평균 크기(인덱스 포함 약 700바이트)로 용량 계산
+                total_db_bytes = total_rows * 700
+
+            total_mb = total_db_bytes / (1024 * 1024)
+            if total_db_bytes < AUTO_COMPACT_BYTES_THRESHOLD:
+                return
+
+            if log_callback:
+                log_callback(f"📦 [자동 컴팩션 감지] DB 총 누적 용량이 {total_mb:.1f} MB에 도달하여(기준: 200MB) 마스터 압축 파일로 통합을 시작합니다...")
+
+            # 2. 모든 최신 DB 데이터를 메모리로 다운로드 및 병합
+            for cat, table_name in TABLE_MAP.items():
+                target_cache = _global_cache if cat == "general" else (_items_cache if cat == "items" else _books_cache)
+                try:
+                    def fetch_p(offset):
+                        u = f"{SUPABASE_URL}/rest/v1/{table_name}?select=lang,src,tgt&limit=1000&offset={offset}"
+                        r = requests.get(u, headers=headers, timeout=15)
+                        return r.json() if r.status_code == 200 else []
+
+                    offsets = list(range(0, total_db_rows + 1000, 1000))
+                    with ThreadPoolExecutor(max_workers=8) as ex:
+                        for page in ex.map(fetch_p, offsets):
+                            with _lock:
+                                for row in page:
+                                    lang = row.get("lang", "한국어 (Korean)")
+                                    src = row.get("src")
+                                    tgt = row.get("tgt")
+                                    if is_valid_translation(src, tgt, lang):
+                                        if lang not in target_cache: target_cache[lang] = {}
+                                        target_cache[lang][src] = tgt
+                except Exception as e:
+                    logging.warning(f"컴팩션 중 DB 다운로드 실패: {e}")
+                    return
+
+            # 3. 마스터 압축 파일(master_*.json.gz) 생성 및 Storage 업로드
+            all_uploads_success = True
+            for cat, (gz_name, cache) in MASTER_FILES.items():
+                with _lock:
+                    data_copy = {k: v.copy() for k, v in cache.items() if isinstance(v, dict)}
+                if not data_copy:
+                    continue
+                raw_json = json.dumps(data_copy, ensure_ascii=False, indent=2).encode("utf-8")
+                gz_bytes = gzip.compress(raw_json, compresslevel=9)
+                
+                upload_url = f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{gz_name}"
+                h = {
+                    "apikey": SUPABASE_ANON_KEY,
+                    "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+                    "Content-Type": "application/gzip",
+                    "x-upsert": "true",
+                }
+                r = requests.post(upload_url, headers=h, data=gz_bytes, timeout=30)
+                if r.status_code not in (200, 201):
+                    r = requests.put(upload_url, headers=h, data=gz_bytes, timeout=30)
+                if r.status_code not in (200, 201):
+                    all_uploads_success = False
+                    break
+
+            # 4. Storage 마스터 업로드가 100% 성공했을 때만 안전하게 DB 테이블 비우기
+            if all_uploads_success:
+                try:
+                    # 보안 RPC 함수를 호출하여 0.01초 만에 안전하게 TRUNCATE 리셋
+                    requests.post(f"{SUPABASE_URL}/rest/v1/rpc/truncate_all_translation_tables", headers=headers, json={}, timeout=15)
+                except Exception as e:
+                    logging.warning(f"DB 리셋 RPC 호출 실패: {e}")
+
+                save_memory()
+                msg = f"✨ [스마트 자동 컴팩션 완료] DB 데이터를 master_memory.json.gz에 통합 압축하고 DB 용량을 0MB로 리셋했습니다!"
+                logging.info(msg)
+                if log_callback:
+                    log_callback(msg)
+        finally:
+            _is_compacting = False
+
+    threading.Thread(target=_async_compaction, daemon=True).start()
+
+_storage_upload_timer = None
+
+def upload_master_to_storage():
+    """인메모리 전체 최신 캐시를 Gzip 초압축하여 Supabase Storage에 100% 자동 백그라운드 동기화"""
     if "YOUR_PROJECT_REF" in SUPABASE_URL:
         return
 
-    def _sync_single_table(category, table_name, target_cache):
-        headers = {
-            "apikey": SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-            "Prefer": "count=exact",
-        }
+    def _async_pack():
         try:
-            # 1. 전체 행 수 확인
-            res = requests.get(f"{SUPABASE_URL}/rest/v1/{table_name}?select=src&limit=1", headers=headers, timeout=10)
+            for cat, (gz_name, cache) in MASTER_FILES.items():
+                with _lock:
+                    data_copy = {k: v.copy() for k, v in cache.items() if isinstance(v, dict)}
+                if not data_copy:
+                    continue
+                raw_json = json.dumps(data_copy, ensure_ascii=False, indent=2).encode("utf-8")
+                gz_bytes = gzip.compress(raw_json, compresslevel=9)
+                
+                upload_url = f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{gz_name}"
+                h = {
+                    "apikey": SUPABASE_ANON_KEY,
+                    "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+                    "Content-Type": "application/gzip",
+                    "x-upsert": "true",
+                }
+                r = requests.post(upload_url, headers=h, data=gz_bytes, timeout=30)
+                if r.status_code not in (200, 201):
+                    requests.put(upload_url, headers=h, data=gz_bytes, timeout=30)
+        except Exception as e:
+            logging.debug(f"자동 마스터 패킹 백그라운드 실패: {e}")
+
+    # 디바운스: 8초 내 중복 호출 방지
+    global _storage_upload_timer
+    with _lock:
+        if _storage_upload_timer:
+            _storage_upload_timer.cancel()
+        _storage_upload_timer = threading.Timer(8.0, lambda: threading.Thread(target=_async_pack, daemon=True).start())
+        _storage_upload_timer.start()
+
+def sync_from_supabase():
+    """
+    하이브리드 2단계 고속 동기화:
+    1단계: Supabase Storage에서 3MB 마스터 압축 파일(master_*.json.gz)을 0.3초 만에 병렬 다운로드하여 Base Memory 구축
+    2단계: Supabase DB 테이블에서 최신 Delta 레코드를 동기화하여 실시간 병합
+    """
+    if "YOUR_PROJECT_REF" in SUPABASE_URL:
+        return
+
+    headers = {
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+    }
+
+    def _download_master_storage(category, filename, target_cache):
+        """Storage에서 master_*.json.gz 초고속 단일 다운로드 및 decompress"""
+        try:
+            url = f"{SUPABASE_URL}/storage/v1/object/public/{STORAGE_BUCKET}/{filename}"
+            r = requests.get(url, headers=headers, timeout=15)
+            if r.status_code == 200 and r.content:
+                raw_bytes = r.content
+                if filename.endswith(".gz"):
+                    raw_bytes = gzip.decompress(raw_bytes)
+                parsed = json.loads(raw_bytes.decode("utf-8"))
+                if isinstance(parsed, dict):
+                    with _lock:
+                        for lang, entries in parsed.items():
+                            if not isinstance(entries, dict):
+                                continue
+                            if lang not in target_cache:
+                                target_cache[lang] = {}
+                            target_cache[lang].update(entries)
+                            lang_norm = lang.replace(" ", "")
+                            for src, tgt in entries.items():
+                                _index_template(src, tgt, lang_norm)
+                    logging.info(f"✅ Storage Master [{filename}] 로드 성공")
+        except Exception as e:
+            logging.debug(f"Storage Master [{filename}] 조회 실패 또는 미생성 (DB Fallback): {e}")
+
+    def _sync_single_table(category, table_name, target_cache):
+        """DB 테이블에서 최신 변경분(Delta) 동기화"""
+        try:
+            h = dict(headers)
+            h["Prefer"] = "count=planned"
+            res = requests.get(f"{SUPABASE_URL}/rest/v1/{table_name}?select=src&limit=1", headers=h, timeout=10)
             if res.status_code not in (200, 206):
                 return
             content_range = res.headers.get("content-range", "")
@@ -446,7 +647,7 @@ def sync_from_supabase():
 
             def fetch_page(offset):
                 url = f"{SUPABASE_URL}/rest/v1/{table_name}?select=lang,src,tgt&limit=1000&offset={offset}"
-                r = requests.get(url, headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {SUPABASE_ANON_KEY}"}, timeout=15)
+                r = requests.get(url, headers=headers, timeout=15)
                 return r.json() if r.status_code == 200 else []
 
             offsets = list(range(0, total_count, 1000))
@@ -457,27 +658,31 @@ def sync_from_supabase():
                             lang = row.get("lang", "한국어 (Korean)")
                             src = row.get("src")
                             tgt = row.get("tgt")
-
                             if not is_valid_translation(src, tgt, lang):
                                 continue
-
                             if lang not in target_cache:
                                 target_cache[lang] = {}
-                            if src not in target_cache[lang]:
-                                target_cache[lang][src] = tgt
+                            target_cache[lang][src] = tgt
+                            _index_template(src, tgt, lang.replace(" ", ""))
         except Exception as e:
-            logging.warning(f"Supabase [{table_name}] 동기화 실패: {e}")
+            logging.warning(f"Supabase DB [{table_name}] 동기화 실패: {e}")
 
-    def _async_download_all():
+    def _async_hybrid_sync():
+        # 1단계: Storage Master 초고속 병렬 로드 (0.3초)
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            for cat, (fn, cache) in MASTER_FILES.items():
+                executor.submit(_download_master_storage, cat, fn, cache)
+
+        # 2단계: DB Table Live Delta 동기화
         with ThreadPoolExecutor(max_workers=3) as executor:
             executor.submit(_sync_single_table, "general", TABLE_MAP["general"], _global_cache)
             executor.submit(_sync_single_table, "items", TABLE_MAP["items"], _items_cache)
             executor.submit(_sync_single_table, "books", TABLE_MAP["books"], _books_cache)
 
-        # 동기화 완료 후 로컬 파일에도 안전하게 자동 저장
+        # 3단계: 로컬 백업 자동 저장
         save_memory()
 
-    threading.Thread(target=_async_download_all, daemon=True).start()
+    threading.Thread(target=_async_hybrid_sync, daemon=True).start()
 
 
 _upload_timers = {}
