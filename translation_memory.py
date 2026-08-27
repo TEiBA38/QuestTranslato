@@ -240,6 +240,10 @@ def find_few_shot_examples(query_texts, target_lang="한국어 (Korean)", max_ex
     return [(s, t) for _, s, t in scored[:max_examples]]
 
 
+_dirty_general = {}
+_dirty_items = {}
+_dirty_books = {}
+
 def _store(cache, text, translated_text, target_lang_norm):
     target_lang_key = target_lang_norm
     for k in cache.keys():
@@ -249,6 +253,21 @@ def _store(cache, text, translated_text, target_lang_norm):
     if target_lang_key not in cache:
         cache[target_lang_key] = {}
     cache[target_lang_key][text] = translated_text
+    
+    # 더티 캐시(새로 추가된 데이터)에도 저장하여 DB 업로드 시 전체가 아닌 신규 데이터만 업로드되도록 함
+    dirty_target = None
+    if cache is _global_cache:
+        dirty_target = _dirty_general
+    elif cache is _items_cache:
+        dirty_target = _dirty_items
+    elif cache is _books_cache:
+        dirty_target = _dirty_books
+
+    if dirty_target is not None:
+        if target_lang_key not in dirty_target:
+            dirty_target[target_lang_key] = {}
+        dirty_target[target_lang_key][text] = translated_text
+
     _index_template(text, translated_text, target_lang_norm)
 
 
@@ -391,7 +410,7 @@ def _safe_save_file(filepath, data):
 
 
 def save_memory():
-    """로컬 4개 파일 저장 및 Supabase 3개 개별 테이블에 비동기 업로드 (UPSERT)"""
+    """로컬 4개 파일 저장 및 Supabase 3개 개별 테이블에 신규(Dirty) 데이터만 비동기 업로드 (UPSERT)"""
     with _lock:
         merged_global = _safe_save_file(MEMORY_FILE, _global_cache)
         if merged_global is not None:
@@ -414,10 +433,18 @@ def save_memory():
             _books_cache.clear()
             _books_cache.update(merged_books)
 
-    # Supabase 3개 개별 테이블로 실시간 델타 자동 업로드 (UPSERT)
-    upload_to_supabase(_global_cache, "general")
-    upload_to_supabase(_items_cache, "items")
-    upload_to_supabase(_books_cache, "books")
+        # 현재 업로드할 더티(신규) 캐시 복사 및 원본 초기화
+        dirty_general_copy = {k: v.copy() for k, v in _dirty_general.items()}
+        dirty_items_copy = {k: v.copy() for k, v in _dirty_items.items()}
+        dirty_books_copy = {k: v.copy() for k, v in _dirty_books.items()}
+        _dirty_general.clear()
+        _dirty_items.clear()
+        _dirty_books.clear()
+
+    # Supabase 3개 개별 테이블로 신규 델타 자동 업로드 (UPSERT)
+    if dirty_general_copy: upload_to_supabase(dirty_general_copy, "general")
+    if dirty_items_copy: upload_to_supabase(dirty_items_copy, "items")
+    if dirty_books_copy: upload_to_supabase(dirty_books_copy, "books")
 
     # Supabase Storage Master Gzip 자동 패킹 및 동기화 (완전 자동화)
     upload_master_to_storage()
