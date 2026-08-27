@@ -438,9 +438,9 @@ MASTER_FILES = {
     "books": ("master_books.json.gz", _books_cache),
 }
 
-# 자동 컴팩션(Compaction) 기준: DB 3개 테이블의 실제 누적 디스크 용량이 100MB(104,857,600 Bytes) 초과 시 자동 마스터 흡수 및 DB 비우기
-AUTO_COMPACT_SIZE_MB = 100
-AUTO_COMPACT_BYTES_THRESHOLD = AUTO_COMPACT_SIZE_MB * 1024 * 1024  # 100 MB
+# 자동 컴팩션(Compaction) 기준: DB 3개 테이블의 실제 누적 디스크 용량이 200MB 초과 시 자동 마스터 흡수 및 DB 비우기
+AUTO_COMPACT_SIZE_MB = 200
+AUTO_COMPACT_BYTES_THRESHOLD = AUTO_COMPACT_SIZE_MB * 1024 * 1024  # 200 MB
 _is_compacting = False
 
 def check_and_auto_compact(log_callback=None):
