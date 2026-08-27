@@ -16,15 +16,24 @@ venv/
 Thumbs.db
 .vscode/
 
-# Local test outputs / packaged archives
+# Local test outputs / temp diffs / archives
 *.zip
+*.log
+*.jar
+code_diff*.txt
+diff*.txt
+temp_eu2/
+test_out/
+scratch/
 
 # Optional runtime outputs
 translated/
 
-# Copilot workspace skills (local only)
+# Copilot / agent skills (local only)
 .github/skills/
 
-# Backup files
+# Local translation memory & backups (Cloud Supabase is used)
+translation_memory*.json
+translation_memory*.json.bak
+*.bak
 app_backup.py
-translation_memory.json
