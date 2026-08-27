@@ -10,6 +10,7 @@ a = Analysis(
     hiddenimports=[
         'ui_screens',
         'modpack_manager',
+        'mod_jar_extractor',
         'translation_runner',
         'translation_engines',
         'file_processors',
