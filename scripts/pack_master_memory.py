@@ -171,15 +171,31 @@ def main():
         # 2. DB 신규 데이터 다운로드
         new_data = fetch_table_data(table_name)
 
-        # 3. 양쪽 데이터 안전 병합 (기존 + 신규)
+        # 3. 로컬 JSON 파일 확인 (dist 또는 root)
+        local_data = {}
+        for lpath in [os.path.join(dist_dir, json_name), os.path.join(os.path.dirname(__file__), "..", json_name)]:
+            if os.path.exists(lpath):
+                try:
+                    with open(lpath, "r", encoding="utf-8") as f:
+                        ld = json.load(f)
+                        if isinstance(ld, dict):
+                            for l_k, l_v in ld.items():
+                                if l_k not in local_data: local_data[l_k] = {}
+                                if isinstance(l_v, dict): local_data[l_k].update(l_v)
+                except Exception:
+                    pass
+
+        # 4. 세 곳 데이터 안전 병합 (기존 Storage + 신규 DB + 로컬 파일)
         merged_data = {}
-        all_langs = set(list(existing_data.keys()) + list(new_data.keys()))
+        all_langs = set(list(existing_data.keys()) + list(new_data.keys()) + list(local_data.keys()))
         for lang in all_langs:
             merged_data[lang] = {}
             if lang in existing_data and isinstance(existing_data[lang], dict):
                 merged_data[lang].update(existing_data[lang])
             if lang in new_data and isinstance(new_data[lang], dict):
                 merged_data[lang].update(new_data[lang])
+            if lang in local_data and isinstance(local_data[lang], dict):
+                merged_data[lang].update(local_data[lang])
 
         if not merged_data:
             print(f"⚠️ {table_name} 데이터가 비어있습니다. 건너뜁니다.")
