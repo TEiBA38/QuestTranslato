@@ -197,18 +197,30 @@ class TranslationMixin:
                 
                 self.log(f"✅ 총 {len(langs_map)}개의 모드에서 .lang 파일을 추출했습니다.")
                 
-                all_targets = [] # (jar_name, zip_path, line_idx, key, value, is_short_item)
+                all_targets = [] # (jar_name, zip_path, line_idx, key, value, is_short_item, is_item_type)
                 
                 def is_book_or_desc_key(key):
                     k = key.lower()
-                    keywords = ['book', 'manual', 'guide', 'lexicon', 'tome', 'entry', 'page', 'lore', 'desc', 'tooltip', 'info', 'text']
+                    keywords = ['book', 'manual', 'guide', 'lexicon', 'tome', 'entry', 'page', 'lore', 'desc', 'tooltip', 'info', 'text', 'message', 'help']
                     return any(kw in k for kw in keywords)
 
+                def is_item_key_or_name(key, text):
+                    k = key.lower()
+                    # 1. 명확한 마인크래프트 아이템/블록/엔티티/인챈트 시스템 언어 키
+                    item_prefixes = ('item.', 'block.', 'tile.', 'entity.', 'enchantment.', 'effect.', 'biome.', 'fluid.', 'material.')
+                    if any(k.startswith(p) or f'.{p}' in k for p in item_prefixes):
+                        if not any(sub in k for sub in ['.desc', '.tooltip', '.lore', '.info', '.message', '.help', '.guide']):
+                            if '\n' not in text and not any(p in text for p in ['. ', '! ', '? ']):
+                                return True
+                    # 2. 시스템 키가 없더라도 문장 부호가 없고 짧은 고유명사
+                    if len(text.split()) <= 4 and not any(p in text for p in ['.', '!', '?', '\n']) and not is_book_or_desc_key(key):
+                        return True
+                    return False
+
                 def should_append_english(key, text):
-                    words = text.split()
-                    if len(words) >= 5 or any(p in text for p in ['.', '!', '?']):
+                    if not is_item_key_or_name(key, text):
                         return False
-                    if is_book_or_desc_key(key):
+                    if len(text.split()) > 6 or any(p in text for p in ['.', '!', '?', '\n']):
                         return False
                     return True
 
@@ -223,7 +235,8 @@ class TranslationMixin:
                                 for k, v in json_data.items():
                                     if isinstance(v, str) and v.strip():
                                         is_short = should_append_english(k, v)
-                                        all_targets.append((jar_name, zip_path, k, k, v, is_short))
+                                        is_it = is_item_key_or_name(k, v)
+                                        all_targets.append((jar_name, zip_path, k, k, v, is_short, is_it))
                                         parsed_lines[k] = v
                                 parsed_langs_map[jar_name][zip_path] = ('json', parsed_lines, json_data)
                             except Exception as e:
@@ -238,7 +251,8 @@ class TranslationMixin:
                                     v = v.strip()
                                     if v:
                                         is_short = should_append_english(k, v)
-                                        all_targets.append((jar_name, zip_path, idx, k, v, is_short))
+                                        is_it = is_item_key_or_name(k, v)
+                                        all_targets.append((jar_name, zip_path, idx, k, v, is_short, is_it))
                                     parsed_lines.append([k, v]) # [0] key, [1] value
                                 else:
                                     parsed_lines.append(line) # 그냥 텍스트
@@ -248,8 +262,11 @@ class TranslationMixin:
                 unique_texts = []
                 is_item_flags = []
                 seen = set()
-                for t in all_targets:
-                    text = t[4]
+                
+                for item in all_targets:
+                    # item: (jar_name, zip_path, idx, k, v, is_short, is_it)
+                    text = item[4]
+                    is_it = item[6]
                     if text not in seen:
                         seen.add(text)
                         unique_texts.append(text)
