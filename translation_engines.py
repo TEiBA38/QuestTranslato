@@ -153,12 +153,16 @@ def is_code_or_id(text):
     t = str(text).strip()
     if (":" in t and " " not in t) or t.isdigit() or bool(re.match(r'^[0-9A-Fa-f]{8,}$', t)):
         return True
-    # 영단어(2글자 이상)가 전혀 없는 기호/숫자/포맷 문자열 (%s/t, %s°C, :(, 1/8 등)
-    words = re.findall(r'[a-zA-Z]{2,}', t)
+    # 글자(알파벳, 한글, 기타 언어의 문자)가 전혀 없는 기호/숫자/포맷 문자열
+    # [^\W\d_]는 숫자와 언더바를 제외한 모든 언어의 문자(Letter)를 매칭합니다.
+    words = re.findall(r'[^\W\d_]+', t)
     if not words:
         return True
     # 단일 문자나 아주 짧은 대문자 기호/약어 (W, R, D, GUI, ID 등)
     if len(t) <= 3 and not re.search(r'[가-힣]', t) and t.isupper():
+        # 예외: I, A 와 같은 정상적인 1글자 영단어는 번역 허용
+        if t in ("I", "A"):
+            return False
         return True
     return False
 
@@ -516,6 +520,11 @@ def translate_local_ai(text_list, base_url, model_name, api_key=None, log_callba
         headers["Authorization"] = f"Bearer {api_key}"
     
     url = base_url.strip().rstrip("/")
+    if "169.254." in url:
+        if log_callback:
+            log_callback("⚠️ [보안 차단] 클라우드 메타데이터 IP(169.254.x.x)는 SSRF 방지를 위해 사용할 수 없습니다.")
+        return [item if item is not None else text for item, text in zip(resolved, text_list)]
+
     if not url.endswith("/chat/completions"):
         url += "/chat/completions"
 
@@ -615,7 +624,13 @@ def auto_extract_glossary(text_samples, engine_key, api_key, ai_model=None, targ
                     raise call_err
             raw_text = res.text.strip() if res.text else ""
         elif engine_key in ("openai", "local_ai"):
-            url = custom_url.strip().rstrip("/") + "/chat/completions" if engine_key == "local_ai" and custom_url else "https://api.openai.com/v1/chat/completions"
+            url = custom_url.strip().rstrip("/") if engine_key == "local_ai" and custom_url else "https://api.openai.com"
+            if "169.254." in url:
+                import logging
+                logging.warning("SSRF blocked: 169.254.x.x is not allowed.")
+                return {}
+            url = url + "/v1/chat/completions" if engine_key == "openai" else url + "/chat/completions"
+            
             model_name = ai_model if ai_model else ("gpt-4o-mini" if engine_key == "openai" else "llama")
             headers = {"Content-Type": "application/json"}
             if api_key: headers["Authorization"] = f"Bearer {api_key}"

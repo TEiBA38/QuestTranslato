@@ -5,6 +5,7 @@ import json
 # e.g., $(l) for bold, $(br) for newline, $(#ff0000) for color, $(item) ...
 # We will replace them with HTML-like placeholders <p0>, <p1> which translation engines handle better without adding spaces.
 PATCHOULI_TAG_REGEX = re.compile(r'\$\([^)]+\)')
+HANGUL_PATTERN = re.compile(r'[가-힣]')
 
 def protect_patchouli_formatting(text):
     """
@@ -84,7 +85,7 @@ def collect_patchouli_targets(node, target_list):
                 if is_i18n_key(v):
                     continue
                 # 이미 한국어가 포함된 경우(이미 번역된 페이지) 불필요한 재번역 건너뜀
-                if any(0xAC00 <= ord(c) <= 0xD7A3 for c in v):
+                if HANGUL_PATTERN.search(v):
                     continue
                 if re.search(r'[a-zA-Z]', v):
                     target_list.append((node, k, v))

@@ -154,6 +154,9 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
             shutil.rmtree(out_dir)
 
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            for member in zip_ref.namelist():
+                if member.startswith('/') or member.startswith('\\') or '..' in member:
+                    raise ValueError(f"보안 차단: 압축 해제 경로 탐색(Zip Slip) 취약점이 의심되는 파일이 포함되어 있습니다 - {member}")
             zip_ref.extractall(raw_dir)
 
         target_files = [

@@ -480,6 +480,8 @@ def sync_from_supabase():
     threading.Thread(target=_async_download_all, daemon=True).start()
 
 
+_upload_timers = {}
+
 def upload_to_supabase(cache_dict, category="general"):
     """Supabase 해당 테이블에 번역 데이터 일괄 업로드 (중복 자동 병합 - UPSERT)"""
     if "YOUR_PROJECT_REF" in SUPABASE_URL or not cache_dict:
@@ -489,16 +491,18 @@ def upload_to_supabase(cache_dict, category="general"):
 
     def _async_upload():
         records = []
-        for lang, entries in list(cache_dict.items()):
-            if not isinstance(entries, dict):
-                continue
-            for src, tgt in list(entries.items()):
-                if is_valid_translation(src, tgt, lang):
-                    records.append({
-                        "lang": lang,
-                        "src": src,
-                        "tgt": tgt,
-                    })
+        # _lock을 사용하여 딕셔너리 순회 중 크래시 방지
+        with _lock:
+            for lang, entries in list(cache_dict.items()):
+                if not isinstance(entries, dict):
+                    continue
+                for src, tgt in list(entries.items()):
+                    if is_valid_translation(src, tgt, lang):
+                        records.append({
+                            "lang": lang,
+                            "src": src,
+                            "tgt": tgt,
+                        })
 
         if not records:
             return
@@ -522,4 +526,11 @@ def upload_to_supabase(cache_dict, category="general"):
             except Exception as e:
                 logging.warning(f"Supabase 업로드 실패 ({table_name}): {e}")
 
-    threading.Thread(target=_async_upload, daemon=True).start()
+    # 디바운스(Debounce) 로직: 5초 내에 중복 호출 시 이전 타이머 취소
+    global _upload_timers
+    with _lock:
+        if category in _upload_timers:
+            _upload_timers[category].cancel()
+        timer = threading.Timer(5.0, lambda: threading.Thread(target=_async_upload, daemon=True).start())
+        _upload_timers[category] = timer
+        timer.start()
