@@ -544,3 +544,69 @@ def apply_hybrid_patchouli_translations(mods_dir, translated_books_map, log_call
             if log_callback:
                 log_callback(f"⚠️ '{jar_name}' 하이브리드 패치 중 오류: {err}")
 
+def hotpatch_resource_pack(pack_zip_path, old_tgt, new_tgt):
+    import os, tempfile, shutil, json
+    import zipfile
+    
+    if not os.path.exists(pack_zip_path):
+        return
+        
+    temp_fd, temp_path = tempfile.mkstemp(suffix='.zip')
+    os.close(temp_fd)
+    
+    changed = False
+    
+    with zipfile.ZipFile(pack_zip_path, 'r') as zin:
+        with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                content_bytes = zin.read(item.filename)
+                
+                if item.filename.endswith('.lang'):
+                    try:
+                        text = content_bytes.decode('utf-8')
+                        new_lines = []
+                        for line in text.split('\n'):
+                            if '=' in line:
+                                k, v = line.split('=', 1)
+                                if v.strip() == old_tgt:
+                                    line = f"{k}={new_tgt}"
+                                    changed = True
+                            new_lines.append(line)
+                        content_bytes = '\n'.join(new_lines).encode('utf-8')
+                    except Exception:
+                        pass
+                
+                elif item.filename.endswith('.json') or item.filename.endswith('.json5'):
+                    try:
+                        text = content_bytes.decode('utf-8')
+                        if old_tgt in text:
+                            def replace_values(d):
+                                nonlocal changed
+                                if isinstance(d, dict):
+                                    for k, v in d.items():
+                                        if isinstance(v, str) and v == old_tgt:
+                                            d[k] = new_tgt
+                                            changed = True
+                                        else:
+                                            replace_values(v)
+                                elif isinstance(d, list):
+                                    for i, v in enumerate(d):
+                                        if isinstance(v, str) and v == old_tgt:
+                                            d[i] = new_tgt
+                                            changed = True
+                                        else:
+                                            replace_values(v)
+                                            
+                            data = json.loads(text)
+                            replace_values(data)
+                            content_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8')
+                    except Exception:
+                        pass
+                        
+                zout.writestr(item, content_bytes)
+                
+    if changed:
+        shutil.move(temp_path, pack_zip_path)
+    else:
+        os.remove(temp_path)
+

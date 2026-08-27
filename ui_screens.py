@@ -589,3 +589,110 @@ class UIScreensMixin:
 
     def is_cancelled(self):
         return self.app_state.cancel_requested
+
+    def open_memory_editor(self):
+        editor = ctk.CTkToplevel(self)
+        editor.title("🔍 인게임 오역 수정기 (Memory Editor)")
+        editor.geometry("900x700")
+        editor.grab_set()
+
+        # 상단 검색 바
+        search_frame = ctk.CTkFrame(editor)
+        search_frame.pack(fill="x", padx=10, pady=10)
+
+        query_var = ctk.StringVar()
+        entry_search = ctk.CTkEntry(search_frame, textvariable=query_var, placeholder_text="검색어 (영어 원문 또는 한글 번역문 입력...)", width=400)
+        entry_search.pack(side="left", padx=5)
+
+        cat_var = ctk.StringVar(value="all")
+        cat_combo = ctk.CTkComboBox(search_frame, variable=cat_var, values=["all", "items", "general", "books"], width=100)
+        cat_combo.pack(side="left", padx=5)
+
+        # 결과 리스트 
+        list_frame = ctk.CTkScrollableFrame(editor, width=860, height=400)
+        list_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # 하단 수정 바
+        edit_frame = ctk.CTkFrame(editor)
+        edit_frame.pack(fill="x", padx=10, pady=10)
+        
+        ctk.CTkLabel(edit_frame, text="원문:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        lbl_original = ctk.CTkLabel(edit_frame, text="", width=600, anchor="w", fg_color="gray20", corner_radius=6)
+        lbl_original.grid(row=0, column=1, padx=5, pady=5, sticky="we")
+        
+        ctk.CTkLabel(edit_frame, text="번역:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        entry_translated = ctk.CTkEntry(edit_frame, width=600)
+        entry_translated.grid(row=1, column=1, padx=5, pady=5, sticky="we")
+
+        selected_item = {"category": None, "src": None, "tgt": None}
+        
+        def on_item_click(item):
+            selected_item["category"] = item["category"]
+            selected_item["src"] = item["src"]
+            selected_item["tgt"] = item["tgt"]
+            lbl_original.configure(text=item["src"])
+            entry_translated.delete(0, 'end')
+            entry_translated.insert(0, item["tgt"])
+
+        def do_search(*args):
+            for widget in list_frame.winfo_children():
+                widget.destroy()
+                
+            q = query_var.get().strip()
+            if len(q) < 2: return
+            
+            import translation_memory
+            results = translation_memory.search_memory(q, category=cat_var.get(), limit=50)
+            
+            for i, r in enumerate(results):
+                row = ctk.CTkFrame(list_frame)
+                row.pack(fill="x", pady=2)
+                
+                cat_badge = ctk.CTkLabel(row, text=f"[{r['category']}]", width=60, text_color="cyan")
+                cat_badge.pack(side="left", padx=5)
+                
+                text_label = ctk.CTkLabel(row, text=f"{r['src'][:50]}... ➡️ {r['tgt'][:50]}...", anchor="w")
+                text_label.pack(side="left", fill="x", expand=True, padx=5)
+                
+                btn = ctk.CTkButton(row, text="선택", width=60, command=lambda item=r: on_item_click(item))
+                btn.pack(side="right", padx=5)
+
+        entry_search.bind("<Return>", do_search)
+        btn_search = ctk.CTkButton(search_frame, text="검색", command=do_search, width=80)
+        btn_search.pack(side="left", padx=5)
+
+        def do_save():
+            if not selected_item["src"]: return
+            import translation_memory
+            new_val = entry_translated.get().strip()
+            if not new_val: return
+            translation_memory.update_memory_entry(selected_item["category"], selected_item["src"], new_val)
+            
+            # 리소스팩 핫패치 (Hot-patch)
+            if hasattr(self.app_state, 'modpack_dir') and self.app_state.modpack_dir:
+                import os
+                import mod_jar_extractor
+                pack_zip = os.path.join(self.app_state.modpack_dir, "QuestTranslatorPro_Pack.zip")
+                if os.path.exists(pack_zip):
+                    try:
+                        mod_jar_extractor.hotpatch_resource_pack(pack_zip, selected_item["tgt"], new_val)
+                        self.log("✅ 리소스팩(QuestTranslatorPro_Pack.zip) 핫패치 완료! 게임 내에서 F3+T를 누르면 즉시 반영됩니다.")
+                    except Exception as e:
+                        self.log(f"⚠️ 리소스팩 핫패치 실패: {e}")
+            
+            selected_item["tgt"] = new_val # 업데이트
+            self.show_messagebox("info", "성공", "수정사항이 저장되었습니다.")
+            do_search()
+
+        def do_delete():
+            if not selected_item["src"]: return
+            import translation_memory
+            translation_memory.delete_memory_entry(selected_item["category"], selected_item["src"])
+            self.show_messagebox("info", "성공", "항목이 삭제되었습니다.")
+            do_search()
+
+        btn_save = ctk.CTkButton(edit_frame, text="💾 저장 및 즉시 적용", command=do_save, fg_color="green")
+        btn_save.grid(row=2, column=1, sticky="w", padx=5, pady=10)
+        
+        btn_delete = ctk.CTkButton(edit_frame, text="🗑️ 잘못된 번역 삭제", command=do_delete, fg_color="red")
+        btn_delete.grid(row=2, column=1, sticky="e", padx=5, pady=10)

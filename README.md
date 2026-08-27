@@ -1,5 +1,7 @@
 # QuestTranslatorPro (퀘스트 번역기 프로) 🍄
 
+<a href="https://buymeacoffee.com/teiba" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 40px !important;" ></a>
+
 마인크래프트 모드팩의 다양한 퀘스트 모드(FTB Quests, Better Questing, HQM)를 자동으로 한글화해주는 강력한 AI 번역 툴입니다. 복잡한 파일 구조와 코드(색상 코드, 아이템 NBT 등)를 손상시키지 않고 텍스트만 안전하게 번역합니다.
 
 ## ✨ 주요 기능 (V1.2.0 대형 업데이트 반영!)

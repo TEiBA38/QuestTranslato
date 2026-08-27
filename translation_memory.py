@@ -534,3 +534,107 @@ def upload_to_supabase(cache_dict, category="general"):
         timer = threading.Timer(5.0, lambda: threading.Thread(target=_async_upload, daemon=True).start())
         _upload_timers[category] = timer
         timer.start()
+
+# ====================================================================
+# Memory Editor API (검색, 수정, 삭제)
+# ====================================================================
+
+def search_memory(query, category="all", target_lang="한국어 (Korean)", limit=100):
+    """
+    모든 캐시(일반, 아이템, 책)에서 주어진 검색어(query)를 포함하는 원문/번역문을 찾습니다.
+    반환 형태: [{"category": "items", "src": "...", "tgt": "..."}]
+    """
+    if not _global_loaded: load_memory()
+    target_lang_norm = target_lang.replace(" ", "")
+    results = []
+    
+    query_lower = query.lower()
+
+    def _search_in_cache(cache, cat_name):
+        nonlocal results
+        for lang_key, entries in cache.items():
+            if lang_key.replace(" ", "") != target_lang_norm:
+                continue
+            for src, tgt in entries.items():
+                if query_lower in src.lower() or query_lower in tgt.lower():
+                    results.append({"category": cat_name, "src": src, "tgt": tgt})
+                    if len(results) >= limit:
+                        return True
+        return False
+
+    with _lock:
+        if category in ("all", "items"):
+            if _search_in_cache(_items_cache, "items"): return results
+        if category in ("all", "general"):
+            if _search_in_cache(_global_cache, "general"): return results
+        if category in ("all", "books"):
+            if _search_in_cache(_books_cache, "books"): return results
+            
+    return results
+
+def update_memory_entry(category, original_src, new_tgt, target_lang="한국어 (Korean)"):
+    """캐시 업데이트 후 로컬/클라우드에 저장합니다."""
+    target_lang_norm = target_lang.replace(" ", "")
+    cache_to_update = None
+    
+    if category == "items": cache_to_update = _items_cache
+    elif category == "general": cache_to_update = _global_cache
+    elif category == "books": cache_to_update = _books_cache
+    else: return False
+
+    with _lock:
+        target_lang_key = target_lang_norm
+        for k in cache_to_update.keys():
+            if k.replace(" ", "") == target_lang_norm:
+                target_lang_key = k
+                break
+        if target_lang_key not in cache_to_update:
+            cache_to_update[target_lang_key] = {}
+            
+        cache_to_update[target_lang_key][original_src] = new_tgt
+        _index_template(original_src, new_tgt, target_lang_norm)
+        
+    # 백그라운드로 저장 & 업로드 트리거 (이 파일 내 함수 활용)
+    save_memory()
+    return True
+
+def delete_memory_entry(category, original_src, target_lang="한국어 (Korean)"):
+    """캐시에서 항목을 삭제하고, 클라우드 DB에서도 삭제를 수행합니다."""
+    target_lang_norm = target_lang.replace(" ", "")
+    cache_to_update = None
+    
+    if category == "items": cache_to_update = _items_cache
+    elif category == "general": cache_to_update = _global_cache
+    elif category == "books": cache_to_update = _books_cache
+    else: return False
+
+    with _lock:
+        deleted = False
+        for k in cache_to_update.keys():
+            if k.replace(" ", "") == target_lang_norm:
+                if original_src in cache_to_update[k]:
+                    del cache_to_update[k][original_src]
+                    deleted = True
+                break
+                
+    if deleted:
+        save_memory()
+        
+        # Supabase DELETE 요청
+        def _async_delete():
+            if "YOUR_PROJECT_REF" in SUPABASE_URL: return
+            table_name = TABLE_MAP.get(category, "translation_memory")
+            headers = {
+                "apikey": SUPABASE_ANON_KEY,
+                "Authorization": f"Bearer {SUPABASE_ANON_KEY}"
+            }
+            try:
+                import urllib.parse
+                safe_src = urllib.parse.quote(original_src)
+                url = f"{SUPABASE_URL}/rest/v1/{table_name}?src=eq.{safe_src}"
+                requests.delete(url, headers=headers, timeout=10)
+            except Exception as e:
+                logging.warning(f"Supabase 삭제 실패: {e}")
+                
+        threading.Thread(target=_async_delete, daemon=True).start()
+    return True

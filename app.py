@@ -187,7 +187,7 @@ if ctk is not None and TkinterDnD is not None:
                          text_color="#fb923c").pack(padx=28, pady=(0, 18))
 
             button_row = ctk.CTkFrame(panel, fg_color="transparent")
-            button_row.pack(fill="x", padx=24, pady=(0, 20))
+            button_row.pack(fill="x", padx=24, pady=(0, 10))
 
             ctk.CTkButton(button_row, text="모드팩 리스트 보기", height=40,
                           fg_color="#f97316", hover_color="#fb923c",
@@ -199,6 +199,25 @@ if ctk is not None and TkinterDnD is not None:
                           fg_color="#b45309", hover_color="#d97706",
                           font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                           command=self.show_quick_translate_screen
+                          ).pack(side="right", fill="x", expand=True, padx=(6, 0))
+
+            button_row2 = ctk.CTkFrame(panel, fg_color="transparent")
+            button_row2.pack(fill="x", padx=24, pady=(0, 20))
+
+            ctk.CTkButton(button_row2, text="🔍 인게임 오역 수정기", height=40,
+                          fg_color="#1d4ed8", hover_color="#2563eb",
+                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                          command=self.open_memory_editor
+                          ).pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+            def open_bmac():
+                import webbrowser
+                webbrowser.open("https://buymeacoffee.com/teiba")
+
+            ctk.CTkButton(button_row2, text="☕ 개발자에게 커피 사주기", height=40,
+                          fg_color="#f59e0b", hover_color="#d97706", text_color="#1e1e1e",
+                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                          command=open_bmac
                           ).pack(side="right", fill="x", expand=True, padx=(6, 0))
 
         def _build_select_screen(self):
