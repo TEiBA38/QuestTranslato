@@ -24,5 +24,7 @@ jobs:
           pip install requests
 
       - name: Run Master Memory Packer
+        env:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           python scripts/pack_master_memory.py
