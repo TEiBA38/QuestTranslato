@@ -18,8 +18,8 @@ try:
 except Exception:
     pass
 
-SUPABASE_URL = "https://oanjweqyvvdrbmvqoqrs.supabase.co"
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9hbmp3ZXF5dnZkcmJtdnFvcXJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc3NTkwMDgsImV4cCI6MjEwMzMzNTAwOH0.3HbUVkupPoyMfzjMPSkAmGQ0qydp6yjDrxfSoGAghC8"
+SUPABASE_URL = "https://rwyedqmztbxsflndgsmt.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ3eWVkcW16dGJ4c2ZsbmRnc210Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc4MTIzNDksImV4cCI6MjEwMzM4ODM0OX0.8Lrxcp1af5ea6JYMhVIBXZAybkmRumindRUWgcq8Kdc"
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", SUPABASE_ANON_KEY)
 BUCKET_NAME = "translations"
 

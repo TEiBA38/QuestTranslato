@@ -7,6 +7,7 @@ import threading
 import logging
 import re
 import requests
+import time
 from concurrent.futures import ThreadPoolExecutor
 from constants import has_hangul
 
@@ -19,8 +20,8 @@ SHORT_TEXT_THRESHOLD = 30
 # ====================================================================
 # Supabase 클라우드 설정
 # ====================================================================
-SUPABASE_URL = "https://oanjweqyvvdrbmvqoqrs.supabase.co"
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9hbmp3ZXF5dnZkcmJtdnFvcXJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc3NTkwMDgsImV4cCI6MjEwMzMzNTAwOH0.3HbUVkupPoyMfzjMPSkAmGQ0qydp6yjDrxfSoGAghC8"
+SUPABASE_URL = "https://rwyedqmztbxsflndgsmt.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ3eWVkcW16dGJ4c2ZsbmRnc210Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc4MTIzNDksImV4cCI6MjEwMzM4ODM0OX0.8Lrxcp1af5ea6JYMhVIBXZAybkmRumindRUWgcq8Kdc"
 
 TABLE_MAP = {
     "general": "translation_memory",
@@ -465,13 +466,75 @@ MASTER_FILES = {
     "books": ("master_books.json.gz", _books_cache),
 }
 
-# 자동 컴팩션(Compaction) 기준: DB 3개 테이블의 실제 누적 디스크 용량이 200MB 초과 시 자동 마스터 흡수 및 DB 비우기
-AUTO_COMPACT_SIZE_MB = 200
-AUTO_COMPACT_BYTES_THRESHOLD = AUTO_COMPACT_SIZE_MB * 1024 * 1024  # 200 MB
+# 🛡️ 3단계 안전 차단기 (Safety Circuit Breaker / Shutdown) 설정
+AUTO_COMPACT_SIZE_MB = 100  # 1단계: 100MB 도달 시 자동 압축 및 DB 0MB 리셋
+AUTO_COMPACT_BYTES_THRESHOLD = AUTO_COMPACT_SIZE_MB * 1024 * 1024
+
+EMERGENCY_SHUTDOWN_SIZE_MB = 150  # 2단계: 150MB 초과 시 서버 폭주 방지를 위해 클라우드 업로드 즉시 셧다운(로컬 전용 모드 전환)
+EMERGENCY_SHUTDOWN_BYTES = EMERGENCY_SHUTDOWN_SIZE_MB * 1024 * 1024
+
 _is_compacting = False
+_circuit_breaker_until = 0.0
+_consecutive_upload_errors = 0
+_last_size_check_time = 0.0
+_last_known_db_bytes = 0
+
+def _get_server_db_bytes():
+    """서버 측 실제 물리 용량을 조회 (30초 캐싱)"""
+    global _last_size_check_time, _last_known_db_bytes
+    now = time.time()
+    if now - _last_size_check_time < 30 and _last_known_db_bytes > 0:
+        return _last_known_db_bytes
+
+    if "YOUR_PROJECT_REF" in SUPABASE_URL:
+        return 0
+
+    headers = {
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+    }
+    total_db_bytes = 0
+    try:
+        rpc_res = requests.post(f"{SUPABASE_URL}/rest/v1/rpc/get_translation_memory_size_bytes", headers=headers, json={}, timeout=5)
+        if rpc_res.status_code == 200 and rpc_res.text.strip().isdigit():
+            total_db_bytes = int(rpc_res.text.strip())
+    except Exception:
+        pass
+
+    if total_db_bytes <= 0:
+        h_count = dict(headers)
+        h_count["Prefer"] = "count=planned"
+        total_rows = 0
+        for cat, table_name in TABLE_MAP.items():
+            try:
+                res = requests.get(f"{SUPABASE_URL}/rest/v1/{table_name}?select=src&limit=1", headers=h_count, timeout=5)
+                cr = res.headers.get("content-range", "")
+                cnt = int(cr.split('/')[-1]) if '/' in cr else 0
+                total_rows += cnt
+            except Exception:
+                pass
+        total_db_bytes = total_rows * 700
+
+    _last_known_db_bytes = total_db_bytes
+    _last_size_check_time = now
+    return total_db_bytes
+
+
+def is_cloud_upload_safe():
+    """클라우드 업로드 전 안전성(서킷 브레이커 & 셧다운) 검사"""
+    now = time.time()
+    if now < _circuit_breaker_until:
+        return False, "통신 오류로 인한 안전 차단기(Circuit Breaker) 활성화 중"
+
+    db_bytes = _get_server_db_bytes()
+    if db_bytes >= EMERGENCY_SHUTDOWN_BYTES:
+        return False, f"DB 용량 한계 도달 ({db_bytes / (1024*1024):.1f}MB >= {EMERGENCY_SHUTDOWN_SIZE_MB}MB) 긴급 셧다운 가동"
+
+    return True, "정상"
+
 
 def check_and_auto_compact(log_callback=None):
-    """DB 3개 테이블의 총 용량이 200MB를 넘으면 Master Gzip으로 완전 통합 압축 후 DB를 0MB로 리셋"""
+    """DB 3개 테이블의 총 용량이 100MB를 넘으면 Master Gzip으로 완전 통합 압축 후 DB를 0MB로 리셋"""
     global _is_compacting
     if _is_compacting or "YOUR_PROJECT_REF" in SUPABASE_URL:
         return
@@ -480,42 +543,18 @@ def check_and_auto_compact(log_callback=None):
         global _is_compacting
         _is_compacting = True
         try:
-            headers = {
-                "apikey": SUPABASE_ANON_KEY,
-                "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-            }
-            # 1. 서버 측 실제 물리 디스크 용량 (Bytes) 조회
-            total_db_bytes = 0
-            try:
-                rpc_res = requests.post(f"{SUPABASE_URL}/rest/v1/rpc/get_translation_memory_size_bytes", headers=headers, json={}, timeout=10)
-                if rpc_res.status_code == 200 and rpc_res.text.strip().isdigit():
-                    total_db_bytes = int(rpc_res.text.strip())
-            except Exception:
-                pass
-
-            # RPC 조회가 안 될 경우 행 수 기반 정밀 추정 Fallback
-            if total_db_bytes <= 0:
-                h_count = dict(headers)
-                h_count["Prefer"] = "count=planned"
-                total_rows = 0
-                for cat, table_name in TABLE_MAP.items():
-                    try:
-                        res = requests.get(f"{SUPABASE_URL}/rest/v1/{table_name}?select=src&limit=1", headers=h_count, timeout=10)
-                        cr = res.headers.get("content-range", "")
-                        cnt = int(cr.split('/')[-1]) if '/' in cr else 0
-                        total_rows += cnt
-                    except Exception:
-                        pass
-                # 행당 평균 크기(인덱스 포함 약 700바이트)로 용량 계산
-                total_db_bytes = total_rows * 700
-
+            total_db_bytes = _get_server_db_bytes()
             total_mb = total_db_bytes / (1024 * 1024)
             if total_db_bytes < AUTO_COMPACT_BYTES_THRESHOLD:
                 return
 
             if log_callback:
-                log_callback(f"📦 [자동 컴팩션 감지] DB 총 누적 용량이 {total_mb:.1f} MB에 도달하여(기준: 200MB) 마스터 압축 파일로 통합을 시작합니다...")
+                log_callback(f"📦 [자동 컴팩션 감지] DB 총 누적 용량이 {total_mb:.1f} MB에 도달하여(기준: {AUTO_COMPACT_SIZE_MB}MB) 마스터 압축 파일로 통합을 시작합니다...")
 
+            headers = {
+                "apikey": SUPABASE_ANON_KEY,
+                "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+            }
             # 2. 모든 최신 DB 데이터를 메모리로 다운로드 및 병합
             for cat, table_name in TABLE_MAP.items():
                 target_cache = _global_cache if cat == "general" else (_items_cache if cat == "items" else _books_cache)
@@ -720,33 +759,36 @@ def sync_from_supabase():
     threading.Thread(target=_async_hybrid_sync, daemon=True).start()
 
 
-_upload_timers = {}
-
 def upload_to_supabase(cache_dict, category="general"):
     """Supabase 해당 테이블에 번역 데이터 일괄 업로드 (중복 자동 병합 - UPSERT)"""
+    global _consecutive_upload_errors, _circuit_breaker_until
     if "YOUR_PROJECT_REF" in SUPABASE_URL or not cache_dict:
+        return
+
+    safe, reason = is_cloud_upload_safe()
+    if not safe:
+        logging.warning(f"🛡️ [클라우드 안전 셧다운] {reason}. 로컬 디스크에만 안전하게 저장합니다.")
         return
 
     table_name = TABLE_MAP.get(category, "translation_memory")
 
-    def _async_upload():
-        records = []
-        # _lock을 사용하여 딕셔너리 순회 중 크래시 방지
-        with _lock:
-            for lang, entries in list(cache_dict.items()):
-                if not isinstance(entries, dict):
-                    continue
-                for src, tgt in list(entries.items()):
-                    if is_valid_translation(src, tgt, lang):
-                        records.append({
-                            "lang": lang,
-                            "src": src,
-                            "tgt": tgt,
-                        })
+    records = []
+    for lang, entries in list(cache_dict.items()):
+        if not isinstance(entries, dict):
+            continue
+        for src, tgt in list(entries.items()):
+            if is_valid_translation(src, tgt, lang):
+                records.append({
+                    "lang": lang,
+                    "src": src,
+                    "tgt": tgt,
+                })
 
-        if not records:
-            return
+    if not records:
+        return
 
+    def _async_upload(records_to_upload):
+        global _consecutive_upload_errors, _circuit_breaker_until
         headers = {
             "apikey": SUPABASE_ANON_KEY,
             "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
@@ -759,21 +801,27 @@ def upload_to_supabase(cache_dict, category="general"):
 
         # 1000개씩 청크 단위로 분할 업로드
         batch_size = 1000
-        for i in range(0, len(records), batch_size):
-            chunk = records[i:i + batch_size]
+        for i in range(0, len(records_to_upload), batch_size):
+            chunk = records_to_upload[i:i + batch_size]
             try:
-                requests.post(url, headers=headers, json=chunk, timeout=20)
+                r = requests.post(url, headers=headers, json=chunk, timeout=20)
+                if r.status_code not in (200, 201):
+                    _consecutive_upload_errors += 1
+                    logging.warning(f"Supabase 업로드 실패 ({table_name}): {r.status_code} {r.text}")
+                    if _consecutive_upload_errors >= 3:
+                        _circuit_breaker_until = time.time() + 300  # 5분간 차단
+                        logging.warning("⚠️ [서킷 브레이커 작동] 연속 통신 실패로 인해 5분간 클라우드 업로드를 중단합니다.")
+                else:
+                    _consecutive_upload_errors = 0
+                    logging.info(f"✅ Supabase [{table_name}] {len(chunk)}개 동기화 성공")
             except Exception as e:
-                logging.warning(f"Supabase 업로드 실패 ({table_name}): {e}")
+                _consecutive_upload_errors += 1
+                logging.warning(f"Supabase 업로드 통신 오류 ({table_name}): {e}")
+                if _consecutive_upload_errors >= 3:
+                    _circuit_breaker_until = time.time() + 300
+                    logging.warning("⚠️ [서킷 브레이커 작동] 연속 통신 실패로 인해 5분간 클라우드 업로드를 중단합니다.")
 
-    # 디바운스(Debounce) 로직: 5초 내에 중복 호출 시 이전 타이머 취소
-    global _upload_timers
-    with _lock:
-        if category in _upload_timers:
-            _upload_timers[category].cancel()
-        timer = threading.Timer(5.0, lambda: threading.Thread(target=_async_upload, daemon=True).start())
-        _upload_timers[category] = timer
-        timer.start()
+    threading.Thread(target=_async_upload, args=(records,), daemon=True).start()
 
 # ====================================================================
 # Memory Editor API (검색, 수정, 삭제)
