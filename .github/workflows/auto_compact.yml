@@ -1,0 +1,28 @@
+name: Auto Master Memory Compaction
+
+on:
+  schedule:
+    # 매일 자정 (UTC 15:00 = KST 00:00)에 1회 자동 실행
+    - cron: '0 15 * * *'
+  # GitHub 웹에서 수동으로 'Run workflow' 버튼 눌러 즉시 실행 가능
+  workflow_dispatch:
+
+jobs:
+  compact-memory:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Run Master Memory Packer
+        run: |
+          python scripts/pack_master_memory.py
