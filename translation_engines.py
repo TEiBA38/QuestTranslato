@@ -151,7 +151,16 @@ def is_code_or_id(text):
     if not text or not str(text).strip():
         return True
     t = str(text).strip()
-    return (":" in t and " " not in t) or t.isdigit() or bool(re.match(r'^[0-9A-Fa-f]{8,}$', t))
+    if (":" in t and " " not in t) or t.isdigit() or bool(re.match(r'^[0-9A-Fa-f]{8,}$', t)):
+        return True
+    # 영단어(2글자 이상)가 전혀 없는 기호/숫자/포맷 문자열 (%s/t, %s°C, :(, 1/8 등)
+    words = re.findall(r'[a-zA-Z]{2,}', t)
+    if not words:
+        return True
+    # 단일 문자나 아주 짧은 대문자 기호/약어 (W, R, D, GUI, ID 등)
+    if len(t) <= 3 and not re.search(r'[가-힣]', t) and t.isupper():
+        return True
+    return False
 
 
 def translate_deepl(text, api_key, is_pro=False, reference_map=None, target_lang="한국어 (Korean)", is_item=False, is_book=False):

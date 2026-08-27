@@ -83,7 +83,10 @@ def collect_patchouli_targets(node, target_list):
                 # 마인크래프트 I18N 언어 키는 번역하지 않고 원본 키를 유지 (책 안 열리는 치명적 버그 방지)
                 if is_i18n_key(v):
                     continue
-                if re.search(r'[a-zA-Z가-힣]', v):
+                # 이미 한국어가 포함된 경우(이미 번역된 페이지) 불필요한 재번역 건너뜀
+                if any(0xAC00 <= ord(c) <= 0xD7A3 for c in v):
+                    continue
+                if re.search(r'[a-zA-Z]', v):
                     target_list.append((node, k, v))
             elif isinstance(v, (dict, list)):
                 collect_patchouli_targets(v, target_list)

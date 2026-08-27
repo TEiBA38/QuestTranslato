@@ -270,9 +270,9 @@ class TranslationMixin:
                     if text not in seen:
                         seen.add(text)
                         unique_texts.append(text)
-                        is_item_flags.append(t[5])
+                        is_item_flags.append(is_it)
                 
-                self.log(f"🧠 총 {len(all_targets)}개의 텍스트 중 중복을 제거한 {len(unique_texts)}개의 고유 문장을 번역합니다.")
+                self.log(f"🧠 총 {len(all_targets):,}개의 텍스트 중 중복 제거된 {len(unique_texts):,}개의 고유 문장을 캐시 대조 및 번역합니다...")
                 
                 # 용어 자동 추출: 아이템이 아닌 일반 문장 중 새로 번역할 텍스트가 충분히 많을 때만 실행
                 uncached_for_glossary = [
@@ -339,7 +339,7 @@ class TranslationMixin:
                     return orig_matches == trans_matches
 
                 # 재조립
-                for (jar_name, zip_path, idx, k, v, is_short) in all_targets:
+                for (jar_name, zip_path, idx, k, v, is_short, is_it) in all_targets:
                     trans_v = translation_dict.get(v, v)
                     
                     # 🚀 크래시 방지 로직: 원본에 %s 같은 포맷 문자가 있는데 번역본에서 누락되었거나 변형되었다면 원본으로 복구
@@ -513,7 +513,7 @@ class TranslationMixin:
                     if engine_key in ("gemini_batch", "local_ai"):
                         translated_unique = file_processors._run_batch_jobs(
                             unique_texts, lambda x: x, engine_key, api_key, is_paid,
-                            log_callback=lambda m: None, cancel_checker=check_cancel, progress_callback=prog_cb,
+                            log_callback=self.log, cancel_checker=check_cancel, progress_callback=prog_cb,
                             reference_map=glossary_map, glossary=glossary_map,
                             ai_model=ai_model, target_lang=target_lang, log_prefix="가이드북 번역", custom_url=custom_url,
                             is_book_flags=[True] * len(unique_texts)

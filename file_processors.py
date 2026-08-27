@@ -28,6 +28,10 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
     
     for i, item in enumerate(items):
         original_text = text_extractor(item)
+        if is_code_or_id(original_text):
+            translated_results[i] = original_text
+            continue
+
         is_item = is_item_flags[i] if is_item_flags else False
         is_book = is_book_flags[i] if is_book_flags else False
         

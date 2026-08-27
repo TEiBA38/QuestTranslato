@@ -78,7 +78,7 @@ def is_valid_translation(src, tgt, target_lang="한국어 (Korean)"):
 
 
 def _read_and_clean_file(filepath):
-    """파일 로드 시 오염된 항목(원문==번역문) 자동 제거"""
+    """파일 로드 시 오염된 항목(원문==번역문) 자동 제거 및 언어 키 통합"""
     if not filepath or not os.path.exists(filepath):
         return {}
     try:
@@ -88,11 +88,13 @@ def _read_and_clean_file(filepath):
         for lang, translations in data.items():
             if not isinstance(translations, dict):
                 continue
-            cleaned[lang] = {}
-            lang_norm = lang.replace(" ", "")
+            std_lang = "한국어 (Korean)" if ("Korean" in lang or "한국어" in lang) else lang
+            if std_lang not in cleaned:
+                cleaned[std_lang] = {}
+            lang_norm = std_lang.replace(" ", "")
             for src, tgt in translations.items():
-                if is_valid_translation(src, tgt, lang):
-                    cleaned[lang][src] = tgt
+                if is_valid_translation(src, tgt, std_lang):
+                    cleaned[std_lang][src] = tgt
                     _index_template(src, tgt, lang_norm)
         return cleaned
     except Exception:
@@ -150,11 +152,11 @@ def _lookup_template(text, target_lang_norm):
     if not nums or len(nums) > 4:
         return None
     tmpl = re.sub(r'\d+', '<NUM>', text)
-    entry = _template_index.get((target_lang_norm, tmpl))
-    if not entry:
+    match = _template_index.get((target_lang_norm, tmpl))
+    if not match:
         return None
-    tmpl_tgt, count = entry
-    if len(nums) != count:
+    tmpl_tgt, count = match
+    if count != len(nums):
         return None
     res = tmpl_tgt
     for n in nums:
@@ -193,7 +195,6 @@ def _lookup_safe(cache, text, target_lang_norm):
         template_res = _lookup_template(clean if clean else text, target_lang_norm)
         if template_res and is_valid_translation(text, template_res, lang_key):
             return _restore_formatting(template_res, prefix, suffix) if clean else template_res
-        break
 
     return None
 
