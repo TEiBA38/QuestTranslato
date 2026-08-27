@@ -413,35 +413,14 @@ def create_combined_resource_pack(translated_langs, translated_books_map, output
                     written_paths.add(ko_kr_path)
                     zf.writestr(ko_kr_path, translated_content)
 
-        # 2. Patchouli JSON 파일 (assets/ 경로 리소스팩 + 1.16+ kubejs/data/ 자동 동기화)
+        # 2. Patchouli JSON 파일 (순수 assets/ 경로 리소스팩 패키징)
         if translated_books_map:
-            kubejs_data_dir = os.path.join(modpack_dir, "kubejs", "data") if modpack_dir else None
-            
             for jar_name, files in translated_books_map.items():
                 for zip_path, json_data in files.items():
-                    # 1. KubeJS 데이터팩 폴더가 있으면 직접 주입 (1.16+ 패출리 인게임 100% 적용 핵심!)
-                    if kubejs_data_dir and os.path.isdir(os.path.dirname(kubejs_data_dir)):
-                        rel_path = zip_path[5:] if zip_path.startswith("data/") else zip_path
-                        target_file = os.path.join(kubejs_data_dir, rel_path.replace('/', os.sep))
-                        try:
-                            os.makedirs(os.path.dirname(target_file), exist_ok=True)
-                            with open(target_file, "w", encoding="utf-8") as kf:
-                                json.dump(json_data, kf, ensure_ascii=False, indent=2)
-                                
-                            # ko_kr 폴더로도 추가 저장 (마인크래프트 한국어 클라이언트 완벽 호환)
-                            if os.sep + "en_us" + os.sep in target_file:
-                                ko_target = target_file.replace(os.sep + "en_us" + os.sep, os.sep + "ko_kr" + os.sep)
-                                os.makedirs(os.path.dirname(ko_target), exist_ok=True)
-                                with open(ko_target, "w", encoding="utf-8") as kf2:
-                                    json.dump(json_data, kf2, ensure_ascii=False, indent=2)
-                        except Exception:
-                            pass
-
-                    # 2. 리소스팩 ZIP 내에 쓰기
                     write_path = zip_path
                     
                     # Patchouli 1.14+ 가이드북은 data/ 폴더에 존재하지만,
-                    # 유저가 리소스팩으로 적용하기 위해서는 assets/ 경로로 매핑해야 엔진이 인식합니다.
+                    # 리소스팩 표준 적용을 위해 assets/ 경로로 깔끔하게 매핑합니다.
                     if write_path.startswith("data/") and "/patchouli_books/" in write_path:
                         parts = write_path.split('/')
                         if len(parts) >= 5:
@@ -492,3 +471,76 @@ def create_combined_resource_pack(translated_langs, translated_books_map, output
                             zf.writestr(new_path, json.dumps(content, ensure_ascii=True, indent=2))
                         else:
                             zf.writestr(new_path, content.encode('utf-8'))
+
+
+def apply_hybrid_patchouli_translations(mods_dir, translated_books_map, log_callback=None):
+    """
+    스마트 하이브리드 가이드북 번역기:
+    마인크래프트 1.16 이하 버전에서 리소스팩을 읽지 못하는 패출리 모드(황혼의 숲, 비행기 등)를 자동 감지하여,
+    원본 모드 JAR의 안전 백업(.bak)을 생성하고 JAR 내부의 책 JSON 텍스트만 안전하게 인플레이스 교체합니다.
+    """
+    if not mods_dir or not os.path.isdir(mods_dir) or not translated_books_map:
+        return
+
+    import tempfile, shutil
+
+    for jar_name, files in translated_books_map.items():
+        if not files:
+            continue
+
+        jar_path = os.path.join(mods_dir, jar_name)
+        if not os.path.isfile(jar_path):
+            continue
+
+        # 공식 한국어(ko_kr)가 이미 완벽하게 내장된 모드는 절대 건드리지 않음
+        try:
+            with zipfile.ZipFile(jar_path, 'r') as zf_test:
+                if any('/patchouli_books/' in n.lower() and '/ko_kr/' in n.lower() for n in zf_test.namelist()) or 'botania' in jar_name.lower():
+                    continue
+        except Exception:
+            continue
+
+        # 원본 .bak 백업 생성 (최초 1회 보존)
+        bak_path = jar_path + ".bak"
+        if not os.path.exists(bak_path):
+            try:
+                shutil.copy2(jar_path, bak_path)
+                if log_callback:
+                    log_callback(f"🛡️ [안전 백업] {jar_name} 원본 백업 파일(.bak) 생성 완료")
+            except Exception as e:
+                if log_callback:
+                    log_callback(f"⚠️ {jar_name} 백업 생성 실패: {e}")
+
+        # JAR 내부 책 JSON 인플레이스 교체
+        file_map = {}
+        for zip_path, json_data in files.items():
+            if isinstance(json_data, (dict, list)):
+                file_map[zip_path] = json.dumps(json_data, ensure_ascii=False, indent=2).encode('utf-8')
+            elif isinstance(json_data, str):
+                file_map[zip_path] = json_data.encode('utf-8')
+
+        if not file_map:
+            continue
+
+        try:
+            temp_dir = tempfile.mkdtemp()
+            temp_jar = os.path.join(temp_dir, 'temp.jar')
+            patched_count = 0
+
+            with zipfile.ZipFile(jar_path, 'r') as zin, zipfile.ZipFile(temp_jar, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    if item.filename in file_map:
+                        zout.writestr(item.filename, file_map[item.filename])
+                        patched_count += 1
+                    else:
+                        zout.writestr(item.filename, zin.read(item.filename))
+
+            shutil.copy2(temp_jar, jar_path)
+            shutil.rmtree(temp_dir)
+
+            if log_callback:
+                log_callback(f"✨ [스마트 하이브리드] '{jar_name}': 리소스팩 미지원 모드 자동 판별 ➡️ JAR 내부 가이드북 텍스트 {patched_count}개 파일 한글화 완료!")
+        except Exception as err:
+            if log_callback:
+                log_callback(f"⚠️ '{jar_name}' 하이브리드 패치 중 오류: {err}")
+

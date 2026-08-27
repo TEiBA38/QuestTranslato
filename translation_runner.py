@@ -527,6 +527,12 @@ class TranslationMixin:
                 
                 if not check_cancel():
                     self.log(f"🎉 가이드북 번역 데이터 생성 완료!")
+                    # 💡 스마트 하이브리드 패치: 리소스팩을 못 읽는 1.16 패출리 모드(황혼의 숲 등) 자동 감지하여 모드 JAR 내부 안전 패치
+                    try:
+                        mods_dir = os.path.join(modpack_dir, "mods")
+                        mod_jar_extractor.apply_hybrid_patchouli_translations(mods_dir, translated_books_map, log_callback=self.log)
+                    except Exception as e:
+                        self.log(f"⚠️ 하이브리드 패치 연동 중 알림: {e}")
                     return translated_books_map
                 else:
                     self.log("⚠️ 번역이 취소되었습니다.")
