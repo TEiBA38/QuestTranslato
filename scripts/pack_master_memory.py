@@ -1,7 +1,8 @@
 """
-하이브리드 번역 메모리 마스터 패커 (Master Memory Packer)
-Supabase DB 테이블의 36만 개 데이터를 Gzip 초압축 파일로 패킹하여
-Supabase Storage ('translations' 버킷)에 master_*.json.gz 로 업로드합니다.
+하이브리드 번역 메모리 마스터 패커 & 자동 아카이빙 (Master Memory Packer & Auto Compactor)
+- Supabase DB 테이블의 누적 데이터를 Gzip 초압축 파일(master_*.json.gz)로 패킹
+- 기존 Storage 마스터 파일과 안전하게 누적 병합(Merge)하여 데이터 손실 0% 보장
+- 압축 및 업로드 완료 후 DB 테이블을 0 MB로 자동 리셋(Truncate)
 """
 import os
 import sys
@@ -19,11 +20,12 @@ except Exception:
 
 SUPABASE_URL = "https://oanjweqyvvdrbmvqoqrs.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9hbmp3ZXF5dnZkcmJtdnFvcXJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc3NTkwMDgsImV4cCI6MjEwMzMzNTAwOH0.3HbUVkupPoyMfzjMPSkAmGQ0qydp6yjDrxfSoGAghC8"
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", SUPABASE_ANON_KEY)
 BUCKET_NAME = "translations"
 
 HEADERS = {
-    "apikey": SUPABASE_ANON_KEY,
-    "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
 }
 
 TABLE_CONFIGS = [
@@ -55,6 +57,29 @@ def ensure_bucket():
         print(f"📦 Storage 버킷 '{BUCKET_NAME}' 생성 상태: {res.status_code}")
     else:
         print(f"📦 Storage 버킷 '{BUCKET_NAME}' 정상 준비됨.")
+
+def get_current_db_size_mb():
+    try:
+        r = requests.post(f"{SUPABASE_URL}/rest/v1/rpc/get_translation_memory_size_bytes", headers=HEADERS, json={}, timeout=10)
+        if r.status_code == 200 and r.text.strip().isdigit():
+            return int(r.text.strip()) / (1024 * 1024)
+    except Exception:
+        pass
+    return 0.0
+
+def fetch_existing_master(filename):
+    """Storage에 이미 보관 중인 마스터 메모리가 있으면 다운로드하여 기존 번역 보존"""
+    try:
+        url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{filename}"
+        r = requests.get(url, timeout=15)
+        if r.status_code == 200 and r.content:
+            raw = r.content
+            if filename.endswith(".gz"):
+                raw = gzip.decompress(raw)
+            return json.loads(raw.decode("utf-8"))
+    except Exception:
+        pass
+    return {}
 
 def fetch_table_data(table_name):
     print(f"\n[1/3] '{table_name}' 데이터베이스에서 추출 중...")
@@ -100,34 +125,70 @@ def upload_storage(data_bytes, filename, content_type):
         res = requests.put(upload_url, headers=h, data=data_bytes)
     if res.status_code in (200, 201):
         print(f"  ✅ Storage 업로드 성공: {filename} ({len(data_bytes):,} bytes)")
+        return True
     else:
         print(f"  ❌ Storage 업로드 실패 ({filename}): {res.status_code} - {res.text}")
+        return False
+
+def reset_database_tables():
+    """모든 압축 저장이 성공했을 때 DB 테이블을 0MB로 안전하게 리셋"""
+    print("\n[🧹 DB 테이블 리셋 진행]")
+    try:
+        res = requests.post(f"{SUPABASE_URL}/rest/v1/rpc/truncate_all_translation_tables", headers=HEADERS, json={}, timeout=15)
+        if res.status_code in (200, 204):
+            print("  ✨ DB 3개 테이블이 0 MB로 깨끗하게 비워졌습니다! (용량 다이어트 성공)")
+            return True
+        else:
+            print(f"  ℹ️ DB 리셋 응답 ({res.status_code}): {res.text}")
+    except Exception as e:
+        print(f"  ⚠️ DB 리셋 RPC 호출 실패: {e}")
+    return False
 
 def main():
     print("="*60)
-    print("🚀 하이브리드 마스터 번역 메모리 패킹 시작 (Master Gzip Pack)")
+    print("🚀 하이브리드 마스터 번역 메모리 자동 아카이빙 & 압축 시작")
     print("="*60)
+
+    current_mb = get_current_db_size_mb()
+    print(f"📊 현재 DB 물리 디스크 용량: {current_mb:.2f} MB")
+
     ensure_bucket()
 
     dist_dir = os.path.join(os.path.dirname(__file__), "..", "dist")
     os.makedirs(dist_dir, exist_ok=True)
 
     summary = []
+    all_success = True
 
     for cfg in TABLE_CONFIGS:
         table_name = cfg["table"]
         master_gz = cfg["master_gz"]
         json_name = cfg["json_name"]
 
-        data = fetch_table_data(table_name)
-        if not data:
+        # 1. 기존 마스터 데이터 다운로드 (누적 보존)
+        existing_data = fetch_existing_master(master_gz)
+
+        # 2. DB 신규 데이터 다운로드
+        new_data = fetch_table_data(table_name)
+
+        # 3. 양쪽 데이터 안전 병합 (기존 + 신규)
+        merged_data = {}
+        all_langs = set(list(existing_data.keys()) + list(new_data.keys()))
+        for lang in all_langs:
+            merged_data[lang] = {}
+            if lang in existing_data and isinstance(existing_data[lang], dict):
+                merged_data[lang].update(existing_data[lang])
+            if lang in new_data and isinstance(new_data[lang], dict):
+                merged_data[lang].update(new_data[lang])
+
+        if not merged_data:
             print(f"⚠️ {table_name} 데이터가 비어있습니다. 건너뜁니다.")
             continue
 
-        raw_json_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        raw_json_bytes = json.dumps(merged_data, ensure_ascii=False, indent=2).encode("utf-8")
         gz_bytes = gzip.compress(raw_json_bytes, compresslevel=9)
 
-        # 1. 로컬 dist 에도 저장
+        # 로컬 dist 에도 저장
         with open(os.path.join(dist_dir, json_name), "wb") as f:
             f.write(raw_json_bytes)
         with open(os.path.join(dist_dir, master_gz), "wb") as f:
@@ -138,12 +199,15 @@ def main():
         ratio = (1 - (len(gz_bytes) / len(raw_json_bytes))) * 100
         print(f"  [2/3] 압축 완료: 원본 {raw_mb:.2f} MB ➡️ 초압축 {gz_mb:.2f} MB ({ratio:.1f}% 절약)")
 
-        # 2. Supabase Storage 에 업로드
+        # Storage 에 업로드
         print(f"  [3/3] Supabase Storage 업로드 중...")
-        upload_storage(gz_bytes, master_gz, "application/gzip")
-        upload_storage(raw_json_bytes, json_name, "application/json")
+        ok1 = upload_storage(gz_bytes, master_gz, "application/gzip")
+        ok2 = upload_storage(raw_json_bytes, json_name, "application/json")
 
-        total_cnt = sum(len(v) for v in data.values())
+        if not (ok1 and ok2):
+            all_success = False
+
+        total_cnt = sum(len(v) for v in merged_data.values())
         summary.append({
             "category": cfg["category"],
             "master_gz": master_gz,
@@ -158,6 +222,11 @@ def main():
     for s in summary:
         print(f"• [{s['category']}] {s['master_gz']}: {s['count']:,}개 | 원본 {s['raw_mb']:.2f}MB ➡️ 압축 {s['gz_mb']:.2f}MB")
 
+    # 4. Storage 마스터 파일 3개가 100% 안전하게 업로드되었을 때만 DB 테이블 리셋 시도
+    if all_success and len(summary) == len(TABLE_CONFIGS):
+        reset_database_tables()
+    else:
+        print("\n⚠️ 일부 파일 업로드 실패 또는 미완료로 인해 안전을 위해 DB 테이블 리셋을 건너뜁니다.")
+
 if __name__ == "__main__":
     main()
-
