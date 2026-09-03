@@ -133,37 +133,24 @@ $parentPid = {current_pid}
 while (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {{
     Start-Sleep -Milliseconds 200
 }}
-Start-Sleep -Milliseconds 500
+Start-Sleep -Milliseconds 1000
 
-# 2. 파일 잠금이 완전히 해제될 때까지 대기 (최대 30회, 약 9초)
-for ($w = 0; $w -lt 30; $w++) {{
-    try {{
-        $stream = [System.IO.File]::Open($target, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-        if ($stream) {{
-            $stream.Close()
-            $stream.Dispose()
-            break
-        }}
-    }} catch {{
-        Start-Sleep -Milliseconds 300
-    }}
-}}
-
-# 3. 파일 교체 시도 (최대 10회 재시도)
+# 2. 파일 교체 시도 (최대 20회 재시도, 파일 잠금 해제 대기)
 $copied = $false
-for ($i = 0; $i -lt 10; $i++) {{
+for ($i = 0; $i -lt 20; $i++) {{
     try {{
         Copy-Item -LiteralPath $newBin -Destination $target -Force -ErrorAction Stop
         $copied = $true
         break
     }} catch {{
-        Start-Sleep -Milliseconds 300
+        Start-Sleep -Milliseconds 500
     }}
 }}
 
-# 4. 교체 완료 후 프로그램 재실행 및 임시 파일 정리
+# 3. 교체 완료 후 프로그램 재실행 및 임시 파일 정리
 if ($copied) {{
     Start-Process -FilePath $target -WorkingDirectory $workDir
+    Start-Sleep -Seconds 1
     Remove-Item -LiteralPath $newBin -Force -ErrorAction SilentlyContinue
 }}
 """
@@ -176,7 +163,7 @@ if ($copied) {{
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = 0
-        creationflags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
 
     subprocess.Popen(
         [
@@ -280,6 +267,21 @@ class UpdateDialog(ctk.CTkToplevel):
         if not url:
             self.status_label.configure(text="❌ 다운로드 URL을 찾을 수 없습니다.", text_color="#ef4444")
             return
+
+        if getattr(sys, 'frozen', False):
+            exe_path = os.path.abspath(sys.executable).lower()
+            temp_path = tempfile.gettempdir().lower()
+            if temp_path in exe_path or "\\temp\\" in exe_path or "\\temp1_" in exe_path:
+                from tkinter import messagebox
+                messagebox.showwarning(
+                    "압축 파일 내 실행 감지",
+                    "⚠️ 현재 프로그램이 압축 파일(.zip) 내부에서 직접 실행되었습니다.\n\n"
+                    "Windows 보안 정책상 압축 파일 내부에서는 실행 파일을 교체할 수 없습니다.\n\n"
+                    "다운로드 폴더의 ZIP 파일 압축을 완전히 해제하신 후,\n"
+                    "추출된 폴더 안의 QuestTranslatorPro.exe를 실행하여 업데이트해 주세요!"
+                )
+                self.status_label.configure(text="⚠️ 압축을 해제한 폴더에서 실행해 주세요.", text_color="#ef4444")
+                return
 
         self.is_downloading = True
         self.update_btn.configure(state="disabled", text="다운로드 중...")
