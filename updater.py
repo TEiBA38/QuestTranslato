@@ -108,6 +108,7 @@ def download_file_with_progress(url, dest_path, progress_callback=None, cancel_c
 
 
 def apply_update_and_restart(new_binary_path):
+    import base64
     if getattr(sys, 'frozen', False):
         target_exe_path = os.path.abspath(sys.executable)
     else:
@@ -115,27 +116,59 @@ def apply_update_and_restart(new_binary_path):
         target_exe_path = os.path.join(repo_root, "dist", "QuestTranslatorPro.exe")
 
     target_dir = os.path.dirname(target_exe_path)
-    target_exe_name = os.path.basename(target_exe_path)
+    current_pid = os.getpid()
 
-    bat_fd, bat_path = tempfile.mkstemp(suffix="_qtp_update.bat")
-    os.close(bat_fd)
+    # Escape single quotes for PowerShell single-quoted string literals
+    safe_target = target_exe_path.replace("'", "''")
+    safe_new = new_binary_path.replace("'", "''")
+    safe_dir = target_dir.replace("'", "''")
 
-    bat_content = f"""@echo off
-chcp 65001 >nul
-timeout /t 2 /nobreak >nul
-copy /y "{new_binary_path}" "{target_exe_path}" >nul
-if errorlevel 1 (
-    timeout /t 2 /nobreak >nul
-    copy /y "{new_binary_path}" "{target_exe_path}" >nul
-)
-cd /d "{target_dir}"
-start "" "{target_exe_path}"
-del /f /q "{new_binary_path}" >nul 2>&1
-(goto) 2>nul & del "%~f0"
+    ps_script = f"""
+$target = '{safe_target}'
+$newBin = '{safe_new}'
+$workDir = '{safe_dir}'
+$parentPid = {current_pid}
+
+# 1. 호출한 프로세스 종료 대기
+while (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {{
+    Start-Sleep -Milliseconds 200
+}}
+Start-Sleep -Milliseconds 500
+
+# 2. 파일 잠금이 완전히 해제될 때까지 대기 (최대 30회, 약 9초)
+for ($w = 0; $w -lt 30; $w++) {{
+    try {{
+        $stream = [System.IO.File]::Open($target, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        if ($stream) {{
+            $stream.Close()
+            $stream.Dispose()
+            break
+        }}
+    }} catch {{
+        Start-Sleep -Milliseconds 300
+    }}
+}}
+
+# 3. 파일 교체 시도 (최대 10회 재시도)
+$copied = $false
+for ($i = 0; $i -lt 10; $i++) {{
+    try {{
+        Copy-Item -LiteralPath $newBin -Destination $target -Force -ErrorAction Stop
+        $copied = $true
+        break
+    }} catch {{
+        Start-Sleep -Milliseconds 300
+    }}
+}}
+
+# 4. 교체 완료 후 프로그램 재실행 및 임시 파일 정리
+if ($copied) {{
+    Start-Process -FilePath $target -WorkingDirectory $workDir
+    Remove-Item -LiteralPath $newBin -Force -ErrorAction SilentlyContinue
+}}
 """
 
-    with open(bat_path, "w", encoding="utf-8") as f:
-        f.write(bat_content)
+    b64_script = base64.b64encode(ps_script.encode('utf-16le')).decode('ascii')
 
     startupinfo = None
     creationflags = 0
@@ -146,7 +179,13 @@ del /f /q "{new_binary_path}" >nul 2>&1
         creationflags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
 
     subprocess.Popen(
-        ["cmd.exe", "/c", bat_path],
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-WindowStyle", "Hidden",
+            "-EncodedCommand", b64_script
+        ],
         cwd=tempfile.gettempdir(),
         startupinfo=startupinfo,
         creationflags=creationflags,
