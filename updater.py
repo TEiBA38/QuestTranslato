@@ -129,13 +129,19 @@ $newBin = '{safe_new}'
 $workDir = '{safe_dir}'
 $parentPid = {current_pid}
 
-# 1. 호출한 프로세스 종료 대기
+# 1. PyInstaller 보안 검증 충돌 방지: 상속된 MEIPASS 환경 변수 완벽 제거
+Remove-Item Env:_MEIPASS2 -ErrorAction SilentlyContinue
+Remove-Item Env:_MEIPASS -ErrorAction SilentlyContinue
+[Environment]::SetEnvironmentVariable('_MEIPASS2', $null, 'Process')
+[Environment]::SetEnvironmentVariable('_MEIPASS', $null, 'Process')
+
+# 2. 호출한 프로세스 종료 대기
 while (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {{
     Start-Sleep -Milliseconds 200
 }}
 Start-Sleep -Milliseconds 1000
 
-# 2. 파일 교체 시도 (최대 20회 재시도, 파일 잠금 해제 대기)
+# 3. 파일 교체 시도 (최대 20회 재시도, 파일 잠금 해제 대기)
 $copied = $false
 for ($i = 0; $i -lt 20; $i++) {{
     try {{
@@ -147,8 +153,12 @@ for ($i = 0; $i -lt 20; $i++) {{
     }}
 }}
 
-# 3. 교체 완료 후 프로그램 재실행 및 임시 파일 정리
+# 4. 교체 완료 후 프로그램 재실행 및 임시 파일 정리
 if ($copied) {{
+    Remove-Item Env:_MEIPASS2 -ErrorAction SilentlyContinue
+    Remove-Item Env:_MEIPASS -ErrorAction SilentlyContinue
+    [Environment]::SetEnvironmentVariable('_MEIPASS2', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('_MEIPASS', $null, 'Process')
     Start-Process -FilePath $target -WorkingDirectory $workDir
     Start-Sleep -Seconds 1
     Remove-Item -LiteralPath $newBin -Force -ErrorAction SilentlyContinue
@@ -156,6 +166,11 @@ if ($copied) {{
 """
 
     b64_script = base64.b64encode(ps_script.encode('utf-16le')).decode('ascii')
+
+    clean_env = os.environ.copy()
+    for k in list(clean_env.keys()):
+        if k.startswith("_MEI") or k in ("_MEIPASS2", "_MEIPASS", "PYINSTALLER_STRICT_UNPACK_MODE"):
+            clean_env.pop(k, None)
 
     startupinfo = None
     creationflags = 0
@@ -174,6 +189,7 @@ if ($copied) {{
             "-EncodedCommand", b64_script
         ],
         cwd=tempfile.gettempdir(),
+        env=clean_env,
         startupinfo=startupinfo,
         creationflags=creationflags,
         close_fds=True
