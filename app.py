@@ -136,7 +136,7 @@ if ctk is not None and TkinterDnD is not None:
             title_frame = ctk.CTkFrame(self.hero_frame, fg_color="transparent")
             title_frame.grid(row=0, column=0, sticky="w", padx=16, pady=(12, 0))
 
-            from constants import APP_VERSION
+            from constants import APP_VERSION, GITHUB_REPO_URL, GITHUB_ICON_B64
             ctk.CTkLabel(title_frame, text="Quest Translator Pro",
                          font=ctk.CTkFont(family=FONT_NAME, size=26, weight="bold"),
                          text_color="#f8fafc").pack(side="left")
@@ -153,8 +153,41 @@ if ctk is not None and TkinterDnD is not None:
             )
             self.check_update_btn.pack(side="left", padx=(12, 0), pady=(6, 0))
 
+            # 우측 상단 액션 영역 (업데이트 배너 + GitHub 링크 버튼)
+            self.header_actions_frame = ctk.CTkFrame(self.hero_frame, fg_color="transparent")
+            self.header_actions_frame.grid(row=0, column=1, sticky="e", padx=16, pady=(12, 0))
+
+            # GitHub 바로가기 버튼 (배경 검은색, 공식 GitHub 화이트 로고)
+            try:
+                import base64, io, webbrowser
+                from PIL import Image
+                gh_data = base64.b64decode(GITHUB_ICON_B64)
+                gh_pil = Image.open(io.BytesIO(gh_data))
+                self.github_icon = ctk.CTkImage(light_image=gh_pil, dark_image=gh_pil, size=(18, 18))
+            except Exception:
+                self.github_icon = None
+
+            import webbrowser
+            self.github_btn = ctk.CTkButton(
+                self.header_actions_frame,
+                text=" GitHub",
+                image=self.github_icon,
+                compound="left",
+                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                fg_color="#000000",
+                hover_color="#181b20",
+                text_color="#ffffff",
+                border_width=1,
+                border_color="#30363d",
+                height=30,
+                corner_radius=8,
+                cursor="hand2",
+                command=lambda: webbrowser.open(GITHUB_REPO_URL)
+            )
+            self.github_btn.pack(side="right")
+
             self.update_banner_btn = ctk.CTkButton(
-                self.hero_frame, text="✨ 새 버전 출시! 클릭하여 업데이트",
+                self.header_actions_frame, text="✨ 새 버전 출시! 클릭하여 업데이트",
                 font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                 fg_color="#ea580c", hover_color="#c2410c", text_color="#ffffff",
                 height=30, corner_radius=15,
@@ -199,7 +232,7 @@ if ctk is not None and TkinterDnD is not None:
             if hasattr(self, "update_banner_btn") and self.pending_update_info:
                 latest = self.pending_update_info.get("latest_version", "")
                 self.update_banner_btn.configure(text=f"✨ 새 버전({latest}) 출시! 클릭하여 업데이트")
-                self.update_banner_btn.grid(row=0, column=1, sticky="e", padx=16, pady=(12, 0))
+                self.update_banner_btn.pack(side="right", padx=(0, 10))
 
         def _on_click_update_banner(self):
             if self.pending_update_info:

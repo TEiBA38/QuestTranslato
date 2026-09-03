@@ -346,7 +346,15 @@ def get_cached_translation(text, target_lang="한국어 (Korean)"):
     if result is not None:
         return result
 
-    return _lookup_safe(_books_cache, text, target_lang_norm)
+    result = _lookup_safe(_books_cache, text, target_lang_norm)
+    if result is not None:
+        return result
+
+    # 💡 시스템 코드/명령어/단위/포맷터: 번역 불필요 대상은 원문 그대로 즉시 반환
+    from translation_engines import is_code_or_id
+    if is_code_or_id(text):
+        return text
+    return None
 
 
 def add_to_memory(text, translated_text, target_lang="한국어 (Korean)"):
@@ -375,7 +383,14 @@ def get_cached_item_translation(text, target_lang="한국어 (Korean)"):
     result = _lookup_safe(_global_cache, text, target_lang_norm)
     if result is not None:
         return result
-    return _lookup_safe(_books_cache, text, target_lang_norm)
+    result = _lookup_safe(_books_cache, text, target_lang_norm)
+    if result is not None:
+        return result
+
+    from translation_engines import is_code_or_id
+    if is_code_or_id(text):
+        return text
+    return None
 
 
 def add_item_to_memory(text, translated_text, target_lang="한국어 (Korean)"):
@@ -398,7 +413,14 @@ def get_cached_book_translation(text, target_lang="한국어 (Korean)"):
     result = _lookup_safe(_global_cache, text, target_lang_norm)
     if result is not None:
         return result
-    return _lookup_safe(_items_cache, text, target_lang_norm)
+    result = _lookup_safe(_items_cache, text, target_lang_norm)
+    if result is not None:
+        return result
+
+    from translation_engines import is_code_or_id
+    if is_code_or_id(text):
+        return text
+    return None
 
 
 def add_book_to_memory(text, translated_text, target_lang="한국어 (Korean)"):

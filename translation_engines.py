@@ -156,23 +156,75 @@ def _translate_wrapper(text, api_key, translate_fn, reference_map=None, target_l
     return final_res
 
 
+KNOWN_GAME_UNITS = {
+    'cf', 'cft', 'cf/t', 'rf', 'rft', 'rf/t', 'fe', 'fet', 'fe/t', 'eu', 'eut', 'eu/t',
+    'mj', 'mjt', 'mj/t', 'mj/s', 'gp', 'ae', 'mb', 'mb/t', 'mb/s', 't', 'tick', 'ticks',
+    's', 'sec', 'secs', 'min', 'mins', 'h', 'hr', 'hrs', 'k', 'm', 'g', 'b', 'kb', 'gb', 'tb',
+    'deg', 'c', 'f', 'xp', 'lvl', 'bpm', 'rpm', 'v', 'a', 'w', 'kw', 'mw', 'gw', 'hz', 'khz', 'mhz',
+    'ui', 'µi', 'µb', 'µs', 'µ', 'ctrl', 'shift', 'alt', 'esc', 'tab', 'enter', 'space',
+    'i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x', 'xi', 'xii'
+}
+
+
 def is_code_or_id(text):
     if not text or not str(text).strip():
         return True
     t = str(text).strip()
-    if (":" in t and " " not in t) or t.isdigit() or bool(re.match(r'^[0-9A-Fa-f]{8,}$', t)):
+
+    # 1. 단일 토큰 콜론 식별자 (modid:item, buildcraftlib:guide 등)
+    if (":" in t and " " not in t) or bool(re.match(r'^[0-9A-Fa-f]{8,}$', t)):
         return True
-    # 글자(알파벳, 한글, 기타 언어의 문자)가 전혀 없는 기호/숫자/포맷 문자열
-    # [^\W\d_]는 숫자와 언더바를 제외한 모든 언어의 문자(Letter)를 매칭합니다.
-    words = re.findall(r'[^\W\d_]+', t)
-    if not words:
+
+    # 2. 숫자, 소수점, 16진수, 치수/비율 규격 (0.5, 1.12.2, 0x1a4, 1x1, 3x3, 100%, +1, -1, 1-10)
+    if re.match(r'^(?:0x[0-9a-fA-F]+|\d+x\d+|[+-]?\d+(?:\.\d+)*(?:-\d+(?:\.\d+)*)?%?)$', t):
         return True
-    # 단일 문자나 아주 짧은 대문자 기호/약어 (W, R, D, GUI, ID 등)
-    if len(t) <= 3 and not re.search(r'[가-힣]', t) and t.isupper():
-        # 예외: I, A 와 같은 정상적인 1글자 영단어는 번역 허용
-        if t in ("I", "A"):
-            return False
+
+    # 3. 마인크래프트 명령어 (/command ...)
+    if t.startswith("/") and not t.startswith("//"):
         return True
+
+    # 4. 마크다운 링크 및 시스템 태그 ($[...](...), <tag...>, {placeholder}, &color&, (PM2.5))
+    if (t.startswith("$[") and "](" in t) or (t.startswith("<") and t.endswith(">") and " " not in t):
+        return True
+    if re.match(r'^(?:[&§][0-9a-fk-orA-FK-OR])+[a-zA-Z0-9]?$', t):
+        return True
+    if re.match(r'^[(\[{<]*[&%][a-zA-Z0-9_.]+[&%][)\]}>]*$', t):
+        return True
+    if re.match(r'^\([A-Z0-9._-]+\)$', t):
+        return True
+
+    # 5. 수학/논리 함수 표현식 (sin(A), cos(A), sqrt(A), max(A, B) 등)
+    if re.match(r'^(?:sin|cos|tan|asin|acos|atan|sqrt|log|ln|abs|min|max|ceil|floor)\([A-Za-z0-9_,\s]*\)$', t):
+        return True
+
+    # 6. 언어 코드 (en_US, ko_KR 등)
+    if re.match(r'^[a-z]{2}_[A-Z]{2}$', t):
+        return True
+
+    # 7. 단일 문자나 아주 짧은 영문 기호/약어 (1글자 영문자 r, j, x, y, z 등 / ESD, NBT, GUI)
+    if len(t) == 1 and t.isalpha() and t not in ("I", "A"):
+        return True
+
+    # 8. 유니코드 이스케이프 및 포맷터 제거 후 순수 글자 추출
+    cleaned = re.sub(r'\\u[0-9a-fA-F]{4}', ' ', t)
+    cleaned = re.sub(r'%(?:\d+\$)?[-+#0 ,]*\d*(?:\.\d+)?[a-zA-Z%]', ' ', cleaned)
+    cleaned = re.sub(r'\{[0-9]+\}', ' ', cleaned)
+    cleaned = re.sub(r'^(?:UUID|UID|URL|ID|IP)\s*:\s*%?s?$', ' ', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\b[xXyYzZ]\s*[:=,]\s*', ' ', cleaned)
+
+    letters = re.findall(r'[^\W\d_]+', cleaned)
+    if not letters:
+        return True
+
+    # 9. 대문자 약어 (ESD, ESDs, NBT, CF, ME, GUI, UUID 등)
+    clean_abbr = t.rstrip('s') if t.endswith('s') and len(t) > 1 and t[:-1].isupper() else t
+    if len(clean_abbr) <= 5 and clean_abbr.isupper() and clean_abbr not in ("I", "A"):
+        return True
+
+    # 10. 포맷터 및 단위/키보드/좌표계 전용 문자열 (%s, %smb / %smb, %s MJ/t, Ctrl, x, y, z)
+    if all(w.lower() in KNOWN_GAME_UNITS or w.lower() in ('of', 'and', 'per', 'x', 'y', 'z', 'v') for w in letters):
+        return True
+
     return False
 
 

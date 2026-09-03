@@ -153,3 +153,28 @@ def has_non_latin(text, target_lang="한국어 (Korean)"):
                 return True
         return False
     return has_hangul(text)
+
+GITHUB_REPO_URL = "https://github.com/TEiBA38/QuestTranslato"
+
+# 공식 GitHub Mark 화이트 실루엣 투명 아이콘 (40x40 PNG Base64)
+GITHUB_ICON_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAACgAAAAoCAYAAACM/rhtAAAE3UlEQVR4nO1YTWhcVRT+zkyaQkzVFqpRS8VWVLooqbXg"
+    "HxqLVYqCRVwJ4sKNVBC60JWIIqgr3QkWf0AFqQW1ohRUrJEiBHTjRgUjNo1pa1ujTZuk6WQ+OZPvhMvN65sZM9mUHrjM"
+    "m/vOPee759zzcx9wkS5wssUsJunrK5LDAtk+Vzez/N3SEskKyWob/FVfs+QWlMXMzOr6vxrAZgAbAawFcJlYTwEYAfAT"
+    "gB/N7C/xO0guiUVTi5G8neRbJIdJTpKcITlNckpjWnOT4nmH5B1FsjpiQRdoZrMk3UovAdgBoBvAGQAzOmu5rJhzvksA"
+    "nAOwD8BzZnYoZC4aYAJuO4A3AFwFYNwPP4BqCzIagSK+lQCOAnjKzL5oBWSlRXCPAdgL4FIAx6S0FXBOEenU2hUAPiL5"
+    "uGSXuttaAPcQgA8BTMgSq/R7Wm4L5TFCbgznXQagV7x/a94D6lEz+6TMkoUAPdo8UkneAGAQQBeAWQF4G8DVALYBWC2g"
+    "y8UTHnFQNQBnBewkgK8U2U/I+lXx3W1mv4TOlgHq8TMAW6XgcgA/mNk94rkOwC4ADwIYBjCqswnxrgFwPYD9AF4zs2Gt"
+    "+xLAbQD+kTcGJQNFAAtdq98dJM+S/JPkmNLHu0q63Qn/yhJZ8+98jda+qTQ0Jtmu4+FUd7MgoSy4UykkrOy769VZqama"
+    "VMysYTUpT4cn9PHg8zVa60ESljLp2CmeeinA5Bx4ZdiiPBfR6vN92qVr9xrr57SxAVeeDd9oo+pIZmy8LwFSlY5bAPRr"
+    "TaXMgvH/XiXXPLJelhXm11lJ2crexeY90c8mnvHnHulcgCkHGDvbrCgMy3kkfm9m+2WVphUgJ6UsB3lAgbEiAVqTTuRu"
+    "ngcY7pCJr1WOC4CeRg7KnS3X0QKqSMZBlcAoh65rbZLerCxIepREUzc4He9EF2JzMk5kSX1WVapnwY4KZHRp5GDcip2i"
+    "5dnmmehtCnAmSy8hwKvHoolz7stlRbqZOS/AxH1TqghhxYoW9ut982x/for2/2bJjDreJZ1TefTnebCql8Mq8AHQc9UW"
+    "kht1iBe4ohn5Gq3dAOBWyQyArmtYebBa5uJw65CiNXZS0/9XFO1eSbpUJco6IlNVcXAuw+lVncFIVdG6DWUYCgU2AJNc"
+    "T/KYxlG17pOqxx+QvLKpyTIieQXJ9yVnLJEfY734yi9XCcg9AnSY5CMknxVYn/uZ5Au6m1yTNg+JnGUk15C8k+SLJH8t"
+    "ADemuT0tgcu6GVc+QfI4yY/VjWwneUZz/s6fvyHZK3emw+e+VrfimzpZYDn/f9p1pbrbAblbwv3M7dPc87qxnfITTfJp"
+    "zc8HTjyTfFKt1SFZPwU3Kjm7y8A1a1i9ofxWFyV34wNm9h3JbepARnVTm0jTQ3JdGADwud6n7qupvh8GMKBrQGsNaw6S"
+    "5Ca5wt055KmmDQ/cpaNwJLGcN6njmtuUGaQ9ys7jH3L1CMm9JF8n+R7J/lxJsm5AZ+yIXDyqjY60fe5aAHkTyQMCOS3L"
+    "OG0t+PKQAvxXmeAEyXMkB0ne2BFwBQo9kp8h+ZssUyd5XwnA+xtbmAu035WqujsKLlGautBb/10kPyW5ruB9nN914nHe"
+    "viJZnQbZKF2LWF8tK40d+4CZdNb1ss9p8blOKaZxkfo/+i7SBU3/AcgrtX+64TJ1AAAAAElFTkSuQmCC"
+)

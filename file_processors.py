@@ -91,7 +91,19 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
             def process_chunk(start_idx, texts_chunk):
                 if cancel_checker and cancel_checker():
                     raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                res = translate_gemini_batch(texts_chunk, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
+                if engine_key == "local_ai":
+                    res = translate_local_ai(texts_chunk, custom_url, ai_model, api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=glossary, target_lang=target_lang)
+                elif engine_key == "deepl":
+                    from translation_engines import translate_deepl
+                    res = [translate_deepl(t, api_key, is_pro=is_paid, reference_map=reference_map, target_lang=target_lang) for t in texts_chunk]
+                elif engine_key == "openai":
+                    from translation_engines import translate_openai
+                    res = [translate_openai(t, api_key, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang) for t in texts_chunk]
+                elif engine_key == "google":
+                    from translation_engines import translate_google
+                    res = [translate_google(t, api_key, reference_map=reference_map, target_lang=target_lang) for t in texts_chunk]
+                else:
+                    res = translate_gemini_batch(texts_chunk, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
                 return start_idx, texts_chunk, res
 
             with ThreadPoolExecutor(max_workers=min(8, len(chunks) or 1)) as executor:
@@ -111,7 +123,7 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                     if log_callback:
                         log_callback(f"⏳ {log_prefix} (병렬) [{completed_items}/{total_unique}]")
         else:
-            # 무료 제미나이 또는 Local AI
+            # 무료 제미나이, Local AI, 또는 순차 번역
             batch_size = 40 if engine_key in ("gemini_batch", "local_ai") else 15
             for i in range(0, total_unique, batch_size):
                 if cancel_checker and cancel_checker():
@@ -124,6 +136,15 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
 
                 if engine_key == "local_ai":
                     res_texts = translate_local_ai(texts_chunk, custom_url, ai_model, api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=glossary, target_lang=target_lang)
+                elif engine_key == "deepl":
+                    from translation_engines import translate_deepl
+                    res_texts = [translate_deepl(t, api_key, is_pro=False, reference_map=reference_map, target_lang=target_lang) for t in texts_chunk]
+                elif engine_key == "openai":
+                    from translation_engines import translate_openai
+                    res_texts = [translate_openai(t, api_key, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang) for t in texts_chunk]
+                elif engine_key == "google":
+                    from translation_engines import translate_google
+                    res_texts = [translate_google(t, api_key, reference_map=reference_map, target_lang=target_lang) for t in texts_chunk]
                 else:
                     res_texts = translate_gemini_batch(texts_chunk, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
                 
@@ -285,42 +306,24 @@ def process_snbt_with_progress(content, engine_key, api_key, is_paid=False, prog
 
     translated_map = {}
 
-    if engine_key in ("gemini_batch", "local_ai"):
-        log_pref = "초고속 SNBT 번역" if is_paid else "SNBT 번역"
-        if engine_key == "local_ai": log_pref = "Local AI SNBT 번역"
-        translated_texts = _run_batch_jobs(
-            targets,
-            lambda item: item[2].replace('\\"', '"'),
-            engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
-            log_prefix=log_pref, custom_url=custom_url
-        )
-        for (line_idx, prefix, _, suffix), trans_text in zip(targets, translated_texts):
-            final_text = _clean_snbt_string(trans_text)
-            translated_map[line_idx] = f'{prefix}"{final_text}"{suffix}'
-    else:
-        for count, (line_idx, prefix, orig_text, suffix) in enumerate(targets, 1):
-            if cancel_checker and cancel_checker():
-                raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+    log_pref = "초고속 SNBT 번역" if is_paid else "SNBT 번역"
+    if engine_key == "local_ai": log_pref = "Local AI SNBT 번역"
+    elif engine_key == "deepl": log_pref = "DeepL SNBT 번역"
+    elif engine_key == "openai": log_pref = "OpenAI SNBT 번역"
+    elif engine_key == "google": log_pref = "Google SNBT 번역"
 
-            raw_orig = orig_text.replace('\\"', '"')
+    translated_texts = _run_batch_jobs(
+        targets,
+        lambda item: item[2].replace('\\"', '"'),
+        engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
+        log_prefix=log_pref, custom_url=custom_url
+    )
+    for (line_idx, prefix, _, suffix), trans_text in zip(targets, translated_texts):
+        final_text = _clean_snbt_string(trans_text)
+        translated_map[line_idx] = f'{prefix}"{final_text}"{suffix}'
 
-            if engine_key == "deepl":
-                trans = translate_deepl(raw_orig, api_key, reference_map=reference_map, target_lang=target_lang)
-            elif engine_key == "openai":
-                trans = translate_openai(raw_orig, api_key, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
-            else:
-                trans = translate_google(raw_orig, api_key, reference_map=reference_map, target_lang=target_lang)
-
-            final_text = _clean_snbt_string(trans if trans else raw_orig)
-            translated_map[line_idx] = f'{prefix}"{final_text}"{suffix}'
-
-            if progress_callback and count % 5 == 0:
-                progress_callback(count, len(targets))
-                if log_callback:
-                    log_callback(f"⏳ 번역 진행 중... [{count}/{len(targets)}]")
-
-        if progress_callback:
-            progress_callback(len(targets), len(targets))
+    if progress_callback:
+        progress_callback(len(targets), len(targets))
 
     return rebuild_snbt(lines, translated_map)
 
@@ -361,35 +364,20 @@ def process_json_safely(node, engine_key, api_key, is_paid=False, progress_callb
     if log_callback and verbose:
         log_callback(f"✅ 분석 완료! 총 {len(targets)}개의 JSON 노드를 감지했습니다. 번역을 시작합니다...")
 
-    if engine_key in ("gemini_batch", "local_ai"):
-        log_pref = "초고속 다국어 번역" if is_paid else "다국어 번역"
-        if engine_key == "local_ai": log_pref = "Local AI 다국어 번역"
-        translated_texts = _run_batch_jobs(
-            targets,
-            lambda item: item[2],
-            engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
-            log_prefix=log_pref, custom_url=custom_url
-        )
-        for (parent_node, key, _), trans_text in zip(targets, translated_texts):
-            parent_node[key] = trans_text
-    else:
-        for count, (parent_node, key, orig_text) in enumerate(targets, 1):
-            if cancel_checker and cancel_checker():
-                raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+    log_pref = "초고속 다국어 번역" if is_paid else "다국어 번역"
+    if engine_key == "local_ai": log_pref = "Local AI 다국어 번역"
+    elif engine_key == "deepl": log_pref = "DeepL 다국어 번역"
+    elif engine_key == "openai": log_pref = "OpenAI 다국어 번역"
+    elif engine_key == "google": log_pref = "Google 다국어 번역"
 
-            if engine_key == "deepl":
-                trans = translate_deepl(orig_text, api_key, reference_map=reference_map, target_lang=target_lang)
-            elif engine_key == "openai":
-                trans = translate_openai(orig_text, api_key, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
-            else:
-                trans = translate_google(orig_text, api_key, reference_map=reference_map, target_lang=target_lang)
-            if trans:
-                parent_node[key] = trans
-
-            if progress_callback and count % 5 == 0:
-                progress_callback(count, len(targets))
-                if log_callback:
-                    log_callback(f"⏳ 번역 진행 중... [{count}/{len(targets)}]")
+    translated_texts = _run_batch_jobs(
+        targets,
+        lambda item: item[2],
+        engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
+        log_prefix=log_pref, custom_url=custom_url
+    )
+    for (parent_node, key, _), trans_text in zip(targets, translated_texts):
+        parent_node[key] = trans_text
 
     if progress_callback:
         progress_callback(len(targets), len(targets))

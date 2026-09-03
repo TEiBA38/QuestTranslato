@@ -510,30 +510,45 @@ class TranslationMixin:
                         self.set_status(f"⏳ 가이드북 텍스트 일괄 번역 중... [{c}/{t}]")
                     
                     glossary_map = self.app_state.glossaries_by_lang.get(target_lang, {})
-                    if engine_key in ("gemini_batch", "local_ai"):
-                        translated_unique = file_processors._run_batch_jobs(
-                            unique_texts, lambda x: x, engine_key, api_key, is_paid,
+                    
+                    # 패출리 가이드북 캐시 사전 조회
+                    cached_dict = {}
+                    uncached_texts = []
+                    for t in unique_texts:
+                        c_val = translation_memory.get_cached_book_translation(t, target_lang)
+                        if c_val is not None:
+                            cached_dict[t] = c_val
+                        else:
+                            uncached_texts.append(t)
+
+                    total_u = len(unique_texts)
+                    cached_u = len(cached_dict)
+                    uncached_u = len(uncached_texts)
+
+                    if cached_u > 0:
+                        pct = (cached_u / total_u) * 100
+                        if uncached_u == 0:
+                            self.log(f"✨ [패출리 캐시 100% 적중] 전체 {total_u:,}개 고유 문장 모두가 캐시에 있어 즉시 복원되었습니다! (0초 소요, 0토큰)")
+                            newly_translated = []
+                        else:
+                            self.log(f"💾 [패출리 캐시 복원] 전체 {total_u:,}개 중 {cached_u:,}개({pct:.1f}%)를 캐시에서 즉시 복원했습니다! ➡️ 신규 번역: {uncached_u:,}개")
+                    else:
+                        self.log(f"🔎 패출리 가이드북: 신규 고유 문장 {total_u:,}개 번역 시작...")
+
+                    if uncached_texts:
+                        newly_translated = file_processors._run_batch_jobs(
+                            uncached_texts, lambda x: x, engine_key, api_key, is_paid,
                             log_callback=self.log, cancel_checker=check_cancel, progress_callback=prog_cb,
                             reference_map=glossary_map, glossary=glossary_map,
                             ai_model=ai_model, target_lang=target_lang, log_prefix="가이드북 번역", custom_url=custom_url,
-                            is_book_flags=[True] * len(unique_texts)
+                            is_book_flags=[True] * len(uncached_texts)
                         )
                     else:
-                        translated_unique = []
-                        for idx, t in enumerate(unique_texts, 1):
-                            if check_cancel(): break
-                            if engine_key == "deepl":
-                                trans = translate_deepl(t, api_key, reference_map=glossary_map, target_lang=target_lang, is_book=True)
-                            elif engine_key == "openai":
-                                trans = translate_openai(t, api_key, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang, is_book=True)
-                            else:
-                                trans = translate_google(t, api_key, reference_map=glossary_map, target_lang=target_lang, is_book=True)
-                            translated_unique.append(trans)
-                            if idx % 5 == 0:
-                                prog_cb(idx, len(unique_texts))
-                                
+                        newly_translated = []
+
                     # 고유 텍스트 번역 결과를 다시 원래 리스트 길이로 매핑
-                    translation_dict = {u: t for u, t in zip(unique_texts, translated_unique)}
+                    new_dict = {orig: trans for orig, trans in zip(uncached_texts, newly_translated)}
+                    translation_dict = {u: cached_dict.get(u) or new_dict.get(u, u) for u in unique_texts}
                     translated_texts = [translation_dict.get(orig, orig) for orig in original_texts]
                                 
                     for i, (node, k, protected_text, mapping) in enumerate(all_targets):
@@ -586,33 +601,49 @@ class TranslationMixin:
             
             def do_translation(texts, log_prefix):
                 if not texts: return []
-                self.log(f"🔎 {log_prefix}: 고유 문장 {len(texts)}개 번역 시작...")
+                
+                # 1. 캐시 사전 조회 및 분리
+                cached_dict = {}
+                uncached_texts = []
+                for t in texts:
+                    c_val = translation_memory.get_cached_book_translation(t, target_lang)
+                    if c_val is not None:
+                        cached_dict[t] = c_val
+                    else:
+                        uncached_texts.append(t)
+
+                total_count = len(texts)
+                cached_count = len(cached_dict)
+                uncached_count = len(uncached_texts)
+
+                if cached_count > 0:
+                    pct = (cached_count / total_count) * 100
+                    if uncached_count == 0:
+                        self.log(f"✨ [{log_prefix} 캐시 100% 적중] 전체 {total_count}개 문장이 캐시에 있어 즉시 복원되었습니다! (0초 소요, 0토큰)")
+                        return [cached_dict[t] for t in texts]
+                    else:
+                        self.log(f"💾 [{log_prefix} 캐시 복원] 전체 {total_count}개 중 {cached_count}개({pct:.1f}%)를 캐시에서 즉시 복원했습니다! ➡️ 신규 번역: {uncached_count}개")
+                else:
+                    self.log(f"🔎 {log_prefix}: 신규 고유 문장 {total_count}개 AI 번역 시작...")
+
                 def prog_cb(c, t):
                     self.update_progress(c / t if t > 0 else 1)
                     self.set_status(f"💬 {log_prefix} 매뉴얼 번역 중... [{c}/{t}]")
                 glossary_map = self.app_state.glossaries_by_lang.get(target_lang, {})
                 
-                if engine_key in ("gemini_batch", "local_ai"):
-                    translated = file_processors._run_batch_jobs(
-                        texts, lambda x: x, engine_key, api_key, is_paid,
-                        log_callback=lambda m: None, cancel_checker=check_cancel, progress_callback=prog_cb,
+                if uncached_texts:
+                    newly_translated = file_processors._run_batch_jobs(
+                        uncached_texts, lambda x: x, engine_key, api_key, is_paid,
+                        log_callback=self.log, cancel_checker=check_cancel, progress_callback=prog_cb,
                         reference_map=glossary_map, glossary=glossary_map,
                         ai_model=ai_model, target_lang=target_lang, log_prefix=log_prefix, custom_url=custom_url,
-                        is_book_flags=[True] * len(texts)
+                        is_book_flags=[True] * len(uncached_texts)
                     )
                 else:
-                    translated = []
-                    for idx, t in enumerate(texts, 1):
-                        if check_cancel(): break
-                        if engine_key == "deepl":
-                            trans = translate_deepl(t, api_key, reference_map=glossary_map, target_lang=target_lang, is_book=True)
-                        elif engine_key == "openai":
-                            trans = translate_openai(t, api_key, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang, is_book=True)
-                        else:
-                            trans = translate_google(t, api_key, reference_map=glossary_map, target_lang=target_lang, is_book=True)
-                        translated.append(trans)
-                        if idx % 5 == 0: prog_cb(idx, len(texts))
-                return translated
+                    newly_translated = []
+
+                new_dict = {orig: trans for orig, trans in zip(uncached_texts, newly_translated)}
+                return [cached_dict.get(t) or new_dict.get(t, t) for t in texts]
 
             # --- 1. McJty (XNet, RFTools, etc) ---
             mcjty_map = books_map.get("mcjty", {})
@@ -907,39 +938,26 @@ class TranslationMixin:
                     total_targets = len(job["targets"])
                     glossary_map = getattr(self, 'glossary', {}) or {}
                     
-                    if engine_key in ("gemini_batch", "local_ai"):
-                        import file_processors
-                        translated_texts = file_processors._run_batch_jobs(
-                            job["targets"],
-                            lambda it: it[2],
-                            engine_key,
-                            api_key,
-                            is_paid,
-                            log_callback=self.route_log,
-                            cancel_checker=self.is_cancelled,
-                            progress_callback=lambda c, t: progress_cb(c, t, idx),
-                            reference_map=glossary_map,
-                            glossary=glossary_map,
-                            ai_model=ai_model,
-                            target_lang=target_lang,
-                            log_prefix="언어 파일 번역 중",
-                            custom_url=custom_url
-                        )
-                        for item, trans in zip(job["targets"], translated_texts):
-                            line_idx, prefix, orig_text, suffix = item
-                            job["translated_map"][line_idx] = f'{prefix}{trans}{suffix}'
-                    else:
-                        for i, (line_idx, prefix, orig_text, suffix) in enumerate(job["targets"]):
-                            if self.is_cancelled():
-                                raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                            if engine_key == "deepl":
-                                trans = translate_deepl(orig_text, api_key, reference_map=glossary_map, target_lang=target_lang)
-                            elif engine_key == "openai":
-                                trans = translate_openai(orig_text, api_key, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang)
-                            else:
-                                trans = translate_google(orig_text, api_key, reference_map=glossary_map, target_lang=target_lang)
-                            job["translated_map"][line_idx] = f'{prefix}{trans}{suffix}'
-                            progress_cb(i + 1, total_targets, idx)
+                    import file_processors
+                    translated_texts = file_processors._run_batch_jobs(
+                        job["targets"],
+                        lambda it: it[2],
+                        engine_key,
+                        api_key,
+                        is_paid,
+                        log_callback=self.route_log,
+                        cancel_checker=self.is_cancelled,
+                        progress_callback=lambda c, t: progress_cb(c, t, idx),
+                        reference_map=glossary_map,
+                        glossary=glossary_map,
+                        ai_model=ai_model,
+                        target_lang=target_lang,
+                        log_prefix="언어 파일 번역 중",
+                        custom_url=custom_url
+                    )
+                    for item, trans in zip(job["targets"], translated_texts):
+                        line_idx, prefix, orig_text, suffix = item
+                        job["translated_map"][line_idx] = f'{prefix}{trans}{suffix}'
                 else:
                     process_json_safely(
                         job["data"], engine_key, api_key, is_paid,
