@@ -527,8 +527,12 @@ def apply_hybrid_patchouli_translations(mods_dir, translated_books_map, log_call
             temp_jar = os.path.join(temp_dir, 'temp.jar')
             patched_count = 0
 
+            seen_files = set()
             with zipfile.ZipFile(jar_path, 'r') as zin, zipfile.ZipFile(temp_jar, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
                 for item in zin.infolist():
+                    if item.filename in seen_files:
+                        continue
+                    seen_files.add(item.filename)
                     if item.filename in file_map:
                         zout.writestr(item.filename, file_map[item.filename])
                         patched_count += 1
@@ -556,9 +560,13 @@ def hotpatch_resource_pack(pack_zip_path, old_tgt, new_tgt):
     
     changed = False
     
+    seen_files = set()
     with zipfile.ZipFile(pack_zip_path, 'r') as zin:
         with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
+                if item.filename in seen_files:
+                    continue
+                seen_files.add(item.filename)
                 content_bytes = zin.read(item.filename)
                 
                 if item.filename.endswith('.lang'):
