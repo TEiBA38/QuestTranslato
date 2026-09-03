@@ -101,7 +101,9 @@ class UIScreensMixin:
 
         bar = ctk.CTkProgressBar(panel, width=260, fg_color="#27272a", progress_color="#ea580c")
         bar.pack(padx=28, pady=(0, 20))
-        bar.set(0.18)
+        # 백그라운드 클라우드 마스터 메모리 초고속 사전 로드 시작
+        import translation_memory
+        threading.Thread(target=translation_memory.load_memory, daemon=True).start()
 
         self.after(120, lambda: (self._update_startup_status("설정을 불러오는 중..."), bar.set(0.45)))
         self.after(300, lambda: (self._update_startup_status("인스턴스를 확인하는 중..."), bar.set(0.72)))
@@ -196,11 +198,16 @@ class UIScreensMixin:
         if threading.current_thread() is not threading.main_thread():
             self.after(0, lambda: self.log(message))
             return
-        self.log_textbox.configure(state="normal")
-        self.log_textbox.insert("end", message + "\n")
-        self.log_textbox.see("end")
-        self.log_textbox.configure(state="disabled")
-        self.update_idletasks()
+        if not hasattr(self, 'log_textbox') or self.log_textbox is None:
+            return
+        try:
+            self.log_textbox.configure(state="normal")
+            self.log_textbox.insert("end", message + "\n")
+            self.log_textbox.see("end")
+            self.log_textbox.configure(state="disabled")
+            self.update_idletasks()
+        except Exception:
+            pass
 
     def set_status(self, text):
         if threading.current_thread() is not threading.main_thread():
@@ -670,15 +677,23 @@ class UIScreensMixin:
             
             # 리소스팩 핫패치 (Hot-patch)
             if hasattr(self.app_state, 'modpack_dir') and self.app_state.modpack_dir:
-                import os
+                import os, glob
                 import mod_jar_extractor
-                pack_zip = os.path.join(self.app_state.modpack_dir, "QuestTranslatorPro_Pack.zip")
-                if os.path.exists(pack_zip):
+                mp_dir = self.app_state.modpack_dir
+                mp_name = os.path.basename(mp_dir.rstrip(os.sep))
+                # 신규 명명 규칙: {모드팩이름}[*.zip 또는 레거시 QuestTranslatorPro_Pack.zip 탐색
+                candidates = glob.glob(os.path.join(mp_dir, f"{mp_name}[*].zip"))
+                candidates.extend(glob.glob(os.path.join(mp_dir, "resourcepacks", f"{mp_name}[*].zip")))
+                legacy = os.path.join(mp_dir, "QuestTranslatorPro_Pack.zip")
+                if os.path.exists(legacy):
+                    candidates.append(legacy)
+
+                for pz in set(candidates):
                     try:
-                        mod_jar_extractor.hotpatch_resource_pack(pack_zip, selected_item["tgt"], new_val)
-                        self.log("✅ 리소스팩(QuestTranslatorPro_Pack.zip) 핫패치 완료! 게임 내에서 F3+T를 누르면 즉시 반영됩니다.")
+                        mod_jar_extractor.hotpatch_resource_pack(pz, selected_item["tgt"], new_val)
+                        self.log(f"✅ 리소스팩({os.path.basename(pz)}) 핫패치 완료! 게임 내에서 F3+T를 누르면 즉시 반영됩니다.")
                     except Exception as e:
-                        self.log(f"⚠️ 리소스팩 핫패치 실패: {e}")
+                        self.log(f"⚠️ 리소스팩 핫패치 실패 ({os.path.basename(pz)}): {e}")
             
             selected_item["tgt"] = new_val # 업데이트
             self.show_messagebox("info", "성공", "수정사항이 저장되었습니다.")

@@ -34,6 +34,7 @@ a = Analysis(
         'constants',
         'state_manager',
         'requests',
+        'updater',
     ],
     hookspath=[],
     hooksconfig={},

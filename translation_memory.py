@@ -11,10 +11,26 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from constants import has_hangul
 
-MEMORY_FILE = "translation_memory.json"
-BACKUP_FILE = "translation_memory.json.bak"
-ITEMS_MEMORY_FILE = "translation_memory_items.json"
-BOOKS_MEMORY_FILE = "translation_memory_books.json"
+def _get_cache_dir():
+    """로컬 캐시 파일이 저장될 전용 폴더 (항상 dist 하위 폴더에 저장)"""
+    import sys
+    if getattr(sys, 'frozen', False):
+        # PyInstaller EXE 실행 환경: 실행 파일이 위치한 폴더의 dist 하위 폴더
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        base = os.path.join(exe_dir, "dist")
+    else:
+        # 개발 환경: 프로젝트 루트의 dist 폴더
+        repo_root = os.path.dirname(os.path.abspath(__file__))
+        base = os.path.join(repo_root, "dist")
+    
+    os.makedirs(base, exist_ok=True)
+    return base
+
+CACHE_DIR = _get_cache_dir()
+MEMORY_FILE = os.path.join(CACHE_DIR, "translation_memory.json")
+BACKUP_FILE = os.path.join(CACHE_DIR, "translation_memory.json.bak")
+ITEMS_MEMORY_FILE = os.path.join(CACHE_DIR, "translation_memory_items.json")
+BOOKS_MEMORY_FILE = os.path.join(CACHE_DIR, "translation_memory_books.json")
 SHORT_TEXT_THRESHOLD = 30
 
 # ====================================================================
@@ -43,17 +59,19 @@ _current_modpack_file = None
 
 
 def set_current_modpack(modpack_path):
-    """모드팩 컨텍스트 설정 (짧은 문장 격리)"""
-    global _current_modpack_id, _current_modpack_file, _modpack_cache, _modpack_loaded
+    """모드팩 컨텍스트 설정 (짧은 문장 격리 및 일관된 해시 보장)"""
+    global _current_modpack_id, _current_modpack_file, _modpack_loaded
     with _lock:
         if modpack_path:
-            modpack_name = os.path.basename(modpack_path.rstrip(os.sep))
+            # .zip 확장자 여부와 관계없이 동일한 모드팩 식별자 생성
+            base_part = os.path.basename(modpack_path.rstrip(os.sep))
+            modpack_name = os.path.splitext(base_part)[0]
             _current_modpack_id = hashlib.md5(modpack_name.encode('utf-8')).hexdigest()[:8]
-            _current_modpack_file = f"translation_memory_modpack_{_current_modpack_id}.json"
+            _current_modpack_file = os.path.join(CACHE_DIR, f"translation_memory_modpack_{_current_modpack_id}.json")
         else:
             _current_modpack_id = None
             _current_modpack_file = None
-        _modpack_cache = {}
+        _modpack_cache.clear()
         _modpack_loaded = False
 
 
@@ -72,6 +90,9 @@ def is_valid_translation(src, tgt, target_lang="한국어 (Korean)"):
     s_clean = str(src).strip()
     t_clean = str(tgt).strip()
     if s_clean == t_clean:
+        return False
+    # Mock(모의 번역) 오염 문자열 차단
+    if "[번역됨]" in t_clean or t_clean.startswith("[번역됨]") or "[Mock]" in t_clean:
         return False
     if "한국어" in target_lang or "Korean" in target_lang:
         if re.search(r'[A-Za-z]', s_clean) and not has_hangul(t_clean):
@@ -274,26 +295,34 @@ def _store(cache, text, translated_text, target_lang_norm):
 
 def load_memory():
     """로컬 메모리 로드 및 Supabase 최신 데이터 동기화"""
-    global _global_cache, _global_loaded, _items_cache, _items_loaded, _books_cache, _books_loaded
+    global _global_loaded, _items_loaded, _books_loaded
     with _lock:
         if not _global_loaded:
-            _global_cache = _read_and_clean_file(MEMORY_FILE)
+            loaded_g = _read_and_clean_file(MEMORY_FILE)
+            _global_cache.clear()
+            _global_cache.update(loaded_g)
             _global_loaded = True
         if not _items_loaded:
-            _items_cache = _read_and_clean_file(ITEMS_MEMORY_FILE)
+            loaded_i = _read_and_clean_file(ITEMS_MEMORY_FILE)
+            _items_cache.clear()
+            _items_cache.update(loaded_i)
             _items_loaded = True
         if not _books_loaded:
-            _books_cache = _read_and_clean_file(BOOKS_MEMORY_FILE)
+            loaded_b = _read_and_clean_file(BOOKS_MEMORY_FILE)
+            _books_cache.clear()
+            _books_cache.update(loaded_b)
             _books_loaded = True
 
     sync_from_supabase()
 
 
 def _load_modpack_memory():
-    global _modpack_cache, _modpack_loaded
+    global _modpack_loaded
     if _modpack_loaded or not _current_modpack_file:
         return
-    _modpack_cache = _read_and_clean_file(_current_modpack_file)
+    loaded_m = _read_and_clean_file(_current_modpack_file)
+    _modpack_cache.clear()
+    _modpack_cache.update(loaded_m)
     _modpack_loaded = True
 
 
@@ -329,11 +358,11 @@ def add_to_memory(text, translated_text, target_lang="한국어 (Korean)"):
 
     target_lang_norm = target_lang.replace(" ", "")
     with _lock:
-        if _is_short_text(text) and _current_modpack_id:
+        if _current_modpack_id:
             _load_modpack_memory()
             _store(_modpack_cache, text, translated_text, target_lang_norm)
-        else:
-            _store(_global_cache, text, translated_text, target_lang_norm)
+        # 클라우드 동기화 및 전역 재사용을 위해 _global_cache에도 동시 보존
+        _store(_global_cache, text, translated_text, target_lang_norm)
 
 
 def get_cached_item_translation(text, target_lang="한국어 (Korean)"):
@@ -667,14 +696,31 @@ def upload_master_to_storage():
         _storage_upload_timer = threading.Timer(8.0, lambda: threading.Thread(target=_async_pack, daemon=True).start())
         _storage_upload_timer.start()
 
-def sync_from_supabase():
+_cloud_sync_done = threading.Event()
+_is_syncing = False
+
+def wait_for_cloud_sync(timeout=8.0):
+    """클라우드 마스터 메모리가 완전히 다운로드될 때까지 대기"""
+    if _cloud_sync_done.is_set():
+        return True
+    return _cloud_sync_done.wait(timeout=timeout)
+
+
+def sync_from_supabase(force_wait=False):
     """
     하이브리드 2단계 고속 동기화:
     1단계: Supabase Storage에서 3MB 마스터 압축 파일(master_*.json.gz)을 0.3초 만에 병렬 다운로드하여 Base Memory 구축
     2단계: Supabase DB 테이블에서 최신 Delta 레코드를 동기화하여 실시간 병합
     """
+    global _is_syncing
     if "YOUR_PROJECT_REF" in SUPABASE_URL:
+        _cloud_sync_done.set()
         return
+
+    with _lock:
+        if _is_syncing:
+            return
+        _is_syncing = True
 
     headers = {
         "apikey": SUPABASE_ANON_KEY,
@@ -742,21 +788,30 @@ def sync_from_supabase():
             logging.warning(f"Supabase DB [{table_name}] 동기화 실패: {e}")
 
     def _async_hybrid_sync():
-        # 1단계: Storage Master 초고속 병렬 로드 (0.3초)
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            for cat, (fn, cache) in MASTER_FILES.items():
-                executor.submit(_download_master_storage, cat, fn, cache)
+        global _is_syncing
+        try:
+            # 1단계: Storage Master 초고속 병렬 로드 (0.3초)
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                executor.submit(_download_master_storage, "general", "master_general.json.gz", _global_cache)
+                executor.submit(_download_master_storage, "items", "master_items.json.gz", _items_cache)
+                executor.submit(_download_master_storage, "books", "master_books.json.gz", _books_cache)
 
-        # 2단계: DB Table Live Delta 동기화
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            executor.submit(_sync_single_table, "general", TABLE_MAP["general"], _global_cache)
-            executor.submit(_sync_single_table, "items", TABLE_MAP["items"], _items_cache)
-            executor.submit(_sync_single_table, "books", TABLE_MAP["books"], _books_cache)
+            # 2단계: DB Table Live Delta 동기화
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                executor.submit(_sync_single_table, "general", TABLE_MAP["general"], _global_cache)
+                executor.submit(_sync_single_table, "items", TABLE_MAP["items"], _items_cache)
+                executor.submit(_sync_single_table, "books", TABLE_MAP["books"], _books_cache)
 
-        # 3단계: 로컬 백업 자동 저장
-        save_memory()
+            # 3단계: 로컬 백업 자동 저장
+            save_memory()
+        finally:
+            _is_syncing = False
+            _cloud_sync_done.set()
 
-    threading.Thread(target=_async_hybrid_sync, daemon=True).start()
+    t = threading.Thread(target=_async_hybrid_sync, daemon=True)
+    t.start()
+    if force_wait:
+        t.join(timeout=10.0)
 
 
 def upload_to_supabase(cache_dict, category="general"):

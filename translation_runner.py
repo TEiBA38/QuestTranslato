@@ -1334,12 +1334,31 @@ class TranslationMixin:
             if patchouli_map or lang_map or custom_map:
                 import mod_jar_extractor
                 import os
+                import re
                 import tkinter.messagebox as mb
-                output_zip = os.path.join(modpack_dir, "QuestTranslatorPro_Pack.zip")
+
+                # 인스턴스 폴더명 감지 (예: "All the Mods 9")
+                modpack_name = os.path.basename(modpack_dir.rstrip(os.sep))
+                # 번역 대상 언어 추출 (예: "한국어 (Korean)" -> "Korean")
+                lang_match = re.search(r'\((.*?)\)', target_lang)
+                clean_lang = lang_match.group(1).strip() if lang_match else target_lang.strip()
+                pack_filename = f"{modpack_name}[{clean_lang}].zip"
+
+                output_zip = os.path.join(modpack_dir, pack_filename)
                 mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map)
-                self.log(f"🎉 통합 리소스팩 생성 완료!\n경로: {output_zip}")
+                self.log(f"🎉 통합 리소스팩 생성 완료!\n파일명: {pack_filename}\n경로: {output_zip}")
+
+                # 마인크래프트 resourcepacks 폴더에도 자동 복사 배치
+                rp_dir = os.path.join(modpack_dir, "resourcepacks")
+                if os.path.isdir(rp_dir):
+                    try:
+                        import shutil
+                        shutil.copy2(output_zip, os.path.join(rp_dir, pack_filename))
+                        self.log(f"📦 마인크래프트 resourcepacks 폴더에도 자동 연동되었습니다: {pack_filename}")
+                    except Exception as e:
+                        logging.debug(f"resourcepacks 폴더 복사 실패: {e}")
                 
-                msg = "모드팩 전체 번역이 완료되었습니다!\n마인크래프트 리소스팩 설정에서 'QuestTranslatorPro_Pack.zip' 하나만 적용해주세요."
+                msg = f"모드팩 전체 번역이 완료되었습니다!\n\n생성된 리소스팩: '{pack_filename}'\n마인크래프트 리소스팩 설정에서 적용해주세요."
                 if not custom_map.get("pi_xml"):
                     mods_dir = os.path.join(modpack_dir, "mods")
                     if os.path.isdir(mods_dir) and any('draconic' in f.lower() or 'projectintelligence' in f.lower() for f in os.listdir(mods_dir)):

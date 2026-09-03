@@ -114,37 +114,46 @@ def _translate_wrapper(text, api_key, translate_fn, reference_map=None, target_l
     if MOCK_MODE:
         return _mock_translate(text)
 
-    cached_translation = get_reference_translation(text, reference_map)
+    # 서식 코드 분리 (Google, DeepL 등 특수문자 오류 엔진 보호)
+    prefix, clean_text, suffix = translation_memory._extract_formatting(text)
+    if not clean_text:
+        return text
+
+    cached_translation = get_reference_translation(clean_text, reference_map) or get_reference_translation(text, reference_map)
     if cached_translation is not None:
-        return cached_translation
+        return translation_memory._restore_formatting(cached_translation, prefix, suffix)
         
     if is_item:
-        global_cached = translation_memory.get_cached_item_translation(text, target_lang)
+        global_cached = translation_memory.get_cached_item_translation(clean_text, target_lang) or translation_memory.get_cached_item_translation(text, target_lang)
     elif is_book:
-        global_cached = translation_memory.get_cached_book_translation(text, target_lang)
+        global_cached = translation_memory.get_cached_book_translation(clean_text, target_lang) or translation_memory.get_cached_book_translation(text, target_lang)
     else:
-        global_cached = translation_memory.get_cached_translation(text, target_lang)
+        global_cached = translation_memory.get_cached_translation(clean_text, target_lang) or translation_memory.get_cached_translation(text, target_lang)
         
     if global_cached is not None:
-        return global_cached
+        return translation_memory._restore_formatting(global_cached, prefix, suffix)
 
-    translated = translate_fn(text, api_key)
+    translated = translate_fn(clean_text, api_key)
     if translated is None or not str(translated).strip():
         return text
 
-    if str(translated).strip() == str(text).strip():
+    if str(translated).strip() == str(clean_text).strip():
         if target_lang == "한국어 (Korean)":
-            return apply_builtin_quest_style_translation(text)
-        return text
+            translated = apply_builtin_quest_style_translation(clean_text)
+        else:
+            translated = clean_text
         
-    if is_item:
-        translation_memory.add_item_to_memory(text, translated, target_lang)
-    elif is_book:
-        translation_memory.add_book_to_memory(text, translated, target_lang)
-    else:
-        translation_memory.add_to_memory(text, translated, target_lang)
+    final_res = translation_memory._restore_formatting(translated, prefix, suffix)
 
-    return translated
+    if not MOCK_MODE:
+        if is_item:
+            translation_memory.add_item_to_memory(clean_text, translated, target_lang)
+        elif is_book:
+            translation_memory.add_book_to_memory(clean_text, translated, target_lang)
+        else:
+            translation_memory.add_to_memory(clean_text, translated, target_lang)
+
+    return final_res
 
 
 def is_code_or_id(text):
@@ -571,7 +580,7 @@ ENGINES = {
     "DeepL": "deepl",
     "Google Translate": "google",
     "OpenAI": "openai",
-    "🧪 테스트 모드 (Mock)": "mock",
+    "🧪 테스트 모드 (Mock - API 미호출)": "mock",
 }
 
 

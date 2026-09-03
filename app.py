@@ -13,6 +13,7 @@ UI 구성(_setup_ui)과 생명주기 메서드만 담고,
 import os
 import json
 import sys
+import threading
 
 # PyInstaller noconsole 모드에서 stdout/stderr이 없을 때 발생하는 크래시 방지
 if sys.stdout is None:
@@ -125,6 +126,7 @@ if ctk is not None and TkinterDnD is not None:
 
             self._show_startup_loading()
             self.after(100, self._apply_responsive_layout)
+            self.after(2000, self._start_background_update_check)
 
         def _build_header(self):
             self.hero_frame = ctk.CTkFrame(self, fg_color="#121217", corner_radius=18, border_width=1, border_color="#23232b")
@@ -132,7 +134,7 @@ if ctk is not None and TkinterDnD is not None:
             self.hero_frame.grid_columnconfigure(1, weight=1)
 
             title_frame = ctk.CTkFrame(self.hero_frame, fg_color="transparent")
-            title_frame.grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(12, 0))
+            title_frame.grid(row=0, column=0, sticky="w", padx=16, pady=(12, 0))
 
             from constants import APP_VERSION
             ctk.CTkLabel(title_frame, text="Quest Translator Pro",
@@ -143,6 +145,23 @@ if ctk is not None and TkinterDnD is not None:
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                          text_color="#a1a1aa").pack(side="left", padx=(8, 0), pady=(8, 0))
 
+            self.check_update_btn = ctk.CTkButton(
+                title_frame, text="🔄 업데이트 확인", width=95, height=24,
+                font=ctk.CTkFont(family=FONT_NAME, size=11),
+                fg_color="#27272a", hover_color="#3f3f46", text_color="#d4d4d8",
+                command=self._on_manual_check_update
+            )
+            self.check_update_btn.pack(side="left", padx=(12, 0), pady=(6, 0))
+
+            self.update_banner_btn = ctk.CTkButton(
+                self.hero_frame, text="✨ 새 버전 출시! 클릭하여 업데이트",
+                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                fg_color="#ea580c", hover_color="#c2410c", text_color="#ffffff",
+                height=30, corner_radius=15,
+                command=self._on_click_update_banner
+            )
+            self.pending_update_info = None
+
             self.phase_label = ctk.CTkLabel(self.hero_frame, text="STEP 1/2 · 모드팩 선택",
                                             font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                                             text_color="#fb923c")
@@ -152,6 +171,92 @@ if ctk is not None and TkinterDnD is not None:
             self.screen_container.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 14))
             self.screen_container.grid_rowconfigure(0, weight=1)
             self.screen_container.grid_columnconfigure(0, weight=1)
+
+        def _start_background_update_check(self):
+            res = []
+            def _worker():
+                try:
+                    import updater
+                    info = updater.check_for_updates(timeout=6.0)
+                    res.append(info)
+                except Exception as e:
+                    import logging
+                    logging.debug(f"백그라운드 업데이트 확인 실패: {e}")
+            threading.Thread(target=_worker, daemon=True).start()
+
+            def _poll_bg():
+                if not res:
+                    self.after(200, _poll_bg)
+                    return
+                info = res[0]
+                if info.get("has_update"):
+                    self.pending_update_info = info
+                    self._show_update_banner()
+
+            self.after(200, _poll_bg)
+
+        def _show_update_banner(self):
+            if hasattr(self, "update_banner_btn") and self.pending_update_info:
+                latest = self.pending_update_info.get("latest_version", "")
+                self.update_banner_btn.configure(text=f"✨ 새 버전({latest}) 출시! 클릭하여 업데이트")
+                self.update_banner_btn.grid(row=0, column=1, sticky="e", padx=16, pady=(12, 0))
+
+        def _on_click_update_banner(self):
+            if self.pending_update_info:
+                import updater
+                updater.show_update_dialog(self, self.pending_update_info)
+
+        def _on_manual_check_update(self):
+            self.check_update_btn.configure(state="disabled", text="확인 중...")
+            res = []
+            def _worker():
+                import updater
+                from constants import APP_VERSION
+                try:
+                    info = updater.check_for_updates(timeout=6.0)
+                except Exception as e:
+                    info = {"has_update": False, "latest_version": APP_VERSION, "error": str(e)}
+                res.append(info)
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+            def _poll_manual():
+                if not res:
+                    self.after(100, _poll_manual)
+                    return
+                
+                info = res[0]
+                from constants import APP_VERSION
+                try:
+                    self.check_update_btn.configure(state="normal", text="🔄 업데이트 확인")
+                    if info.get("error"):
+                        from tkinter import messagebox
+                        messagebox.showwarning("업데이트 확인 실패", f"버전 정보를 확인하는 중 오류가 발생했습니다:\n{info['error']}")
+                    elif info.get("has_update"):
+                        self.pending_update_info = info
+                        self._show_update_banner()
+                        import updater
+                        updater.show_update_dialog(self, info)
+                    else:
+                        latest_v = info.get("latest_version") or APP_VERSION
+                        from tkinter import messagebox
+                        messagebox.showinfo(
+                            "업데이트 확인",
+                            f"현재 최신 버전({APP_VERSION})을 사용하고 있습니다! 🎉\n\n"
+                            f"• 내 프로그램 버전: {APP_VERSION}\n"
+                            f"• GitHub 최신 릴리즈: {latest_v}\n\n"
+                            "새로운 업데이트가 출시되면 다시 알려드립니다."
+                        )
+                except Exception as err:
+                    import logging
+                    logging.error(f"Manual update check error: {err}")
+                finally:
+                    try:
+                        self.check_update_btn.configure(state="normal", text="🔄 업데이트 확인")
+                    except Exception:
+                        pass
+
+            self.after(100, _poll_manual)
 
         def _build_screens(self):
             self.home_screen = ctk.CTkFrame(self.screen_container, fg_color="transparent")

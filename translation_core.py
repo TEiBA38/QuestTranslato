@@ -323,6 +323,10 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                         for t in j["targets"]:
                             samples.append(t[2])
                 
+                context.set_status("🌐 클라우드 마스터 번역 메모리 확인 중...")
+                translation_memory.load_memory()
+                translation_memory.wait_for_cloud_sync(timeout=6.0)
+
                 import random
                 # 캐시에 없는 텍스트만 추출하여 용어 추출 필요 여부 판단
                 uncached_samples = [s for s in samples if translation_memory.get_cached_translation(s, target_lang) is None]

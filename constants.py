@@ -1,5 +1,5 @@
 FONT_NAME = "Malgun Gothic"
-APP_VERSION = "v1.5.1"
+APP_VERSION = "v1.5.2"
 TARGET_EXTENSIONS = ('.snbt', '.json', '.lang', '.hqm')
 SCAN_IGNORE_DIRS = {
     '.git', '.venv', '__pycache__',
@@ -116,26 +116,40 @@ LANG_CODES = {
 }
 
 
-def has_non_latin(text):
-    """텍스트에 비라틴 문자(한글, CJK, 키릴 등)가 포함되어 있는지 확인합니다.
-    이미 번역된 텍스트를 감지하는 데 사용됩니다."""
-    for ch in str(text):
-        code = ord(ch)
-        if 0xAC00 <= code <= 0xD7A3:  # Hangul
-            return True
-        if 0x3040 <= code <= 0x30FF:  # Hiragana / Katakana
-            return True
-        if 0x4E00 <= code <= 0x9FFF:  # CJK Unified
-            return True
-        if 0x0400 <= code <= 0x04FF:  # Cyrillic
-            return True
-    return False
-
-
 def has_hangul(text):
-    """텍스트에 한글이 포함되어 있는지 확인합니다."""
+    """텍스트에 한글(완성형 및 자모)이 포함되어 있는지 확인합니다."""
     for ch in str(text):
         code = ord(ch)
-        if 0xAC00 <= code <= 0xD7A3:
+        if 0xAC00 <= code <= 0xD7A3:  # 완성형 한글
+            return True
+        if 0x3131 <= code <= 0x318E:  # 한글 자모
             return True
     return False
+
+
+def has_non_latin(text, target_lang="한국어 (Korean)"):
+    """텍스트가 대상 언어로 이미 번역되었는지 확인합니다 (기본: 한국어/한글 기준 검사).
+    외산 모드팩의 러시아어(키릴)나 중국어 번역이 들어있어도 오판하지 않습니다."""
+    if not text:
+        return False
+    if "한국어" in target_lang or "Korean" in target_lang:
+        return has_hangul(text)
+    elif "일본어" in target_lang or "Japanese" in target_lang:
+        for ch in str(text):
+            code = ord(ch)
+            if 0x3040 <= code <= 0x30FF:  # Hiragana / Katakana
+                return True
+        return False
+    elif "중국어" in target_lang or "Chinese" in target_lang:
+        for ch in str(text):
+            code = ord(ch)
+            if 0x4E00 <= code <= 0x9FFF:  # CJK Unified
+                return True
+        return False
+    elif "러시아어" in target_lang or "Russian" in target_lang:
+        for ch in str(text):
+            code = ord(ch)
+            if 0x0400 <= code <= 0x04FF:  # Cyrillic
+                return True
+        return False
+    return has_hangul(text)

@@ -26,7 +26,7 @@ except Exception:
     ImageTk = None
     ImageOps = None
 
-from constants import FONT_NAME, TARGET_EXTENSIONS, SCAN_IGNORE_DIRS, has_non_latin
+from constants import FONT_NAME, TARGET_EXTENSIONS, SCAN_IGNORE_DIRS, has_hangul
 
 SCAN_EXCLUDE_CANDIDATE_DIRS = {'translation_output', 'install'}
 THUMBNAIL_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico")
@@ -38,30 +38,46 @@ class ModpackMixin:
     # ====================================================================
 
     def _count_translatable_files(self, base_dir):
+        import glob
+        mp_name = os.path.basename(base_dir.rstrip(os.sep))
+        
+        # 1. 모드팩 전체 한글화(리소스팩) 존재 여부 검사
+        pack_candidates = glob.glob(os.path.join(base_dir, f"{mp_name}[*].zip"))
+        pack_candidates.extend(glob.glob(os.path.join(base_dir, "resourcepacks", f"{mp_name}[*].zip")))
+        pack_candidates.extend(glob.glob(os.path.join(base_dir, "resourcepacks", "*Korean*.zip")))
+        pack_candidates.extend(glob.glob(os.path.join(base_dir, "resourcepacks", "*한글*.zip")))
+        legacy_pack = os.path.join(base_dir, "QuestTranslatorPro_Pack.zip")
+        legacy_rp = os.path.join(base_dir, "resourcepacks", "QuestTranslatorPro_Pack.zip")
+        pack_translated = os.path.exists(legacy_pack) or os.path.exists(legacy_rp) or len(pack_candidates) > 0
+
+        # 2. 퀘스트 번역 여부 및 파일 수 스캔
         count = 0
-        already_translated = False
+        quest_translated = False
         sample_scanned = 0
+
         for root, dirs, files_list in os.walk(base_dir):
             dirs[:] = [d for d in dirs if d.lower() not in SCAN_IGNORE_DIRS]
             for filename in files_list:
-                if filename.lower().endswith(TARGET_EXTENSIONS) or filename.lower().endswith('.lang'):
-                    if filename.lower().endswith(TARGET_EXTENSIONS):
+                fn_lower = filename.lower()
+                if fn_lower.endswith(TARGET_EXTENSIONS) or fn_lower.endswith('.lang'):
+                    if fn_lower.endswith(TARGET_EXTENSIONS):
                         count += 1
-                    if not already_translated:
-                        is_quest_file = filename.lower().endswith(('.snbt', '.hqm', '.json', '.lang', '.cfg', '.txt')) and ('quest' in root.lower() or 'hqm' in root.lower() or filename.lower().endswith(('.snbt', '.hqm')))
-                        if is_quest_file:
-                            if filename.lower() in ["ko_kr.json", "ko_kr.lang", "ko_kr.snbt"]:
-                                already_translated = True
-                            elif sample_scanned < 100:
+                    if not quest_translated:
+                        # 백업 파일(.bak)이 존재하거나 ko_kr 퀘스트 파일이 있는 경우
+                        if fn_lower.endswith(('.snbt.bak', '.hqm.bak', 'defaultquests.json.bak')) or fn_lower in ["ko_kr.json", "ko_kr.lang", "ko_kr.snbt"]:
+                            quest_translated = True
+                        elif fn_lower.endswith(('.snbt', '.hqm', '.json', '.lang', '.cfg', '.txt')) and ('quest' in root.lower() or 'hqm' in root.lower() or fn_lower.endswith(('.snbt', '.hqm'))):
+                            if sample_scanned < 100:
                                 try:
                                     with open(os.path.join(root, filename), 'r', encoding='utf-8', errors='ignore') as f:
                                         content = f.read(8192)
-                                        if has_non_latin(content):
-                                            already_translated = True
+                                        # 순수 한글이 포함된 경우에만 '한글 번역됨'으로 판정
+                                        if has_hangul(content):
+                                            quest_translated = True
                                     sample_scanned += 1
                                 except Exception:
                                     pass
-        return count, already_translated
+        return count, quest_translated, pack_translated
 
     def _scan_modpack_candidates(self, instance_root):
         candidates = []
@@ -71,9 +87,9 @@ class ModpackMixin:
             name_lower = entry.name.lower()
             if name_lower in SCAN_IGNORE_DIRS or name_lower in SCAN_EXCLUDE_CANDIDATE_DIRS:
                 continue
-            file_count, already_translated = self._count_translatable_files(entry.path)
+            file_count, quest_translated, pack_translated = self._count_translatable_files(entry.path)
             if file_count > 0:
-                candidates.append((entry.name, entry.path, file_count, already_translated))
+                candidates.append((entry.name, entry.path, file_count, quest_translated, pack_translated))
         candidates.sort(key=lambda item: (-item[2], item[0].lower()))
         return candidates
 
@@ -261,7 +277,12 @@ class ModpackMixin:
             name = candidate[0]
             path = candidate[1]
             file_count = candidate[2]
-            already_translated = candidate[3] if len(candidate) > 3 else False
+            quest_translated = candidate[3] if len(candidate) > 3 else False
+            pack_translated = candidate[4] if len(candidate) > 4 else False
+
+            # 앱 히스토리에 퀘스트 번역 완료 기록이 있는 경우
+            if path in getattr(self.app_state, 'translated_history', {}):
+                quest_translated = True
 
             selected = (self.selected_modpack_path == path)
             
@@ -298,17 +319,33 @@ class ModpackMixin:
                          fg_color="#ea580c", text_color="#fff7ed",
                          corner_radius=6, padx=6, pady=1).place(relx=0.98, rely=0.08, anchor="ne")
 
-            if already_translated or path in getattr(self.app_state, 'translated_history', {}):
-                history_time = getattr(self.app_state, 'translated_history', {}).get(path, "원본")
-                ctk.CTkLabel(thumbnail_wrap, text="번역됨" if history_time == "원본" else "한글화됨",
-                             font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
-                             fg_color="#16a34a", text_color="#f0fdf4",
-                             corner_radius=6, padx=6, pady=1).place(relx=0.02, rely=0.08, anchor="nw")
-                subtitle_text = f"번역됨: {history_time}" if history_time != "원본" else "이미 번역이 포함된 팩입니다"
+            # 퀘스트 번역 및 전체 한글화(리소스팩) 상태별 뱃지 & 서브타이틀
+            if quest_translated and pack_translated:
+                badge_text = "🎉 전체 한글화 완료"
+                badge_color = "#16a34a"  # 에메랄드 그린
+                subtitle_text = "퀘스트: 완료 · 리소스팩: 생성됨"
                 subtitle_color = "#34d399"
+            elif quest_translated:
+                badge_text = "📜 퀘스트 번역됨"
+                badge_color = "#0284c7"  # 청명한 블루
+                subtitle_text = "퀘스트: 완료 · 리소스팩: 미생성"
+                subtitle_color = "#38bdf8"
+            elif pack_translated:
+                badge_text = "📦 리소스팩 생성됨"
+                badge_color = "#8b5cf6"  # 퍼플
+                subtitle_text = "퀘스트: 미번역 · 리소스팩: 생성됨"
+                subtitle_color = "#a78bfa"
             else:
-                subtitle_text = "My Modpack Instance"
+                badge_text = None
+                badge_color = None
+                subtitle_text = "퀘스트: 미번역 · 리소스팩: 미생성"
                 subtitle_color = "#9ca3af"
+
+            if badge_text:
+                ctk.CTkLabel(thumbnail_wrap, text=badge_text,
+                             font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
+                             fg_color=badge_color, text_color="#f0fdf4",
+                             corner_radius=6, padx=6, pady=1).place(relx=0.02, rely=0.08, anchor="nw")
 
             ctk.CTkLabel(card,
                          text=(name[:22] + "...") if len(name) > 22 else name,

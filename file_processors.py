@@ -134,22 +134,25 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                     progress_callback(current_count, total_unique)
 
         # 3단계: 번역된 고유 결과를 전체 인덱스 및 메모리에 전파
+        import translation_engines
+        is_mock = getattr(translation_engines, "MOCK_MODE", False)
+
         for idx_in_global, orig, unique_pos in zip(uncached_indices, uncached_texts, uncached_to_unique_map):
             res = unique_translated[unique_pos]
             translated_results[idx_in_global] = res
-            is_item = is_item_flags[idx_in_global] if is_item_flags else False
-            is_book = is_book_flags[idx_in_global] if is_book_flags else False
-            if is_item:
-                translation_memory.add_item_to_memory(orig, res, target_lang)
-            elif is_book:
-                translation_memory.add_book_to_memory(orig, res, target_lang)
-            else:
-                translation_memory.add_to_memory(orig, res, target_lang)
+            if not is_mock:
+                is_item = is_item_flags[idx_in_global] if is_item_flags else False
+                is_book = is_book_flags[idx_in_global] if is_book_flags else False
+                if is_item:
+                    translation_memory.add_item_to_memory(orig, res, target_lang)
+                elif is_book:
+                    translation_memory.add_book_to_memory(orig, res, target_lang)
+                else:
+                    translation_memory.add_to_memory(orig, res, target_lang)
 
     finally:
-        translation_memory.save_memory()
-        
-    return translated_results
+        if not getattr(translation_engines, "MOCK_MODE", False):
+            translation_memory.save_memory()
         
     return translated_results
 
@@ -183,10 +186,9 @@ def extract_snbt_targets(content):
     targets = []
 
     kv_pattern = re.compile(r'^\s*("ftbquests\.[^"]+"\s*:\s*)"((?:[^"\\]|\\.)*)"(.*)$')
+    array_start_pattern = re.compile(r'^(.*?\b(text|description|hover)\s*:\s*\[\s*)(.*)$')
+    key_pattern = re.compile(r'^(.*?\b(title|subtitle|description|text|hover)\s*:\s*)"((?:[^"\\]|\\.)*)"(.*)$')
     array_text_pattern = re.compile(r'^(\s*)"((?:[^"\\]|\\.)*)"(.*)$')
-    title_pattern = re.compile(r'^(.*?title:\s*)"((?:[^"\\]|\\.)+)"(.*)$')
-    subtitle_pattern = re.compile(r'^(.*?subtitle:\s*)"((?:[^"\\]|\\.)+)"(.*)$')
-    single_line_array_pattern = re.compile(r'^(.*?\[\s*)"((?:[^"\\]|\\.)*)"(.*)$')
 
     for idx, line in enumerate(lines):
         stripped = line.strip()
@@ -194,6 +196,7 @@ def extract_snbt_targets(content):
         if stripped.startswith(ignore_keys):
             continue
 
+        # 1. "ftbquests.xxx": "..."
         kv_match = kv_pattern.search(line)
         if kv_match:
             prefix, orig_text, suffix = kv_match.groups()
@@ -201,40 +204,49 @@ def extract_snbt_targets(content):
                 targets.append((idx, prefix, orig_text, suffix))
             continue
 
-        if stripped.startswith(("text: [", "description: [", "hover: [")):
+        # 2. 배열 시작 감지 (description: [, text: [, hover: [ 등 띄어쓰기 유무 무관)
+        arr_match = array_start_pattern.search(line)
+        if arr_match:
             in_text_block = True
-            match = single_line_array_pattern.search(line)
+            line_rem = arr_match.group(3)
+            # 같은 줄에 따옴표 문자열이 즉시 있는 경우 (예: description: [ "Line 1" ])
+            match = re.search(r'^(.*?)"((?:[^"\\]|\\.)*)"(.*)$', line_rem)
             if match:
-                prefix, orig_text, suffix = match.groups()
+                inner_pre, orig_text, inner_suf = match.groups()
+                full_prefix = arr_match.group(1) + inner_pre
                 if orig_text.strip() and not is_code_or_id(orig_text):
-                    targets.append((idx, prefix, orig_text, suffix))
-
-            if stripped.endswith("]"):
-                in_text_block = False
+                    targets.append((idx, full_prefix, orig_text, inner_suf))
+                # 따옴표 밖(suffix)에 닫는 대괄호가 있는지 확인
+                if "]" in inner_suf:
+                    in_text_block = False
+            else:
+                if "]" in line_rem:
+                    in_text_block = False
             continue
 
+        # 3. 본문 배열 내부 텍스트 라인
         if in_text_block:
             match = array_text_pattern.search(line)
             if match:
                 prefix, orig_text, suffix = match.groups()
                 if orig_text.strip() and not is_code_or_id(orig_text):
                     targets.append((idx, prefix, orig_text, suffix))
-
-            if "]" in stripped:
-                in_text_block = False
+                # ⚠️ 핵심 버그 수정: 본문 안의 [Shift] 같은 대괄호로 인해 배열이 조기 종료되지 않도록 따옴표 밖(suffix)만 검사!
+                if "]" in suffix:
+                    in_text_block = False
+            else:
+                # 따옴표가 없는 순수 닫는 괄호 라인 (예: "]" 또는 "],")
+                if "]" in stripped:
+                    in_text_block = False
             continue
 
-        title_match = title_pattern.search(line)
-        subtitle_match = subtitle_pattern.search(line)
-
-        if title_match:
-            prefix, orig_text, suffix = title_match.groups()
-            if not is_code_or_id(orig_text):
+        # 4. 단일 문자열 속성 (title: "...", subtitle: "...", description: "...", text: "...")
+        key_match = key_pattern.search(line)
+        if key_match:
+            prefix, key_name, orig_text, suffix = key_match.groups()
+            if orig_text.strip() and not is_code_or_id(orig_text):
                 targets.append((idx, prefix, orig_text, suffix))
-        elif subtitle_match:
-            prefix, orig_text, suffix = subtitle_match.groups()
-            if not is_code_or_id(orig_text):
-                targets.append((idx, prefix, orig_text, suffix))
+            continue
 
     return lines, targets
 
@@ -242,6 +254,16 @@ def extract_snbt_targets(content):
 def rebuild_snbt(lines, translated_map):
     new_lines = [translated_map.get(idx, line) for idx, line in enumerate(lines)]
     return "\n".join(new_lines)
+
+
+def _clean_snbt_string(text):
+    if not isinstance(text, str):
+        text = str(text)
+    # 줄바꿈 문자를 SNBT 표준 이스케이프(\n)로 변환
+    text = text.replace('\r\n', '\\n').replace('\n', '\\n')
+    # 기존 이스케이프 중복 방지 후 안전하게 쌍따옴표 이스케이프
+    text = text.replace('\\"', '"')
+    return text.replace('"', '\\"')
 
 
 def process_snbt_with_progress(content, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, verbose=True, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):
@@ -273,7 +295,7 @@ def process_snbt_with_progress(content, engine_key, api_key, is_paid=False, prog
             log_prefix=log_pref, custom_url=custom_url
         )
         for (line_idx, prefix, _, suffix), trans_text in zip(targets, translated_texts):
-            final_text = str(trans_text).replace('"', '\\"')
+            final_text = _clean_snbt_string(trans_text)
             translated_map[line_idx] = f'{prefix}"{final_text}"{suffix}'
     else:
         for count, (line_idx, prefix, orig_text, suffix) in enumerate(targets, 1):
@@ -289,7 +311,7 @@ def process_snbt_with_progress(content, engine_key, api_key, is_paid=False, prog
             else:
                 trans = translate_google(raw_orig, api_key, reference_map=reference_map, target_lang=target_lang)
 
-            final_text = str(trans if trans else raw_orig).replace('"', '\\"')
+            final_text = _clean_snbt_string(trans if trans else raw_orig)
             translated_map[line_idx] = f'{prefix}"{final_text}"{suffix}'
 
             if progress_callback and count % 5 == 0:
