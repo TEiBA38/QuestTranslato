@@ -82,6 +82,24 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
     total_unique = len(unique_texts)
     unique_translated = [None] * total_unique
 
+    def _flush_completed_to_memory():
+        """현재까지 번역 완료된 항목들을 실시간으로 translation_memory에 안전하게 기록 (취소 시 유실 방지)"""
+        import translation_engines
+        if getattr(translation_engines, "MOCK_MODE", False):
+            return
+        for idx_in_global, orig, unique_pos in zip(uncached_indices, uncached_texts, uncached_to_unique_map):
+            res = unique_translated[unique_pos]
+            if res is not None:
+                translated_results[idx_in_global] = res
+                is_item = is_item_flags[idx_in_global] if is_item_flags else False
+                is_book = is_book_flags[idx_in_global] if is_book_flags else False
+                if is_item:
+                    translation_memory.add_item_to_memory(orig, res, target_lang)
+                elif is_book:
+                    translation_memory.add_book_to_memory(orig, res, target_lang)
+                else:
+                    translation_memory.add_to_memory(orig, res, target_lang)
+
     try:
         if is_paid:
             batch_size = 50
@@ -111,12 +129,15 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                 for future in as_completed(futures):
                     if cancel_checker and cancel_checker():
                         executor.shutdown(wait=False, cancel_futures=True)
+                        _flush_completed_to_memory()
+                        translation_memory.save_memory()
                         raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
                     start_idx, texts_chunk, res_texts = future.result()
                     
                     for off, res in enumerate(res_texts):
                         unique_translated[start_idx + off] = res
                     
+                    _flush_completed_to_memory()
                     completed_items += len(texts_chunk)
                     if progress_callback:
                         progress_callback(completed_items, total_unique)
@@ -127,6 +148,8 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
             batch_size = 40 if engine_key in ("gemini_batch", "local_ai") else 15
             for i in range(0, total_unique, batch_size):
                 if cancel_checker and cancel_checker():
+                    _flush_completed_to_memory()
+                    translation_memory.save_memory()
                     raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
 
                 texts_chunk = unique_texts[i:i + batch_size]
@@ -151,27 +174,16 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                 for off, res in enumerate(res_texts):
                     unique_translated[i + off] = res
 
+                _flush_completed_to_memory()
                 if progress_callback:
                     progress_callback(current_count, total_unique)
 
-        # 3단계: 번역된 고유 결과를 전체 인덱스 및 메모리에 전파
-        import translation_engines
-        is_mock = getattr(translation_engines, "MOCK_MODE", False)
-
-        for idx_in_global, orig, unique_pos in zip(uncached_indices, uncached_texts, uncached_to_unique_map):
-            res = unique_translated[unique_pos]
-            translated_results[idx_in_global] = res
-            if not is_mock:
-                is_item = is_item_flags[idx_in_global] if is_item_flags else False
-                is_book = is_book_flags[idx_in_global] if is_book_flags else False
-                if is_item:
-                    translation_memory.add_item_to_memory(orig, res, target_lang)
-                elif is_book:
-                    translation_memory.add_book_to_memory(orig, res, target_lang)
-                else:
-                    translation_memory.add_to_memory(orig, res, target_lang)
+        # 최종 전파 확인
+        _flush_completed_to_memory()
 
     finally:
+        _flush_completed_to_memory()
+        import translation_engines
         if not getattr(translation_engines, "MOCK_MODE", False):
             translation_memory.save_memory()
         

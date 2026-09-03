@@ -752,7 +752,7 @@ def sync_from_supabase(force_wait=False):
     def _download_master_storage(category, filename, target_cache):
         """Storage에서 master_*.json.gz 초고속 단일 다운로드 및 decompress"""
         try:
-            url = f"{SUPABASE_URL}/storage/v1/object/public/{STORAGE_BUCKET}/{filename}"
+            url = f"{SUPABASE_URL}/storage/v1/object/public/{STORAGE_BUCKET}/{filename}?t={int(time.time())}"
             r = requests.get(url, headers=headers, timeout=15)
             if r.status_code == 200 and r.content:
                 raw_bytes = r.content
@@ -904,9 +904,11 @@ def upload_to_supabase(cache_dict, category="general"):
 # Memory Editor API (검색, 수정, 삭제)
 # ====================================================================
 
-def search_memory(query, category="all", target_lang="한국어 (Korean)", limit=100):
+def search_memory(query, category="all", target_lang="한국어 (Korean)", limit=100, search_field="all"):
     """
     모든 캐시(일반, 아이템, 책)에서 주어진 검색어(query)를 포함하는 원문/번역문을 찾습니다.
+    Args:
+        search_field (str): 'all' (원문+번역문 통합), 'src' (영어 원문만), 'tgt' (한글 번역문만)
     반환 형태: [{"category": "items", "src": "...", "tgt": "..."}]
     """
     if not _global_loaded: load_memory()
@@ -921,7 +923,13 @@ def search_memory(query, category="all", target_lang="한국어 (Korean)", limit
             if lang_key.replace(" ", "") != target_lang_norm:
                 continue
             for src, tgt in entries.items():
-                if query_lower in src.lower() or query_lower in tgt.lower():
+                match = False
+                if search_field in ("all", "src") and query_lower in src.lower():
+                    match = True
+                elif search_field in ("all", "tgt") and query_lower in tgt.lower():
+                    match = True
+
+                if match:
                     results.append({"category": cat_name, "src": src, "tgt": tgt})
                     if len(results) >= limit:
                         return True
@@ -1003,3 +1011,258 @@ def delete_memory_entry(category, original_src, target_lang="한국어 (Korean)"
                 
         threading.Thread(target=_async_delete, daemon=True).start()
     return True
+
+
+# ====================================================================
+# 오역률 및 분탕 방지 검증 알고리즘 (Two-Pillar Validation)
+# ====================================================================
+
+_CHOSUNG_LIST = ['ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ']
+_JUNGSUNG_LIST = ['ㅏ', 'ㅐ', 'ㅑ', 'ㅒ', 'ㅓ', 'ㅔ', 'ㅕ', 'ㅖ', 'ㅗ', 'ㅘ', 'ㅙ', 'ㅚ', 'ㅛ', 'ㅜ', 'ㅝ', 'ㅞ', 'ㅟ', 'ㅠ', 'ㅡ', 'ㅢ', 'ㅣ']
+_JONGSUNG_LIST = ['', 'ㄱ', 'ㄲ', 'ㄳ', 'ㄴ', 'ㄵ', 'ㄶ', 'ㄷ', 'ㄹ', 'ㄺ', 'ㄻ', 'ㄼ', 'ㄽ', 'ㄾ', 'ㄿ', 'ㅀ', 'ㅁ', 'ㅂ', 'ㅄ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ']
+
+def _decompose_korean(text):
+    """한글 음절을 초성, 중성(모음), 종성으로 분해합니다."""
+    syllables = []
+    for ch in text:
+        code = ord(ch)
+        if 0xAC00 <= code <= 0xD7A3:
+            s_idx = code - 0xAC00
+            cho = _CHOSUNG_LIST[s_idx // (21 * 28)]
+            jung = _JUNGSUNG_LIST[(s_idx % (21 * 28)) // 28]
+            jong = _JONGSUNG_LIST[s_idx % 28]
+            syllables.append((cho, jung, jong))
+    return syllables
+
+_ENG_KO_CONSONANTS = {
+    't': ['ㅌ', 'ㄸ', 'ㄷ'], 'n': ['ㄴ', 'ㅇ', 'ㅁ'], 'k': ['ㅋ', 'ㄲ', 'ㄱ'], 'c': ['ㅋ', 'ㄲ', 'ㄱ', 'ㅅ'],
+    'r': ['ㄹ'], 'l': ['ㄹ'], 's': ['ㅅ', 'ㅆ', 'ㅈ'], 'p': ['ㅍ', 'ㅃ', 'ㅂ'], 'b': ['ㅂ', 'ㅃ'],
+    'm': ['ㅁ'], 'd': ['ㄷ', 'ㄸ'], 'g': ['ㄱ', 'ㄲ'], 'f': ['ㅍ'], 'v': ['ㅂ', 'ㅍ'],
+    'z': ['ㅈ', 'ㅉ', 'ㅅ'], 'j': ['ㅈ', 'ㅉ'], 'h': ['ㅎ'], 'w': ['ㅇ', 'ㅂ'], 'y': ['ㅇ']
+}
+
+_ENG_KO_VOWELS = {
+    'i': ['ㅣ', 'ㅔ', 'ㅏ'],
+    'e': ['ㅔ', 'ㅓ', 'ㅐ', 'ㅣ'],
+    'a': ['ㅏ', 'ㅐ', 'ㅔ', 'ㅓ'],
+    'o': ['ㅗ', 'ㅓ', 'ㅏ', 'ㅜ'],
+    'u': ['ㅓ', 'ㅜ', 'ㅠ'],
+}
+
+def _compare_syllables_phonetic(ref_ko, cand_ko):
+    """두 한글 단어의 음절 단위 자음 및 모음 일치도를 교차 검증합니다."""
+    ref_s = _decompose_korean(ref_ko)
+    cand_s = _decompose_korean(cand_ko)
+    if not ref_s or not cand_s:
+        return 0.0, 0.0, 0.0
+
+    min_len = min(len(ref_s), len(cand_s))
+    max_len = max(len(ref_s), len(cand_s))
+
+    c_match = 0.0
+    v_match = 0.0
+    total_c = 0
+
+    for i in range(min_len):
+        r_cho, r_jung, r_jong = ref_s[i]
+        c_cho, c_jung, c_jong = cand_s[i]
+
+        # 1. 모음 일치
+        if r_jung == c_jung:
+            v_match += 1.0
+        elif (r_jung, c_jung) in [('ㅓ', 'ㅔ'), ('ㅔ', 'ㅐ'), ('ㅓ', 'ㅗ'), ('ㅗ', 'ㅜ'), ('ㅡ', 'ㅣ'), ('ㅣ', 'ㅔ')]:
+            v_match += 0.5
+
+        # 2. 초성 일치
+        total_c += 1
+        if r_cho == c_cho:
+            c_match += 1.0
+        elif (r_cho, c_cho) in [('ㅅ', 'ㅈ'), ('ㅌ', 'ㄷ'), ('ㅋ', 'ㄱ'), ('ㄹ', 'ㄴ'), ('ㅂ', 'ㅃ')]:
+            c_match += 0.7
+
+        # 3. 종성 일치
+        if r_jong or c_jong:
+            total_c += 1
+            if r_jong == c_jong:
+                c_match += 1.0
+            elif (r_jong, c_jong) in [('ㄴ', 'ㅇ'), ('ㅅ', 'ㄷ'), ('ㄱ', 'ㅋ')]:
+                c_match += 0.7
+
+    c_rate = c_match / (total_c + (max_len - min_len))
+    v_rate = v_match / max_len
+    # 자음 x 모음 상호곱: 모음이나 자음 중 하나가 0이면 발음 성립 불가!
+    combined_score = c_rate * v_rate
+    return c_rate, v_rate, combined_score
+
+_CORE_MINECRAFT_DICT = {
+    'tin': ['주석', '틴'], 'lead': ['납', '리드'], 'silver': ['은', '실버'], 'copper': ['구리', '코퍼'],
+    'iron': ['철', '아이언'], 'gold': ['금', '골드'], 'diamond': ['다이아몬드', '다이아'],
+    'emerald': ['에메랄드'], 'nether': ['네더', '지옥'], 'ender': ['엔더'],
+    'sword': ['검', '소드', '칼'], 'pickaxe': ['곡괭이'], 'axe': ['도끼'], 'shovel': ['삽'], 'hoe': ['괭이'],
+    'ingot': ['주괴', '인곳'], 'ore': ['광석'], 'dust': ['가루', '분말'], 'plate': ['판', '플레이트'],
+    'gear': ['톱니바퀴', '기어'], 'rod': ['막대', '로드'], 'block': ['블록'],
+    'construct': ['컨스트럭트', '구조물', '건설'], 'resonant': ['공진', '공명', '레조넌트', '공명하는'],
+    'tinkers': ['팅커스', '틴커즈', '팅커'], 'tinker': ['팅커', '땜장이'],
+    'conduit': ['도관', '콘듀잇'], 'capacitor': ['축전기', '커패시터'], 'pulverizer': ['분쇄기', '펄버라이저'],
+    'smelter': ['제련기', '용광로', '스멜터'],
+    'certus quartz': ['서투스 석영', '서투스 쿼츠'],
+    'charged certus quartz': ['충전된 서투스 석영', '충전된 서투스 쿼츠'],
+    'certus quartz dust': ['서투스 석영 가루', '서투스 쿼츠 가루'],
+    'create': ['크리에이트'],
+    'mekanism': ['메카니즘'],
+    'farmer\'s delight': ['파머스 딜라이트'],
+}
+
+def calculate_translation_error_rate(src_word, tgt_word, reference_hint=None, target_lang="한국어 (Korean)"):
+    """
+    원문(영어)과 번역문(한글) 간의 연관성 및 오역률(Error Rate, 0~100%)을 정밀 계산합니다.
+    Args:
+        src_word (str): 영어 원문 단어
+        tgt_word (str): 사용자가 입력/수정한 한글 번역문
+        reference_hint (str, optional): 기존 번역문 또는 찾을 단어 힌트
+    Returns:
+        tuple: (error_rate_pct, validity_pct, verdict_type, details_str)
+               - verdict_type: 'pass' (오역률 <= 35%), 'warning' (35% < 오역률 < 70%), 'block' (오역률 >= 70%)
+    """
+    if not src_word or not tgt_word:
+        return 100.0, 0.0, "block", "원문 또는 번역문이 비어있습니다."
+
+    src_clean = src_word.strip()
+    tgt_clean = tgt_word.strip()
+
+    # 영문 원문과 동일하게 유지해야 하는 코드/단위/ID인 경우 정상 처리
+    if src_clean == tgt_clean:
+        return 0.0, 100.0, "pass", "원문 유지(코드/식별자/단위)"
+
+    # 한글이 전혀 없는 경우
+    if not has_hangul(tgt_clean):
+        if re.match(r'^[\d\s\-_./%+:;]+$', tgt_clean):
+            return 0.0, 100.0, "pass", "숫자/기호 서식"
+        return 100.0, 0.0, "block", "한글 번역이 누락되었습니다."
+
+    # 1. 마인크래프트 기본 핵심 어휘 사전 대조 (사전 등록 단어는 오역률 0.0% 엄격 기준 적용)
+    src_lower = src_clean.lower()
+    if src_lower in _CORE_MINECRAFT_DICT:
+        accepted_list = _CORE_MINECRAFT_DICT[src_lower]
+        for accepted in accepted_list:
+            if accepted == tgt_clean:
+                return 0.0, 100.0, "pass", f"핵심 사전 공식 번역 일치 ('{tgt_clean}')"
+            if accepted in tgt_clean or tgt_clean in accepted:
+                return 0.0, 100.0, "pass", f"핵심 사전 복합어/파생어 일치 ('{accepted}')"
+        # 사전에 명확히 등록된 단어인데 사전 허용 목록에 없는 단어로 변경하려는 경우: 0% 기준 엄격 적용하여 원천 차단!
+        return 100.0, 0.0, "hard_block", f"공식 핵심 사전 등재 단어는 0% 표준어 외 변경 불가 (표준어: {', '.join(accepted_list)})"
+
+    target_lang_norm = target_lang.replace(" ", "")
+
+    # 2. 의미 사전 (Semantic Memory) 대조
+    cached_candidates = []
+    with _lock:
+        for cache in (_items_cache, _global_cache, _books_cache):
+            for lang_key, c_dict in cache.items():
+                if lang_key.replace(" ", "") == target_lang_norm:
+                    if src_clean in c_dict:
+                        cached_tgt = c_dict[src_clean]
+                        if cached_tgt == tgt_clean:
+                            return 0.0, 100.0, "pass", f"캐시 DB 사전 일치 ('{cached_tgt}')"
+                        if tgt_clean in cached_tgt or cached_tgt in tgt_clean:
+                            return 10.0, 90.0, "pass", f"캐시 DB 파생어 일치 ('{cached_tgt}')"
+                        cached_candidates.append(cached_tgt)
+
+    # 3. reference_hint, 핵심 사전 또는 캐시 내 기존 번역과 음절 단위 자음x모음 상호 교차 검증
+    best_cache_validity = 0.0
+    best_cache_c = 0.0
+    best_cache_v = 0.0
+
+    targets_to_compare = []
+    if src_lower in _CORE_MINECRAFT_DICT:
+        targets_to_compare.extend(_CORE_MINECRAFT_DICT[src_lower])
+    if reference_hint and has_hangul(reference_hint):
+        targets_to_compare.append(reference_hint.strip())
+    targets_to_compare.extend(cached_candidates)
+
+    vowel_distortion_detected = False
+    for ref in targets_to_compare:
+        c_rate, v_rate, score = _compare_syllables_phonetic(ref, tgt_clean)
+        if c_rate >= 0.7 and v_rate == 0.0:
+            vowel_distortion_detected = True
+        if score > best_cache_validity:
+            best_cache_validity = score
+            best_cache_c = c_rate
+            best_cache_v = v_rate
+
+    # 4. 직접 영-한 발음 분석 (기존 캐시가 전부 오역이더라도 올바른 새 번역을 100% 통과시키도록 항상 병행 검사)
+    cand_syllables = _decompose_korean(tgt_clean)
+    letters = re.findall(r'[a-z]', src_lower)
+    eng_cons = [c for c in letters if c not in ('a', 'e', 'i', 'o', 'u')]
+    eng_vowels = [c for c in letters if c in ('a', 'e', 'i', 'o', 'u')]
+
+    ko_cons = []
+    ko_vowels = []
+    for s in cand_syllables:
+        ko_cons.append(s[0])
+        if s[2]: ko_cons.append(s[2])
+        if s[1] != 'ㅡ': # ㅡ는 보조모음이므로 영문 모음 매칭 대상에서 제외
+            ko_vowels.append(s[1])
+
+    c_matches = 0.0
+    k_idx = 0
+    for ec in eng_cons:
+        poss = _ENG_KO_CONSONANTS.get(ec, [])
+        matched = False
+        for i in range(k_idx, len(ko_cons)):
+            if ko_cons[i] in poss:
+                c_matches += 1.0
+                k_idx = i + 1
+                matched = True
+                break
+        if not matched and ec == 'r':
+            c_matches += 0.8
+
+    effective_cons = max(1, len([c for c in eng_cons if c != 'r']))
+    direct_c = c_matches / max(effective_cons, len(ko_cons))
+
+    v_matches = 0.0
+    v_idx = 0
+    for ev in eng_vowels:
+        poss_v = _ENG_KO_VOWELS.get(ev, [])
+        for i in range(v_idx, len(ko_vowels)):
+            if ko_vowels[i] in poss_v:
+                v_matches += 1.0
+                v_idx = i + 1
+                break
+    direct_v = v_matches / max(1, max(len(eng_vowels), len(ko_vowels)))
+    direct_validity = direct_c * direct_v
+
+    if len(tgt_clean) == 1 and len(src_clean) >= 4:
+        direct_validity *= 0.1
+
+    # 기존 캐시 대조와 직접 영-한 발음 분석 중 더 타당한(높은) 점수 채택!
+    # 단, 기등록 단어에 대한 명백한 모음 왜곡 분탕(퉁크서, 탕쿠사 등)이 감지된 경우 direct_validity로 우회 불가!
+    if vowel_distortion_detected and best_cache_validity == 0.0:
+        final_validity = 0.0
+        final_c = best_cache_c
+        final_v = 0.0
+    elif direct_validity >= best_cache_validity:
+        final_validity = direct_validity
+        final_c = direct_c
+        final_v = direct_v
+    else:
+        final_validity = best_cache_validity
+        final_c = best_cache_c
+        final_v = best_cache_v
+
+    validity_pct = round(max(0.0, min(100.0, final_validity * 100.0)), 1)
+    error_rate_pct = round(100.0 - validity_pct, 1)
+
+    has_established = bool(src_lower in _CORE_MINECRAFT_DICT or cached_candidates)
+
+    if error_rate_pct <= 35.0:
+        return error_rate_pct, validity_pct, "pass", f"자음/모음 음운 정상 일치 (자음 {final_c*100:.0f}%, 모음 {final_v*100:.0f}%)"
+    elif error_rate_pct < 70.0:
+        return error_rate_pct, validity_pct, "warning", f"발음 유사도 다소 낮음 (자음 {final_c*100:.0f}%, 모음 {final_v*100:.0f}%)"
+    else:
+        if has_established:
+            return error_rate_pct, validity_pct, "hard_block", f"기존 데이터/표준어 왜곡 분탕 감지 (자음 {final_c*100:.0f}%, 모음 {final_v*100:.0f}%)"
+        else:
+            return error_rate_pct, validity_pct, "block", f"원문과 연관성 없는 왜곡 감지 (신규 미등록 단어)"
+

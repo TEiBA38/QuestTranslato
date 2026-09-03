@@ -5,6 +5,7 @@ QuestTranslatorApp이 이 클래스를 상속해서 사용합니다.
 import threading
 import os
 import time
+import re
 
 try:
     import customtkinter as ctk
@@ -591,7 +592,13 @@ class UIScreensMixin:
 
     def request_cancel(self):
         self.app_state.cancel_requested = True
-        self.log("🛑 사용자가 번역 취소를 요청했습니다. 작업을 중단합니다...")
+        self.log("🛑 사용자가 번역 취소를 요청했습니다. 지금까지 번역된 내용을 로컬 캐시에 저장 중...")
+        try:
+            import translation_memory
+            translation_memory.save_memory()
+            self.log("💾 [로컬 캐시 보존] 지금까지 번역된 내용이 로컬 캐시에 안전하게 영구 저장되었습니다!")
+        except Exception as e:
+            pass
         self.btn_cancel.configure(state="disabled")
 
     def is_cancelled(self):
@@ -600,39 +607,216 @@ class UIScreensMixin:
     def open_memory_editor(self):
         editor = ctk.CTkToplevel(self)
         editor.title("🔍 인게임 오역 수정기 (Memory Editor)")
-        editor.geometry("900x700")
+        editor.geometry("960x780")
+        editor.minsize(860, 680)
         editor.grab_set()
 
-        # 상단 검색 바
-        search_frame = ctk.CTkFrame(editor)
-        search_frame.pack(fill="x", padx=10, pady=10)
+        # ----------------------------------------------------------------
+        # 1. 상단 검색 및 데이터 추가 바
+        # ----------------------------------------------------------------
+        search_frame = ctk.CTkFrame(editor, fg_color="transparent")
+        search_frame.pack(fill="x", padx=14, pady=(12, 6))
 
         query_var = ctk.StringVar()
-        entry_search = ctk.CTkEntry(search_frame, textvariable=query_var, placeholder_text="검색어 (영어 원문 또는 한글 번역문 입력...)", width=400)
-        entry_search.pack(side="left", padx=5)
+        entry_search = ctk.CTkEntry(
+            search_frame, textvariable=query_var,
+            placeholder_text="검색어 (영어 원문 또는 한글 번역문 입력...)",
+            font=ctk.CTkFont(family=FONT_NAME, size=12), width=270
+        )
+        entry_search.pack(side="left", padx=(0, 6))
+
+        field_var = ctk.StringVar(value="통합 (원문+번역)")
+        field_combo = ctk.CTkComboBox(
+            search_frame, variable=field_var,
+            values=["통합 (원문+번역)", "영어 원문(EN)만", "한글 번역(KO)만"],
+            font=ctk.CTkFont(family=FONT_NAME, size=12), width=130
+        )
+        field_combo.pack(side="left", padx=(0, 6))
 
         cat_var = ctk.StringVar(value="all")
-        cat_combo = ctk.CTkComboBox(search_frame, variable=cat_var, values=["all", "items", "general", "books"], width=100)
-        cat_combo.pack(side="left", padx=5)
+        cat_combo = ctk.CTkComboBox(
+            search_frame, variable=cat_var,
+            values=["all", "items", "general", "books"],
+            font=ctk.CTkFont(family=FONT_NAME, size=12), width=85
+        )
+        cat_combo.pack(side="left", padx=(0, 6))
 
-        # 결과 리스트 
-        list_frame = ctk.CTkScrollableFrame(editor, width=860, height=400)
-        list_frame.pack(fill="both", expand=True, padx=10, pady=5)
-        
-        # 하단 수정 바
-        edit_frame = ctk.CTkFrame(editor)
-        edit_frame.pack(fill="x", padx=10, pady=10)
-        
-        ctk.CTkLabel(edit_frame, text="원문:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
-        lbl_original = ctk.CTkLabel(edit_frame, text="", width=600, anchor="w", fg_color="gray20", corner_radius=6)
-        lbl_original.grid(row=0, column=1, padx=5, pady=5, sticky="we")
-        
-        ctk.CTkLabel(edit_frame, text="번역:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
-        entry_translated = ctk.CTkEntry(edit_frame, width=600)
-        entry_translated.grid(row=1, column=1, padx=5, pady=5, sticky="we")
+        btn_search = ctk.CTkButton(
+            search_frame, text="🔍 검색", width=75,
+            font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+            command=lambda: do_search()
+        )
+        btn_search.pack(side="left", padx=(0, 10))
 
+        # [➕ 새 번역 데이터 추가] 버튼
+        btn_add_data = ctk.CTkButton(
+            search_frame, text="➕ 새 번역 데이터 추가", width=160,
+            font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+            fg_color="#0284c7", hover_color="#0369a1",
+            command=lambda: open_add_dialog()
+        )
+        btn_add_data.pack(side="right")
+
+        # ----------------------------------------------------------------
+        # 2. 일괄 작업 바 (선택 항목 치환 / 삭제)
+        # ----------------------------------------------------------------
+        batch_frame = ctk.CTkFrame(editor, fg_color="#18181d", corner_radius=10, border_width=1, border_color="#2a2a33")
+        batch_frame.pack(fill="x", padx=14, pady=(0, 8))
+
+        batch_top_row = ctk.CTkFrame(batch_frame, fg_color="transparent")
+        batch_top_row.pack(fill="x", padx=10, pady=(8, 4))
+
+        btn_select_all = ctk.CTkButton(
+            batch_top_row, text="☑ 전체 선택", width=85, height=26,
+            font=ctk.CTkFont(family=FONT_NAME, size=11),
+            fg_color="#334155", hover_color="#475569",
+            command=lambda: set_all_selection(True)
+        )
+        btn_select_all.pack(side="left", padx=(0, 6))
+
+        btn_deselect_all = ctk.CTkButton(
+            batch_top_row, text="선택 해제", width=75, height=26,
+            font=ctk.CTkFont(family=FONT_NAME, size=11),
+            fg_color="#27272a", hover_color="#3f3f46",
+            command=lambda: set_all_selection(False)
+        )
+        btn_deselect_all.pack(side="left", padx=(0, 12))
+
+        lbl_selected_count = ctk.CTkLabel(
+            batch_top_row, text="선택: 0개 / 검색: 0개",
+            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+            text_color="#38bdf8"
+        )
+        lbl_selected_count.pack(side="left")
+
+        batch_replace_row = ctk.CTkFrame(batch_frame, fg_color="transparent")
+        batch_replace_row.pack(fill="x", padx=10, pady=(0, 8))
+
+        ctk.CTkLabel(
+            batch_replace_row, text="찾을 단어:",
+            font=ctk.CTkFont(family=FONT_NAME, size=11), text_color="#cbd5e1"
+        ).pack(side="left", padx=(0, 4))
+
+        find_var = ctk.StringVar()
+        entry_find = ctk.CTkEntry(
+            batch_replace_row, textvariable=find_var, placeholder_text="예: 팃커스, 휭커스, 틴커즈, 커스 (다중 가능)",
+            font=ctk.CTkFont(family=FONT_NAME, size=11), width=230
+        )
+        entry_find.pack(side="left", padx=(0, 8))
+
+        ctk.CTkLabel(
+            batch_replace_row, text="➡️ 바꿀 단어:",
+            font=ctk.CTkFont(family=FONT_NAME, size=11), text_color="#cbd5e1"
+        ).pack(side="left", padx=(0, 4))
+
+        replace_var = ctk.StringVar()
+        entry_replace = ctk.CTkEntry(
+            batch_replace_row, textvariable=replace_var, placeholder_text="예: 팅커스 (0% 표준어)",
+            font=ctk.CTkFont(family=FONT_NAME, size=11), width=160
+        )
+        entry_replace.pack(side="left", padx=(0, 10))
+
+        btn_batch_replace = ctk.CTkButton(
+            batch_replace_row, text="⚡ 선택 항목 일괄 치환", height=28,
+            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+            fg_color="#ea580c", hover_color="#c2410c",
+            command=lambda: do_batch_replace()
+        )
+        btn_batch_replace.pack(side="left", padx=(0, 6))
+
+        btn_batch_delete = ctk.CTkButton(
+            batch_replace_row, text="🗑️ 선택 항목 일괄 삭제", height=28,
+            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+            fg_color="#b91c1c", hover_color="#991b1b",
+            command=lambda: do_batch_delete()
+        )
+        btn_batch_delete.pack(side="right")
+
+        # ----------------------------------------------------------------
+        # 3. 결과 리스트 
+        # ----------------------------------------------------------------
+        list_frame = ctk.CTkScrollableFrame(editor, height=320, fg_color="#111115", corner_radius=10)
+        list_frame.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+
+        # ----------------------------------------------------------------
+        # 4. 하단 개별 수정 바
+        # ----------------------------------------------------------------
+        edit_frame = ctk.CTkFrame(editor, fg_color="#18181d", corner_radius=10, border_width=1, border_color="#2a2a33")
+        edit_frame.pack(fill="x", padx=14, pady=(0, 12))
+
+        ctk.CTkLabel(
+            edit_frame, text="원문:",
+            font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+            text_color="#cbd5e1"
+        ).grid(row=0, column=0, padx=10, pady=(10, 4), sticky="e")
+
+        lbl_original = ctk.CTkLabel(
+            edit_frame, text="(목록에서 항목을 선택하세요)", anchor="w",
+            font=ctk.CTkFont(family=FONT_NAME, size=12),
+            fg_color="#111113", corner_radius=6, height=28
+        )
+        lbl_original.grid(row=0, column=1, padx=(0, 10), pady=(10, 4), sticky="we")
+
+        ctk.CTkLabel(
+            edit_frame, text="번역:",
+            font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+            text_color="#cbd5e1"
+        ).grid(row=1, column=0, padx=10, pady=4, sticky="e")
+
+        entry_translated = ctk.CTkEntry(
+            edit_frame, font=ctk.CTkFont(family=FONT_NAME, size=12),
+            fg_color="#111113", border_color="#52525b"
+        )
+        entry_translated.grid(row=1, column=1, padx=(0, 10), pady=4, sticky="we")
+        edit_frame.grid_columnconfigure(1, weight=1)
+
+        # 용어집 고정 등록 체크박스 (오역 재발 방지)
+        chk_glossary_var = ctk.BooleanVar(value=True)
+        chk_glossary = ctk.CTkCheckBox(
+            edit_frame, text="📖 용어집(Glossary)에도 고정 등록하여 향후 AI 오역 재발 방지",
+            variable=chk_glossary_var,
+            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+            text_color="#38bdf8",
+            checkmark_color="#ffffff",
+            fg_color="#0284c7"
+        )
+        chk_glossary.grid(row=2, column=1, padx=(0, 10), pady=(2, 6), sticky="w")
+
+        action_btn_row = ctk.CTkFrame(edit_frame, fg_color="transparent")
+        action_btn_row.grid(row=3, column=1, padx=(0, 10), pady=(4, 10), sticky="we")
+
+        btn_save = ctk.CTkButton(
+            action_btn_row, text="💾 저장 및 즉시 적용", height=32,
+            font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+            fg_color="#15803d", hover_color="#166534",
+            command=lambda: do_save()
+        )
+        btn_save.pack(side="left", padx=(0, 8))
+
+        btn_delete_single = ctk.CTkButton(
+            action_btn_row, text="🗑️ 이 항목 삭제", height=32,
+            font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+            fg_color="#b91c1c", hover_color="#991b1b",
+            command=lambda: do_delete_single()
+        )
+        btn_delete_single.pack(side="left")
+
+        # ----------------------------------------------------------------
+        # 로직 구현 함수들
+        # ----------------------------------------------------------------
         selected_item = {"category": None, "src": None, "tgt": None}
-        
+        current_items = []
+        check_vars = []
+
+        def update_selected_count():
+            cnt = sum(1 for v in check_vars if v.get())
+            lbl_selected_count.configure(text=f"선택: {cnt}개 / 검색: {len(current_items)}개")
+
+        def set_all_selection(select_all=True):
+            for v in check_vars:
+                v.set(select_all)
+            update_selected_count()
+
         def on_item_click(item):
             selected_item["category"] = item["category"]
             selected_item["src"] = item["src"]
@@ -641,47 +825,12 @@ class UIScreensMixin:
             entry_translated.delete(0, 'end')
             entry_translated.insert(0, item["tgt"])
 
-        def do_search(*args):
-            for widget in list_frame.winfo_children():
-                widget.destroy()
-                
-            q = query_var.get().strip()
-            if len(q) < 2: return
-            
-            import translation_memory
-            results = translation_memory.search_memory(q, category=cat_var.get(), limit=50)
-            
-            for i, r in enumerate(results):
-                row = ctk.CTkFrame(list_frame)
-                row.pack(fill="x", pady=2)
-                
-                cat_badge = ctk.CTkLabel(row, text=f"[{r['category']}]", width=60, text_color="cyan")
-                cat_badge.pack(side="left", padx=5)
-                
-                text_label = ctk.CTkLabel(row, text=f"{r['src'][:50]}... ➡️ {r['tgt'][:50]}...", anchor="w")
-                text_label.pack(side="left", fill="x", expand=True, padx=5)
-                
-                btn = ctk.CTkButton(row, text="선택", width=60, command=lambda item=r: on_item_click(item))
-                btn.pack(side="right", padx=5)
-
-        entry_search.bind("<Return>", do_search)
-        btn_search = ctk.CTkButton(search_frame, text="검색", command=do_search, width=80)
-        btn_search.pack(side="left", padx=5)
-
-        def do_save():
-            if not selected_item["src"]: return
-            import translation_memory
-            new_val = entry_translated.get().strip()
-            if not new_val: return
-            translation_memory.update_memory_entry(selected_item["category"], selected_item["src"], new_val)
-            
-            # 리소스팩 핫패치 (Hot-patch)
+        def apply_hotpatch(old_tgt, new_tgt):
             if hasattr(self.app_state, 'modpack_dir') and self.app_state.modpack_dir:
                 import os, glob
                 import mod_jar_extractor
                 mp_dir = self.app_state.modpack_dir
                 mp_name = os.path.basename(mp_dir.rstrip(os.sep))
-                # 신규 명명 규칙: {모드팩이름}[*.zip 또는 레거시 QuestTranslatorPro_Pack.zip 탐색
                 candidates = glob.glob(os.path.join(mp_dir, f"{mp_name}[*].zip"))
                 candidates.extend(glob.glob(os.path.join(mp_dir, "resourcepacks", f"{mp_name}[*].zip")))
                 legacy = os.path.join(mp_dir, "QuestTranslatorPro_Pack.zip")
@@ -690,24 +839,367 @@ class UIScreensMixin:
 
                 for pz in set(candidates):
                     try:
-                        mod_jar_extractor.hotpatch_resource_pack(pz, selected_item["tgt"], new_val)
-                        self.log(f"✅ 리소스팩({os.path.basename(pz)}) 핫패치 완료! 게임 내에서 F3+T를 누르면 즉시 반영됩니다.")
+                        mod_jar_extractor.hotpatch_resource_pack(pz, old_tgt, new_tgt)
+                        self.log(f"✅ 리소스팩({os.path.basename(pz)}) 핫패치 완료! ({old_tgt} ➡️ {new_tgt})")
                     except Exception as e:
                         self.log(f"⚠️ 리소스팩 핫패치 실패 ({os.path.basename(pz)}): {e}")
-            
-            selected_item["tgt"] = new_val # 업데이트
-            self.show_messagebox("info", "성공", "수정사항이 저장되었습니다.")
+
+        def register_glossary_rule(src, tgt):
+            if not chk_glossary_var.get() or not src or not tgt:
+                return
+            clean_src = src.strip()
+            clean_tgt = tgt.strip()
+            if hasattr(self, 'app_state') and self.app_state:
+                target_lang = self.target_lang_combo.get() if hasattr(self, 'target_lang_combo') else "한국어 (Korean)"
+                self.app_state.glossary[clean_src] = clean_tgt
+                if target_lang not in self.app_state.glossaries_by_lang:
+                    self.app_state.glossaries_by_lang[target_lang] = {}
+                self.app_state.glossaries_by_lang[target_lang][clean_src] = clean_tgt
+                self.save_user_settings()
+                self.log(f"📖 [용어집 등록] '{clean_src}' = '{clean_tgt}' 규칙 저장 (향후 AI 오역 재발 방지)")
+
+        def do_search(*args):
+            for widget in list_frame.winfo_children():
+                widget.destroy()
+            current_items.clear()
+            check_vars.clear()
+
+            q = query_var.get().strip()
+            if len(q) < 2:
+                update_selected_count()
+                return
+
+            import translation_memory
+            f_val = field_var.get()
+            s_field = "src" if "EN" in f_val else ("tgt" if "KO" in f_val else "all")
+            results = translation_memory.search_memory(q, category=cat_var.get(), limit=300, search_field=s_field)
+
+            for i, r in enumerate(results):
+                current_items.append(r)
+                var = ctk.BooleanVar(value=False)
+                check_vars.append(var)
+
+                row = ctk.CTkFrame(list_frame, fg_color="#18181d")
+                row.pack(fill="x", pady=2, padx=4)
+
+                chk = ctk.CTkCheckBox(row, text="", variable=var, width=24, command=update_selected_count)
+                chk.pack(side="left", padx=(6, 2))
+
+                cat_badge = ctk.CTkLabel(row, text=f"[{r['category']}]", width=60, text_color="#38bdf8")
+                cat_badge.pack(side="left", padx=4)
+
+                text_label = ctk.CTkLabel(row, text=f"{r['src'][:45]}... ➡️ {r['tgt'][:45]}...", anchor="w")
+                text_label.pack(side="left", fill="x", expand=True, padx=4)
+
+                btn = ctk.CTkButton(row, text="선택", width=55, height=26, command=lambda item=r: on_item_click(item))
+                btn.pack(side="right", padx=6)
+
+            update_selected_count()
+
+        entry_search.bind("<Return>", do_search)
+
+        def do_save():
+            if not selected_item["src"]:
+                return
+            import translation_memory
+            new_val = entry_translated.get().strip()
+            if not new_val:
+                return
+            old_val = selected_item["tgt"]
+            src_val = selected_item["src"]
+
+            # 오역률 및 분탕 방지 검증 (Two-Pillar Validation)
+            err_rate, val_rate, verdict, det = translation_memory.calculate_translation_error_rate(
+                src_val, new_val, reference_hint=old_val
+            )
+            self.log(f"🔍 [오역률 검증] 원문 '{src_val}' ➡️ 수정 '{new_val}' | 오역률: {err_rate:.1f}% (연관도: {val_rate:.1f}%) | 판정: {verdict.upper()} ({det})")
+
+            if verdict == "hard_block":
+                # 기존에 이미 철, 아이언 등 명확한 번역 데이터가 존재하는 단어는 무관 단어로 변조 원천 차단 (우회 불가)
+                messagebox.showerror(
+                    "수정 불가 (기등록 데이터 오염 차단)",
+                    f"'{src_val}'(은)는 이미 표준 번역 또는 기존 데이터가 확립된 단어입니다.\n\n"
+                    f"• 분석 판정: 🚨 오역률 {err_rate:.1f}%\n"
+                    f"• 상세 사유: {det}\n\n"
+                    f"⚠️ 기존 정상 단어를 무관한 단어로 변조하는 행위는 캐시 및 클라우드 오염 방지를 위해 절대 허용되지 않습니다.",
+                    parent=editor
+                )
+                return
+            elif verdict == "block":
+                # 캐시나 사전에 없던 '완전히 새로운 신규 단어'일 때만 확인 팝업 허용
+                force_apply = messagebox.askyesno(
+                    "신규 번역 등록 확인",
+                    f"입력하신 번역문은 기존 데이터가 없는 신규 단어이며, 발음상 유사도가 낮습니다.\n\n"
+                    f"• 분석 판정: ⚠️ 오역률 {err_rate:.1f}% (연관도: {val_rate:.1f}%)\n"
+                    f"• 상세 사유: {det}\n\n"
+                    f"완전히 새로운 고유 의역/번역으로 신규 등록하시겠습니까?",
+                    parent=editor
+                )
+                if not force_apply:
+                    return
+            elif verdict == "warning":
+                confirm = messagebox.askyesno(
+                    "오역률 주의 확인",
+                    f"입력하신 번역문의 오역률이 다소 높게 감지되었습니다.\n\n"
+                    f"• 분석 판정: ⚠️ 오역률 {err_rate:.1f}% (연관도: {val_rate:.1f}%)\n"
+                    f"• 상세 사유: {det}\n\n"
+                    f"정말로 이 번역문으로 저장하시겠습니까?",
+                    parent=editor
+                )
+                if not confirm:
+                    return
+
+            translation_memory.update_memory_entry(selected_item["category"], src_val, new_val)
+            apply_hotpatch(old_val, new_val)
+            register_glossary_rule(src_val, new_val)
+            selected_item["tgt"] = new_val
+            self.show_messagebox("info", "성공", f"수정사항이 저장되었습니다. (오역률: {err_rate:.1f}%)")
             do_search()
 
-        def do_delete():
-            if not selected_item["src"]: return
+        def do_delete_single():
+            if not selected_item["src"]:
+                return
             import translation_memory
             translation_memory.delete_memory_entry(selected_item["category"], selected_item["src"])
             self.show_messagebox("info", "성공", "항목이 삭제되었습니다.")
             do_search()
 
-        btn_save = ctk.CTkButton(edit_frame, text="💾 저장 및 즉시 적용", command=do_save, fg_color="green")
-        btn_save.grid(row=2, column=1, sticky="w", padx=5, pady=10)
-        
-        btn_delete = ctk.CTkButton(edit_frame, text="🗑️ 잘못된 번역 삭제", command=do_delete, fg_color="red")
-        btn_delete.grid(row=2, column=1, sticky="e", padx=5, pady=10)
+        def do_batch_replace():
+            selected_indices = [i for i, v in enumerate(check_vars) if v.get()]
+            if not selected_indices:
+                self.show_messagebox("warning", "경고", "치환할 항목을 하나 이상 선택(체크)해주세요.")
+                return
+
+            find_term = find_var.get().strip()
+            repl_term = replace_var.get().strip()
+            if not repl_term:
+                self.show_messagebox("warning", "경고", "바꿀 단어를 입력해주세요.")
+                return
+
+            import translation_memory
+
+            # 일괄 치환 전 핵심 단어 오역률 검증
+            target_basis = query_var.get().strip() or find_term or "단어"
+            err_rate, val_rate, verdict, det = translation_memory.calculate_translation_error_rate(
+                target_basis, repl_term, reference_hint=find_term
+            )
+            self.log(f"🔍 [일괄 치환 오역률 검증] 기준 '{target_basis}' ➡️ 치환 '{repl_term}' | 오역률: {err_rate:.1f}% (연관도: {val_rate:.1f}%) | 판정: {verdict.upper()} ({det})")
+
+            if verdict == "hard_block":
+                messagebox.showerror(
+                    "일괄 치환 불가 (기등록 데이터 오염 차단)",
+                    f"기준 단어 '{target_basis}'(은)는 이미 확립된 데이터가 존재하는 단어입니다.\n\n"
+                    f"• 분석 판정: 🚨 오역률 {err_rate:.1f}%\n"
+                    f"• 상세 사유: {det}\n\n"
+                    f"⚠️ 기존 정상 단어를 무관한 단어로 일괄 변조하는 행위는 절대 허용되지 않습니다.",
+                    parent=editor
+                )
+                return
+            elif verdict == "block":
+                force_apply = messagebox.askyesno(
+                    "신규 단어 일괄 치환 확인",
+                    f"치환할 단어 '{repl_term}'(은)는 기존 데이터가 없는 신규 단어입니다.\n\n"
+                    f"• 분석 판정: ⚠️ 오역률 {err_rate:.1f}%\n"
+                    f"• 상세 사유: {det}\n\n"
+                    f"신규 번역 단어로 일괄 치환하시겠습니까?",
+                    parent=editor
+                )
+                if not force_apply:
+                    return
+            elif verdict == "warning":
+                confirm = messagebox.askyesno(
+                    "일괄 치환 주의 확인",
+                    f"치환할 단어의 오역률이 다소 높게 감지되었습니다.\n\n"
+                    f"• 분석 판정: ⚠️ 오역률 {err_rate:.1f}% (연관도: {val_rate:.1f}%)\n"
+                    f"• 상세 사유: {det}\n\n"
+                    f"선택된 항목들을 정말로 일괄 치환하시겠습니까?",
+                    parent=editor
+                )
+                if not confirm:
+                    return
+
+            updated_count = 0
+            selected_items = [current_items[i] for i in selected_indices]
+            find_terms = [t.strip() for t in re.split(r'[,|/]', find_term) if t.strip()] if find_term else []
+
+            for item in selected_items:
+                old_tgt = item["tgt"]
+                new_tgt = old_tgt
+                if find_terms:
+                    replaced_any = False
+                    for ft in find_terms:
+                        if ft in new_tgt:
+                            new_tgt = new_tgt.replace(ft, repl_term)
+                            replaced_any = True
+                    if not replaced_any:
+                        continue
+                else:
+                    new_tgt = repl_term
+
+                if new_tgt != old_tgt:
+                    translation_memory.update_memory_entry(item["category"], item["src"], new_tgt)
+                    apply_hotpatch(old_tgt, new_tgt)
+                    updated_count += 1
+
+            # 용어집 등록 (향후 오역 재발 방지)
+            q_term = query_var.get().strip()
+            if q_term and repl_term:
+                register_glossary_rule(q_term, repl_term)
+
+            # 수정 후 "오역 데이터 일괄 삭제 예/아니요" 팝업
+            unselected_items = [item for i, item in enumerate(current_items) if i not in selected_indices]
+            unselected_count = len(unselected_items)
+
+            if unselected_count > 0:
+                ask_del = messagebox.askyesno(
+                    "오역 데이터 일괄 삭제",
+                    f"총 {updated_count}개 항목이 '{repl_term}'(으)로 일괄 수정되었습니다! 🎉\n\n"
+                    f"검색 결과 중 체크하지 않은 나머지 {unselected_count}개의 이전 오역 항목들을\n"
+                    f"캐시 및 클라우드 DB에서 일괄 삭제하시겠습니까?",
+                    parent=editor
+                )
+                if ask_del:
+                    for item in unselected_items:
+                        translation_memory.delete_memory_entry(item["category"], item["src"])
+                    self.log(f"🗑️ 이전 오역 데이터 {unselected_count}개가 캐시에서 일괄 삭제되었습니다.")
+                    self.show_messagebox("info", "완료", f"수정 {updated_count}건 반영 및 나머지 오역 {unselected_count}건 삭제가 완료되었습니다.")
+                else:
+                    self.show_messagebox("info", "완료", f"총 {updated_count}개 항목이 일괄 수정되었습니다.")
+            else:
+                self.show_messagebox("info", "완료", f"총 {updated_count}개 항목이 일괄 수정되었습니다.")
+
+            do_search()
+
+        def do_batch_delete():
+            selected_indices = [i for i, v in enumerate(check_vars) if v.get()]
+            if not selected_indices:
+                self.show_messagebox("warning", "경고", "삭제할 항목을 선택해주세요.")
+                return
+
+            count = len(selected_indices)
+            confirm = messagebox.askyesno(
+                "일괄 삭제 확인",
+                f"선택한 {count}개 오역 데이터를 캐시 및 클라우드 DB에서 영구 삭제하시겠습니까?\n\n"
+                f"삭제된 데이터는 다음 번역 시 AI가 올바른 규칙으로 새로 번역하게 됩니다.",
+                parent=editor
+            )
+            if not confirm:
+                return
+
+            import translation_memory
+            for i in selected_indices:
+                item = current_items[i]
+                translation_memory.delete_memory_entry(item["category"], item["src"])
+
+            self.show_messagebox("info", "삭제 완료", f"선택한 {count}개 오역 데이터가 삭제되었습니다.")
+            do_search()
+
+        def open_add_dialog():
+            dlg = ctk.CTkToplevel(editor)
+            dlg.title("➕ 새 번역 데이터 추가")
+            dlg.geometry("520x370")
+            dlg.minsize(480, 320)
+            dlg.grab_set()
+
+            ctk.CTkLabel(
+                dlg, text="캐시 테이블에 새 번역을 직접 등록합니다.",
+                font=ctk.CTkFont(family=FONT_NAME, size=13, weight="bold"),
+                text_color="#38bdf8"
+            ).pack(padx=16, pady=(16, 8), anchor="w")
+
+            form_frame = ctk.CTkFrame(dlg, fg_color="transparent")
+            form_frame.pack(fill="both", expand=True, padx=16, pady=4)
+
+            ctk.CTkLabel(form_frame, text="카테고리:").grid(row=0, column=0, sticky="w", pady=4)
+            add_cat_var = ctk.StringVar(value="items")
+            add_cat_combo = ctk.CTkComboBox(form_frame, variable=add_cat_var, values=["items", "general", "books"], width=120)
+            add_cat_combo.grid(row=0, column=1, sticky="w", pady=4)
+
+            ctk.CTkLabel(form_frame, text="영어 원문:").grid(row=1, column=0, sticky="w", pady=4)
+            add_src_entry = ctk.CTkEntry(form_frame, placeholder_text="예: Tinkers' Construct", width=340)
+            add_src_entry.grid(row=1, column=1, sticky="we", pady=4)
+            curr_q = query_var.get().strip()
+            if curr_q:
+                add_src_entry.insert(0, curr_q)
+
+            ctk.CTkLabel(form_frame, text="한글 번역문:").grid(row=2, column=0, sticky="w", pady=4)
+            add_tgt_entry = ctk.CTkEntry(form_frame, placeholder_text="예: 팅커스 컨스트럭트", width=340)
+            add_tgt_entry.grid(row=2, column=1, sticky="we", pady=4)
+
+            add_glossary_var = ctk.BooleanVar(value=True)
+            ctk.CTkCheckBox(
+                form_frame, text="📖 용어집(Glossary)에도 고정 등록 (향후 오역 재발 방지)",
+                variable=add_glossary_var, text_color="#38bdf8", fg_color="#0284c7"
+            ).grid(row=3, column=1, sticky="w", pady=(8, 12))
+
+            form_frame.grid_columnconfigure(1, weight=1)
+
+            def do_add_save():
+                src = add_src_entry.get().strip()
+                tgt = add_tgt_entry.get().strip()
+                cat = add_cat_var.get()
+                if not src or not tgt:
+                    messagebox.showwarning("경고", "원문과 번역문을 모두 입력해주세요.", parent=dlg)
+                    return
+
+                import translation_memory
+
+                # 신규 등록 전 오역률 검증
+                err_rate, val_rate, verdict, det = translation_memory.calculate_translation_error_rate(src, tgt)
+                self.log(f"🔍 [신규 등록 오역률 검증] 원문 '{src}' ➡️ 번역 '{tgt}' | 오역률: {err_rate:.1f}% (연관도: {val_rate:.1f}%) | 판정: {verdict.upper()} ({det})")
+
+                if verdict == "hard_block":
+                    messagebox.showerror(
+                        "등록 불가 (기등록 데이터 오염 차단)",
+                        f"'{src}'(은)는 이미 표준 번역이 확립된 단어입니다.\n\n"
+                        f"• 분석 판정: 🚨 오역률 {err_rate:.1f}%\n"
+                        f"• 상세 사유: {det}\n\n"
+                        f"⚠️ 기존 정상 단어를 무관한 단어로 변조하여 등록할 수 없습니다.",
+                        parent=dlg
+                    )
+                    return
+                elif verdict == "block":
+                    force_apply = messagebox.askyesno(
+                        "신규 등록 확인",
+                        f"입력하신 번역 '{tgt}'은(는) 기존 데이터가 없는 신규 단어입니다.\n\n"
+                        f"• 분석 판정: ⚠️ 오역률 {err_rate:.1f}% (연관도: {val_rate:.1f}%)\n"
+                        f"• 상세 사유: {det}\n\n"
+                        f"신규 단어로 등록하시겠습니까?",
+                        parent=dlg
+                    )
+                    if not force_apply:
+                        return
+                elif verdict == "warning":
+                    confirm = messagebox.askyesno(
+                        "신규 등록 주의 확인",
+                        f"입력하신 번역의 오역률이 다소 높습니다 (오역률: {err_rate:.1f}%).\n\n"
+                        f"정말로 이 데이터를 캐시 테이블에 신규 등록하시겠습니까?",
+                        parent=dlg
+                    )
+                    if not confirm:
+                        return
+
+                translation_memory.update_memory_entry(cat, src, tgt)
+                apply_hotpatch(src, tgt)
+                if add_glossary_var.get():
+                    register_glossary_rule(src, tgt)
+
+                dlg.destroy()
+                self.show_messagebox("info", "등록 완료", f"'{src}' ➡️ '{tgt}' 데이터가 성공적으로 등록되었습니다! (오역률: {err_rate:.1f}%)")
+                query_var.set(src)
+                do_search()
+
+            btn_box = ctk.CTkFrame(dlg, fg_color="transparent")
+            btn_box.pack(fill="x", padx=16, pady=(0, 16))
+
+            ctk.CTkButton(
+                btn_box, text="💾 저장 및 등록",
+                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                fg_color="#15803d", hover_color="#166534",
+                command=do_add_save
+            ).pack(side="right", padx=(8, 0))
+
+            ctk.CTkButton(
+                btn_box, text="취소", fg_color="#3f3f46", hover_color="#52525b",
+                command=dlg.destroy
+            ).pack(side="right")

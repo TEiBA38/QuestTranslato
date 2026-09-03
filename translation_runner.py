@@ -386,7 +386,13 @@ class TranslationMixin:
 
         except Exception as exc:
             if "사용자에 의해 번역이 취소되었습니다" in str(exc) or getattr(self.app_state, 'cancel_requested', False):
+                try:
+                    import translation_memory
+                    translation_memory.save_memory()
+                except Exception:
+                    pass
                 self.log("⚠️ 사용자가 언어 파일 번역을 취소했습니다.")
+                self.log("💾 [로컬 캐시 보존] 취소 직전까지 번역된 모드 텍스트가 로컬 캐시에 안전하게 영구 저장되었습니다!")
             else:
                 self.log(f"❌ 언어 파일 번역 중 오류: {exc}")
                 self.show_messagebox("error", "오류", f"언어 파일 번역 중 오류가 발생했습니다:\n{exc}")
@@ -567,11 +573,23 @@ class TranslationMixin:
                         self.log(f"⚠️ 하이브리드 패치 연동 중 알림: {e}")
                     return translated_books_map
                 else:
+                    try:
+                        import translation_memory
+                        translation_memory.save_memory()
+                    except Exception:
+                        pass
                     self.log("⚠️ 번역이 취소되었습니다.")
+                    self.log("💾 [로컬 캐시 보존] 취소 직전까지 번역된 가이드북 텍스트가 로컬 캐시에 안전하게 영구 저장되었습니다!")
                     return translated_books_map
         except Exception as exc:
+            try:
+                import translation_memory
+                translation_memory.save_memory()
+            except Exception:
+                pass
             if "취소" in str(exc) or getattr(self.app_state, 'cancel_requested', False):
                 self.log("⚠️ 번역이 취소되었습니다.")
+                self.log("💾 [로컬 캐시 보존] 취소 직전까지 번역된 가이드북 텍스트가 로컬 캐시에 안전하게 영구 저장되었습니다!")
                 return locals().get('translated_books_map', {})
             else:
                 self.log(f"❌ 가이드북 번역 중 오류: {exc}")
@@ -719,8 +737,14 @@ class TranslationMixin:
             return final_custom_map
             
         except Exception as exc:
+            try:
+                import translation_memory
+                translation_memory.save_memory()
+            except Exception:
+                pass
             if "취소" in str(exc) or getattr(self.app_state, 'cancel_requested', False):
                 self.log("⚠️ 번역이 취소되었습니다.")
+                self.log("💾 [로컬 캐시 보존] 지금까지 번역된 내용이 로컬 캐시에 안전하게 영구 저장되었습니다!")
                 return {}
             else:
                 self.log(f"❌ 커스텀 가이드북 번역 중 오류: {exc}")
@@ -827,8 +851,14 @@ class TranslationMixin:
                 self.log("⚠️ 저장 폴더 선택이 취소되었습니다.")
 
         except TranslationCancelledError as e:
+            try:
+                import translation_memory
+                translation_memory.save_memory()
+            except Exception:
+                pass
             self.log(f"\n🛑 {str(e)}")
-            self.show_messagebox("warning", "취소됨", "사용자에 의해 번역 작업이 중단되었습니다.")
+            self.log("💾 [로컬 캐시 보존] 취소 직전까지 번역된 모든 문장이 로컬 캐시에 안전하게 영구 저장되었습니다!")
+            self.show_messagebox("warning", "취소됨", "사용자에 의해 번역 작업이 중단되었습니다.\n\n지금까지 번역된 모든 문장은 로컬 캐시에 안전하게 영구 저장되었으므로, 다음에 다시 번역할 때 0초 만에 이어서 번역됩니다.")
         except QuotaExceededError as e:
             self.log(f"\n🛑 [중단] {str(e)}")
             self.show_messagebox("error", "한도 초과", str(e))
@@ -1117,6 +1147,13 @@ class TranslationMixin:
             if error_msg: self.show_messagebox("warning", "중단됨", error_msg)
             return
 
+
+        # 취소 시점까지 완료된 번역 메모리(캐시) 영구 저장
+        try:
+            import translation_memory
+            translation_memory.save_memory()
+        except Exception:
+            pass
 
         if self._ask_main(
             '번역 작업 중단',

@@ -597,40 +597,55 @@ if ctk is not None and TkinterDnD is not None:
             self.local_api_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
             # Initially not packed!
 
+            # 1. 커스텀 API 주소 (Base URL)
             ctk.CTkLabel(self.local_api_frame, text="커스텀 API 주소 (Base URL)",
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                          text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
             
-            self.local_url_entry = ctk.CTkEntry(self.local_api_frame, placeholder_text="예: http://localhost:11434/v1 또는 https://api.groq.com/v1",
-                                          font=ctk.CTkFont(family=FONT_NAME, size=12),
-                                          fg_color="#111113", border_color="#52525b")
+            self.local_url_entry = ctk.CTkEntry(
+                self.local_api_frame,
+                placeholder_text="예: http://localhost:1234/v1 (LM Studio) 또는 http://localhost:11434/v1 (Ollama)",
+                font=ctk.CTkFont(family=FONT_NAME, size=12),
+                fg_color="#111113", border_color="#52525b"
+            )
             self.local_url_entry.pack(fill="x", padx=12, pady=(0, 6))
             self.local_url_entry.bind("<FocusOut>", lambda _e: self.save_user_settings())
 
-            local_sub_row = ctk.CTkFrame(self.local_api_frame, fg_color="transparent")
-            local_sub_row.pack(fill="x", padx=12, pady=(0, 6))
-            
-            col_key = ctk.CTkFrame(local_sub_row, fg_color="transparent")
-            col_key.pack(side="left", fill="x", expand=True, padx=(0, 6))
-            ctk.CTkLabel(col_key, text="API 키 (선택사항)",
+            # 2. 모델 이름 (필수)
+            ctk.CTkLabel(self.local_api_frame, text="모델 이름 (필수)",
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
-                         text_color="#cbd5e1").pack(anchor="w", pady=(0, 2))
-            self.local_api_key_entry = ctk.CTkEntry(col_key, show="*", placeholder_text="필요 시 입력",
-                                          font=ctk.CTkFont(family=FONT_NAME, size=12),
-                                          fg_color="#111113", border_color="#52525b")
-            self.local_api_key_entry.pack(fill="x")
+                         text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
+
+            self.local_model_entry = ctk.CTkEntry(
+                self.local_api_frame,
+                placeholder_text="예: llama3.1, qwen2.5:14b, deepseek-chat (LM Studio/Ollama에 로드된 모델명)",
+                font=ctk.CTkFont(family=FONT_NAME, size=12),
+                fg_color="#111113", border_color="#52525b"
+            )
+            self.local_model_entry.pack(fill="x", padx=12, pady=(0, 6))
+            self.local_model_entry.bind("<FocusOut>", lambda _e: self.save_user_settings())
+
+            # 3. API 키 (선택사항)
+            ctk.CTkLabel(self.local_api_frame, text="API 키 (선택사항, 로컬 AI는 비워두세요)",
+                         font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                         text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
+
+            self.local_api_key_entry = ctk.CTkEntry(
+                self.local_api_frame, show="*",
+                placeholder_text="LM Studio / Ollama는 비워두세요 (클라우드 API만 필요 시 입력)",
+                font=ctk.CTkFont(family=FONT_NAME, size=12),
+                fg_color="#111113", border_color="#52525b"
+            )
+            self.local_api_key_entry.pack(fill="x", padx=12, pady=(0, 6))
             self.local_api_key_entry.bind("<FocusOut>", lambda _e: self.save_user_settings())
 
-            col_mod = ctk.CTkFrame(local_sub_row, fg_color="transparent")
-            col_mod.pack(side="right", fill="x", expand=True, padx=(6, 0))
-            ctk.CTkLabel(col_mod, text="모델 이름 (필수)",
-                         font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
-                         text_color="#cbd5e1").pack(anchor="w", pady=(0, 2))
-            self.local_model_entry = ctk.CTkEntry(col_mod, placeholder_text="예: llama3.1 또는 deepseek-chat",
-                                          font=ctk.CTkFont(family=FONT_NAME, size=12),
-                                          fg_color="#111113", border_color="#52525b")
-            self.local_model_entry.pack(fill="x")
-            self.local_model_entry.bind("<FocusOut>", lambda _e: self.save_user_settings())
+            # 안내 팁 레이블
+            ctk.CTkLabel(
+                self.local_api_frame,
+                text="💡 LM Studio / Ollama 등 로컬 AI 사용 시 API 키는 입력하지 않아도 됩니다.",
+                font=ctk.CTkFont(family=FONT_NAME, size=11),
+                text_color="#94a3b8"
+            ).pack(anchor="w", padx=12, pady=(0, 4))
 
             self.btn_translate_selected_modpack = ctk.CTkButton(
                 config_frame, text="선택 모드팩 퀘스트 번역",
