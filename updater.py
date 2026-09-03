@@ -246,39 +246,100 @@ class UpdateDialog(ctk.CTkToplevel):
         self.update_btn.configure(state="disabled", text="다운로드 중...")
         self.close_btn.configure(text="취소")
 
+        self.download_state = {
+            "progress": (0, 0),
+            "status_msg": "다운로드 준비 중...",
+            "status_color": "#d4d4d8",
+            "is_done": False,
+            "is_cancelled": False,
+            "error": None,
+            "target_path": None,
+        }
+
         threading.Thread(target=self._download_worker, args=(url,), daemon=True).start()
+        self.after(50, self._poll_download)
 
     def _download_worker(self, url):
         try:
             temp_dir = tempfile.gettempdir()
-            self.temp_dest = os.path.join(temp_dir, f"QuestTranslatorPro_update_{os.getpid()}.exe")
+            asset_name = (self.update_info.get("asset_name") or url).lower()
+            is_zip = asset_name.endswith(".zip")
+            
+            if is_zip:
+                download_target = os.path.join(temp_dir, f"QuestTranslatorPro_update_{os.getpid()}.zip")
+            else:
+                download_target = os.path.join(temp_dir, f"QuestTranslatorPro_update_{os.getpid()}.exe")
 
             def on_prog(downloaded, total):
-                if total > 0:
-                    pct = downloaded / total
-                    dl_mb = downloaded / (1024 * 1024)
-                    tot_mb = total / (1024 * 1024)
-                    self.after(0, lambda: (
-                        self.prog_bar.set(pct),
-                        self.status_label.configure(text=f"다운로드 중... {int(pct*100)}% ({dl_mb:.1f}MB / {tot_mb:.1f}MB)")
-                    ))
+                self.download_state["progress"] = (downloaded, total)
 
             def check_cancel():
                 return self.is_cancelled
 
-            ok = download_file_with_progress(url, self.temp_dest, on_prog, check_cancel)
+            ok = download_file_with_progress(url, download_target, on_prog, check_cancel)
             if ok and not self.is_cancelled:
-                self.after(0, lambda: self.status_label.configure(
-                    text="✅ 다운로드 완료! 프로그램을 교체하고 재시작합니다...", text_color="#22c55e"
-                ))
-                self.after(1200, lambda: apply_update_and_restart(self.temp_dest))
+                if is_zip:
+                    self.download_state["status_msg"] = "📦 압축 파일에서 실행 파일을 추출하는 중..."
+                    self.download_state["status_color"] = "#fb923c"
+                    import zipfile
+                    extracted_exe = os.path.join(temp_dir, f"QuestTranslatorPro_extracted_{os.getpid()}.exe")
+                    with zipfile.ZipFile(download_target, 'r') as zf:
+                        exe_entry = None
+                        for name in zf.namelist():
+                            if os.path.basename(name).lower() == "questtranslatorpro.exe":
+                                exe_entry = name
+                                break
+                        if not exe_entry:
+                            raise Exception("압축 파일 내에서 QuestTranslatorPro.exe를 찾을 수 없습니다.")
+                        with open(extracted_exe, 'wb') as ef:
+                            ef.write(zf.read(exe_entry))
+                    self.download_state["target_path"] = extracted_exe
+                else:
+                    self.download_state["target_path"] = download_target
+
+                self.download_state["status_msg"] = "✅ 다운로드 완료! 프로그램을 교체하고 재시작합니다..."
+                self.download_state["status_color"] = "#22c55e"
+                self.download_state["is_done"] = True
             elif self.is_cancelled:
-                self.after(0, lambda: self.status_label.configure(text="업데이트가 취소되었습니다."))
+                self.download_state["is_cancelled"] = True
         except Exception as e:
-            self.after(0, lambda: (
-                self.status_label.configure(text=f"❌ 다운로드 오류: {e}", text_color="#ef4444"),
-                self.update_btn.configure(state="normal", text="다시 시도")
-            ))
+            self.download_state["error"] = str(e)
+
+    def _poll_download(self):
+        st = getattr(self, "download_state", None)
+        if not st:
+            return
+
+        dl, tot = st["progress"]
+        if tot > 0:
+            pct = dl / tot
+            dl_mb = dl / (1024 * 1024)
+            tot_mb = tot / (1024 * 1024)
+            self.prog_bar.set(pct)
+            if not st["is_done"] and not st["error"]:
+                self.status_label.configure(
+                    text=f"다운로드 중... {int(pct*100)}% ({dl_mb:.1f}MB / {tot_mb:.1f}MB)",
+                    text_color="#d4d4d8"
+                )
+
+        if st["status_msg"]:
+            self.status_label.configure(text=st["status_msg"], text_color=st["status_color"])
+
+        if st["error"]:
+            self.status_label.configure(text=f"❌ 다운로드 오류: {st['error']}", text_color="#ef4444")
+            self.update_btn.configure(state="normal", text="다시 시도")
+            return
+
+        if st["is_cancelled"]:
+            self.status_label.configure(text="업데이트가 취소되었습니다.", text_color="#a1a1aa")
+            return
+
+        if st["is_done"]:
+            target_path = st["target_path"]
+            self.after(1200, lambda: apply_update_and_restart(target_path))
+            return
+
+        self.after(50, self._poll_download)
 
     def _on_close(self):
         if self.is_downloading:
