@@ -16,12 +16,17 @@ GITHUB_LATEST_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest
 
 def parse_version_tuple(ver_str):
     if not ver_str:
-        return (0, 0, 0)
+        return (0, 0, 0, 0)
     clean = ver_str.strip().lstrip('vV')
-    nums = re.findall(r'\d+', clean)
+    is_hotfix = 1 if 'hotfix' in clean.lower() else 0
+    nums = [int(n) for n in re.findall(r'\d+', clean)]
     if not nums:
-        return (0, 0, 0)
-    return tuple(int(n) for n in nums[:4])
+        return (0, 0, 0, 0)
+    while len(nums) < 3:
+        nums.append(0)
+    if len(nums) == 3:
+        nums.append(is_hotfix)
+    return tuple(nums[:4])
 
 
 def is_newer_version(current_ver, latest_ver):
@@ -129,9 +134,15 @@ $newBin = '{safe_new}'
 $workDir = '{safe_dir}'
 $parentPid = {current_pid}
 
-# 1. PyInstaller 보안 검증 충돌 방지: 상속된 MEIPASS 환경 변수 완벽 제거
-Remove-Item Env:_MEIPASS2 -ErrorAction SilentlyContinue
-Remove-Item Env:_MEIPASS -ErrorAction SilentlyContinue
+# 1. PyInstaller 보안 검증 충돌 방지: 상속된 모든 MEI 및 PYI 환경 변수 완전 제거 & RESET_ENVIRONMENT 설정
+Remove-Item Env:_MEI* -ErrorAction SilentlyContinue
+Remove-Item Env:_PYI* -ErrorAction SilentlyContinue
+$env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+[Environment]::SetEnvironmentVariable('PYINSTALLER_RESET_ENVIRONMENT', '1', 'Process')
+[Environment]::SetEnvironmentVariable('_PYI_APPLICATION_HOME_DIR', $null, 'Process')
+[Environment]::SetEnvironmentVariable('_PYI_ARCHIVE_FILE', $null, 'Process')
+[Environment]::SetEnvironmentVariable('_PYI_PARENT_PROCESS_LEVEL', $null, 'Process')
+[Environment]::SetEnvironmentVariable('_PYI_SPLASH_IPC', $null, 'Process')
 [Environment]::SetEnvironmentVariable('_MEIPASS2', $null, 'Process')
 [Environment]::SetEnvironmentVariable('_MEIPASS', $null, 'Process')
 
@@ -155,8 +166,14 @@ for ($i = 0; $i -lt 20; $i++) {{
 
 # 4. 교체 완료 후 프로그램 재실행 및 임시 파일 정리
 if ($copied) {{
-    Remove-Item Env:_MEIPASS2 -ErrorAction SilentlyContinue
-    Remove-Item Env:_MEIPASS -ErrorAction SilentlyContinue
+    Remove-Item Env:_MEI* -ErrorAction SilentlyContinue
+    Remove-Item Env:_PYI* -ErrorAction SilentlyContinue
+    $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+    [Environment]::SetEnvironmentVariable('PYINSTALLER_RESET_ENVIRONMENT', '1', 'Process')
+    [Environment]::SetEnvironmentVariable('_PYI_APPLICATION_HOME_DIR', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('_PYI_ARCHIVE_FILE', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('_PYI_PARENT_PROCESS_LEVEL', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('_PYI_SPLASH_IPC', $null, 'Process')
     [Environment]::SetEnvironmentVariable('_MEIPASS2', $null, 'Process')
     [Environment]::SetEnvironmentVariable('_MEIPASS', $null, 'Process')
     Start-Process -FilePath $target -WorkingDirectory $workDir
@@ -169,8 +186,9 @@ if ($copied) {{
 
     clean_env = os.environ.copy()
     for k in list(clean_env.keys()):
-        if k.startswith("_MEI") or k in ("_MEIPASS2", "_MEIPASS", "PYINSTALLER_STRICT_UNPACK_MODE"):
+        if k.startswith("_MEI") or k.startswith("_PYI") or k in ("_MEIPASS2", "_MEIPASS", "PYINSTALLER_STRICT_UNPACK_MODE"):
             clean_env.pop(k, None)
+    clean_env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
 
     startupinfo = None
     creationflags = 0

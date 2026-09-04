@@ -2,6 +2,7 @@ import os
 import json
 import shutil
 import zipfile
+import re
 from constants import has_non_latin
 import translation_memory
 from translation_engines import ENGINES, QuotaExceededError, TranslationCancelledError, is_code_or_id
@@ -120,18 +121,19 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
     
     base_zip_name = os.path.basename(zip_path)
     base_no_ext = os.path.splitext(base_zip_name)[0]
+    clean_base_no_ext = re.sub(r'_\d+_\d+$', '', base_no_ext)
     origin_dir = os.path.dirname(zip_path)
     
     # 모드팩(ZIP) 이름별로 고유한 임시 폴더 경로 생성
     raw_dir = os.path.join(origin_dir, f"_temp_raw_{base_no_ext}")
-    out_dir = os.path.join(origin_dir, f"_temp_out_{base_no_ext}")
+    out_dir = os.path.join(origin_dir, f"_temp_out_{clean_base_no_ext}")
     
     # 1. Resume detection
     candidates = []
     if os.path.isfile(os.path.join(out_dir, PROGRESS_FILE)):
         comp = _load_progress(out_dir)
         if comp:
-            candidates.append({"path": out_dir, "name": f"이전 번역 백업 ({base_no_ext})", "count": len(comp), "completed": comp})
+            candidates.append({"path": out_dir, "name": f"이전 번역 백업 ({clean_base_no_ext})", "count": len(comp), "completed": comp})
     
     # 예전 방식(_temp_out_ 백업)이 남아있을 수 있으므로 호환성을 위해 스캔하되, 현재 이름이 포함된 경우만 추가
     if os.path.isdir(origin_dir):

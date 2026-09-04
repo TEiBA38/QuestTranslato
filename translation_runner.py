@@ -11,6 +11,7 @@ import time
 import random
 import re
 import translation_memory
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -86,7 +87,11 @@ class TranslationMixin:
         safe_name = os.path.basename(os.path.normpath(modpack_dir)) or "modpack"
         temp_zip_path = os.path.join(tempfile.gettempdir(), f"QuestTranslator_{safe_name}.zip")
         if os.path.exists(temp_zip_path):
-            os.remove(temp_zip_path)
+            try:
+                os.remove(temp_zip_path)
+            except Exception:
+                # 다른 스레드나 프로세스에 의해 잠겨있을 경우 충돌을 피해 독립 파일로 분리 생성
+                temp_zip_path = os.path.join(tempfile.gettempdir(), f"QuestTranslator_{safe_name}_{os.getpid()}_{int(time.time()*1000)}.zip")
             
         added_count = 0
         with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -140,6 +145,10 @@ class TranslationMixin:
         return temp_zip_path, added_count
 
     def run_selected_modpack(self):
+        if getattr(self.app_state, 'is_translating', False):
+            self.log("⚠️ 이미 다른 번역 작업이 진행 중입니다. 완료되거나 취소된 후 다시 시도해주세요.")
+            return
+
         engine_key, api_key, is_paid, ai_model, target_lang, custom_url = self.validate_inputs()
         if not engine_key:
             return
@@ -149,10 +158,12 @@ class TranslationMixin:
             messagebox.showwarning("경고", "먼저 인스턴스 경로를 선택하고 모드팩을 탐지해주세요.")
             return
 
+        self.app_state.is_translating = True
+        self.toggle_buttons(False)
+
         def run_instance_translation():
             temp_zip_path = None
             try:
-                import translation_memory
                 translation_memory.set_current_modpack(modpack_dir)
                 temp_zip_path, file_count = self._create_temp_zip_from_modpack(modpack_dir)
                 if file_count > 0:
@@ -161,8 +172,6 @@ class TranslationMixin:
                 else:
                     self.log(f"⚠️ 선택한 모드팩에서 퀘스트 번역 대상 파일을 찾지 못했습니다.")
 
-
-                        
             except Exception as exc:
                 self.log(f"❌ 인스턴스 번역 중 오류: {exc}")
                 self.show_messagebox("error", "오류", f"인스턴스 번역 중 오류가 발생했습니다:\n{exc}")
@@ -172,6 +181,7 @@ class TranslationMixin:
                         os.remove(temp_zip_path)
                     except Exception:
                         pass
+                self.app_state.is_translating = False
                 self.toggle_buttons(True)
                 self.update_progress(1.0)
                 self.set_status("대기 중")
@@ -387,7 +397,6 @@ class TranslationMixin:
         except Exception as exc:
             if "사용자에 의해 번역이 취소되었습니다" in str(exc) or getattr(self.app_state, 'cancel_requested', False):
                 try:
-                    import translation_memory
                     translation_memory.save_memory()
                 except Exception:
                     pass
@@ -574,7 +583,6 @@ class TranslationMixin:
                     return translated_books_map
                 else:
                     try:
-                        import translation_memory
                         translation_memory.save_memory()
                     except Exception:
                         pass
@@ -583,7 +591,6 @@ class TranslationMixin:
                     return translated_books_map
         except Exception as exc:
             try:
-                import translation_memory
                 translation_memory.save_memory()
             except Exception:
                 pass
@@ -738,7 +745,6 @@ class TranslationMixin:
             
         except Exception as exc:
             try:
-                import translation_memory
                 translation_memory.save_memory()
             except Exception:
                 pass
@@ -756,6 +762,10 @@ class TranslationMixin:
     # ====================================================================
 
     def run_single_file(self):
+        if getattr(self.app_state, 'is_translating', False):
+            self.log("⚠️ 이미 다른 번역 작업이 진행 중입니다. 완료되거나 취소된 후 다시 시도해주세요.")
+            return
+
         engine_key, api_key, is_paid, ai_model, target_lang, custom_url = self.validate_inputs()
         if not engine_key:
             return
@@ -852,7 +862,6 @@ class TranslationMixin:
 
         except TranslationCancelledError as e:
             try:
-                import translation_memory
                 translation_memory.save_memory()
             except Exception:
                 pass
@@ -873,6 +882,10 @@ class TranslationMixin:
     # ====================================================================
 
     def run_zip_file(self):
+        if getattr(self.app_state, 'is_translating', False):
+            self.log("⚠️ 이미 다른 번역 작업이 진행 중입니다. 완료되거나 취소된 후 다시 시도해주세요.")
+            return
+
         engine_key, api_key, is_paid, ai_model, target_lang, custom_url = self.validate_inputs()
         if not engine_key:
             return
@@ -1150,7 +1163,6 @@ class TranslationMixin:
 
         # 취소 시점까지 완료된 번역 메모리(캐시) 영구 저장
         try:
-            import translation_memory
             translation_memory.save_memory()
         except Exception:
             pass
@@ -1337,6 +1349,7 @@ class TranslationMixin:
                 reference_map=reference_map, glossary=glossary, custom_url=custom_url
             )
         finally:
+            self.app_state.is_translating = False
             self._translation_out_dir = None
             if toggle_ui:
                 self.toggle_buttons(True)
@@ -1344,6 +1357,10 @@ class TranslationMixin:
 
     def run_all_modpack_translations(self):
         engine_key, api_key, is_paid, ai_model, target_lang, custom_url = self.validate_inputs()
+        if getattr(self.app_state, 'is_translating', False):
+            self.log("⚠️ 이미 다른 번역 작업이 진행 중입니다. 완료되거나 취소된 후 다시 시도해주세요.")
+            return
+
         if not engine_key:
             return
 
@@ -1352,78 +1369,77 @@ class TranslationMixin:
             self.show_messagebox("warning", "경고", "먼저 인스턴스 경로를 선택하고 모드팩을 탐지해주세요.")
             return
 
+        self.app_state.is_translating = True
+        self.toggle_buttons(False)
+
         def run_translation_task():
-            self.app_state.cancel_requested = False
-            import translation_memory
-            translation_memory.set_current_modpack(modpack_dir)
-            self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
-            self.toggle_buttons(False)
-            
-            # 1. Patchouli Books
-            self.update_progress(0.0)
-            self.log("\n==========================================")
-            self.log("📚 [1/3단계] 가이드북(Patchouli) 전용 번역 시작...")
-            patchouli_map = self._translate_patchouli_books(engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url)
-            
-            if getattr(self.app_state, 'cancel_requested', False):
-                self.log("⚠️ 사용자가 번역을 취소했습니다.")
-            else:
-                # 1.5 Custom Books
+            try:
+                self.app_state.cancel_requested = False
+                translation_memory.set_current_modpack(modpack_dir)
+                self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
+                
+                # 1. Patchouli Books
                 self.update_progress(0.0)
                 self.log("\n==========================================")
-                self.log("📖 [2/3단계] 커스텀 가이드북(XNet 등) 번역 시작...")
-                custom_map = self._translate_custom_books(engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url)
-            
-            if getattr(self.app_state, 'cancel_requested', False):
-                self.log("⚠️ 사용자가 번역을 취소했습니다.")
-            else:
-                # 2. Lang Files
-                self.update_progress(0.0)
-                self.log("\n==========================================")
-                self.log("🗂️ [3/3단계] 전체 모드(.lang) 텍스트 번역 시작...")
-                lang_map = self._translate_lang_files(engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url)
-
-            # 3. Create Combined Pack (Even if cancelled, save what we have)
-            if 'lang_map' not in locals(): lang_map = {}
-            if 'custom_map' not in locals(): custom_map = {}
-            if patchouli_map or lang_map or custom_map:
-                import mod_jar_extractor
-                import os
-                import re
-                import tkinter.messagebox as mb
-
-                # 인스턴스 폴더명 감지 (예: "All the Mods 9")
-                modpack_name = os.path.basename(modpack_dir.rstrip(os.sep))
-                # 번역 대상 언어 추출 (예: "한국어 (Korean)" -> "Korean")
-                lang_match = re.search(r'\((.*?)\)', target_lang)
-                clean_lang = lang_match.group(1).strip() if lang_match else target_lang.strip()
-                pack_filename = f"{modpack_name}[{clean_lang}].zip"
-
-                output_zip = os.path.join(modpack_dir, pack_filename)
-                mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map)
-                self.log(f"🎉 통합 리소스팩 생성 완료!\n파일명: {pack_filename}\n경로: {output_zip}")
-
-                # 마인크래프트 resourcepacks 폴더에도 자동 복사 배치
-                rp_dir = os.path.join(modpack_dir, "resourcepacks")
-                if os.path.isdir(rp_dir):
-                    try:
-                        import shutil
-                        shutil.copy2(output_zip, os.path.join(rp_dir, pack_filename))
-                        self.log(f"📦 마인크래프트 resourcepacks 폴더에도 자동 연동되었습니다: {pack_filename}")
-                    except Exception as e:
-                        logging.debug(f"resourcepacks 폴더 복사 실패: {e}")
+                self.log("� [1/3단계] 가이드북(Patchouli) 전용 번역 시작...")
+                patchouli_map = self._translate_patchouli_books(engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url)
                 
-                msg = f"모드팩 전체 번역이 완료되었습니다!\n\n생성된 리소스팩: '{pack_filename}'\n마인크래프트 리소스팩 설정에서 적용해주세요."
-                if not custom_map.get("pi_xml"):
-                    mods_dir = os.path.join(modpack_dir, "mods")
-                    if os.path.isdir(mods_dir) and any('draconic' in f.lower() or 'projectintelligence' in f.lower() for f in os.listdir(mods_dir)):
-                        msg += "\n\n⚠️ 주의: 드라코닉 에볼루션 등(Project Intelligence)은 매뉴얼을 게임 내에서 실시간 다운로드합니다.\n게임을 켜서 인게임 태블릿을 한 번 연 뒤, 툴을 다시 돌려주셔야 해당 매뉴얼 한글화가 적용됩니다!"
+                if getattr(self.app_state, 'cancel_requested', False):
+                    self.log("⚠️ 사용자가 번역을 취소했습니다.")
+                else:
+                    # 1.5 Custom Books
+                    self.update_progress(0.0)
+                    self.log("\n==========================================")
+                    self.log("📖 [2/3단계] 커스텀 가이드북(XNet 등) 번역 시작...")
+                    custom_map = self._translate_custom_books(engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url)
                 
-                mb.showinfo("번역 완료", msg)
-            
-            self.toggle_buttons(True)
-            self.update_progress(1.0)
-            self.set_status("대기 중")
+                if getattr(self.app_state, 'cancel_requested', False):
+                    self.log("⚠️ 사용자가 번역을 취소했습니다.")
+                else:
+                    # 2. Lang Files
+                    self.update_progress(0.0)
+                    self.log("\n==========================================")
+                    self.log("🗂️ [3/3단계] 전체 모드(.lang) 텍스트 번역 시작...")
+                    lang_map = self._translate_lang_files(engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url)
+
+                # 3. Create Combined Pack (Even if cancelled, save what we have)
+                if 'lang_map' not in locals(): lang_map = {}
+                if 'custom_map' not in locals(): custom_map = {}
+                if patchouli_map or lang_map or custom_map:
+                    import mod_jar_extractor
+
+                    # 인스턴스 폴더명 감지 (예: "All the Mods 9")
+                    modpack_name = os.path.basename(modpack_dir.rstrip(os.sep))
+                    # 번역 대상 언어 추출 (예: "한국어 (Korean)" -> "Korean")
+                    lang_match = re.search(r'\((.*?)\)', target_lang)
+                    clean_lang = lang_match.group(1).strip() if lang_match else target_lang.strip()
+                    pack_filename = f"{modpack_name}[{clean_lang}].zip"
+
+                    output_zip = os.path.join(modpack_dir, pack_filename)
+                    mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map)
+                    self.log(f"🎉 통합 리소스팩 생성 완료!\n파일명: {pack_filename}\n경로: {output_zip}")
+
+                    # 마인크래프트 resourcepacks 폴더에도 자동 복사 배치
+                    rp_dir = os.path.join(modpack_dir, "resourcepacks")
+                    if os.path.isdir(rp_dir):
+                        try:
+                            shutil.copy2(output_zip, os.path.join(rp_dir, pack_filename))
+                            self.log(f"📦 마인크래프트 resourcepacks 폴더에도 자동 연동되었습니다: {pack_filename}")
+                        except Exception as e:
+                            logging.debug(f"resourcepacks 폴더 복사 실패: {e}")
+                    
+                    msg = f"모드팩 전체 번역이 완료되었습니다!\n\n생성된 리소스팩: '{pack_filename}'\n마인크래프트 리소스팩 설정에서 적용해주세요."
+                    if not custom_map.get("pi_xml"):
+                        mods_dir = os.path.join(modpack_dir, "mods")
+                        if os.path.isdir(mods_dir) and any('draconic' in f.lower() or 'projectintelligence' in f.lower() for f in os.listdir(mods_dir)):
+                            msg += "\n\n⚠️ 주의: 드라코닉 에볼루션 등(Project Intelligence)은 매뉴얼을 게임 내에서 실시간 다운로드합니다.\n게임을 켜서 인게임 태블릿을 한 번 연 뒤, 툴을 다시 돌려주셔야 해당 매뉴얼 한글화가 적용됩니다!"
+                    
+                    messagebox.showinfo("번역 완료", msg)
+            finally:
+                self.app_state.is_translating = False
+                self.toggle_buttons(True)
+                self.update_progress(1.0)
+                self.set_status("대기 중")
 
         import threading
         threading.Thread(target=run_translation_task, daemon=True).start()

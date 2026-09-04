@@ -4,6 +4,7 @@ class AppState:
     def __init__(self):
         self.cancel_requested = False
         self.scan_thread_active = False
+        self.is_translating = False
         self.translated_history = {}
         self.glossaries_by_lang = {}
         self.glossary = DEFAULT_GLOSSARY.copy()

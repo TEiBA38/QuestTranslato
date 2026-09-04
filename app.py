@@ -14,6 +14,8 @@ import os
 import json
 import sys
 import threading
+import translation_memory
+import logging
 
 # PyInstaller noconsole 모드에서 stdout/stderr이 없을 때 발생하는 크래시 방지
 if sys.stdout is None:
@@ -805,7 +807,6 @@ if ctk is not None and TkinterDnD is not None:
         def on_close(self):
             try:
                 self.save_user_settings()
-                import translation_memory
                 translation_memory.save_memory()
                 if not self.do_backup_on_close():
                     return  # 사용자가 종료를 취소함

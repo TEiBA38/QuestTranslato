@@ -6,6 +6,8 @@ import threading
 import os
 import time
 import re
+import translation_memory
+import logging
 
 try:
     import customtkinter as ctk
@@ -103,7 +105,6 @@ class UIScreensMixin:
         bar = ctk.CTkProgressBar(panel, width=260, fg_color="#27272a", progress_color="#ea580c")
         bar.pack(padx=28, pady=(0, 20))
         # 백그라운드 클라우드 마스터 메모리 초고속 사전 로드 시작
-        import translation_memory
         threading.Thread(target=translation_memory.load_memory, daemon=True).start()
 
         self.after(120, lambda: (self._update_startup_status("설정을 불러오는 중..."), bar.set(0.45)))
@@ -192,13 +193,12 @@ class UIScreensMixin:
     # ====================================================================
 
     def log(self, message):
-        import logging
-        if message and not message.startswith("⏳"):
-            logging.info(message)
-            
         if threading.current_thread() is not threading.main_thread():
             self.after(0, lambda: self.log(message))
             return
+
+        if message and not message.startswith("⏳"):
+            logging.info(message)
         if not hasattr(self, 'log_textbox') or self.log_textbox is None:
             return
         try:
@@ -538,9 +538,12 @@ class UIScreensMixin:
             btn_state = "normal" if state else "disabled"
             cancel_state = "disabled" if state else "normal"
 
-            for attr in ("btn_single", "btn_zip", "btn_pick_instance_root", "btn_auto_detect_root",
-                         "btn_rescan_modpacks", "btn_open_translate_options", "btn_translate_selected_modpack",
-                         "btn_back_to_select", "btn_back_from_quick"):
+            for attr in (
+                "btn_single", "btn_zip", "btn_pick_instance_root", "btn_auto_detect_root",
+                "btn_rescan_modpacks", "btn_open_translate_options",
+                "btn_translate_selected_modpack", "btn_translate_all_guidebooks", "btn_edit_glossary",
+                "btn_back_to_select", "btn_back_from_select", "btn_back_from_quick"
+            ):
                 if hasattr(self, attr):
                     getattr(self, attr).configure(state=btn_state)
 
@@ -594,7 +597,6 @@ class UIScreensMixin:
         self.app_state.cancel_requested = True
         self.log("🛑 사용자가 번역 취소를 요청했습니다. 지금까지 번역된 내용을 로컬 캐시에 저장 중...")
         try:
-            import translation_memory
             translation_memory.save_memory()
             self.log("💾 [로컬 캐시 보존] 지금까지 번역된 내용이 로컬 캐시에 안전하게 영구 저장되었습니다!")
         except Exception as e:
@@ -869,7 +871,6 @@ class UIScreensMixin:
                 update_selected_count()
                 return
 
-            import translation_memory
             f_val = field_var.get()
             s_field = "src" if "EN" in f_val else ("tgt" if "KO" in f_val else "all")
             results = translation_memory.search_memory(q, category=cat_var.get(), limit=300, search_field=s_field)
@@ -901,7 +902,6 @@ class UIScreensMixin:
         def do_save():
             if not selected_item["src"]:
                 return
-            import translation_memory
             new_val = entry_translated.get().strip()
             if not new_val:
                 return
@@ -959,7 +959,6 @@ class UIScreensMixin:
         def do_delete_single():
             if not selected_item["src"]:
                 return
-            import translation_memory
             translation_memory.delete_memory_entry(selected_item["category"], selected_item["src"])
             self.show_messagebox("info", "성공", "항목이 삭제되었습니다.")
             do_search()
@@ -975,8 +974,6 @@ class UIScreensMixin:
             if not repl_term:
                 self.show_messagebox("warning", "경고", "바꿀 단어를 입력해주세요.")
                 return
-
-            import translation_memory
 
             # 일괄 치환 전 핵심 단어 오역률 검증
             target_basis = query_var.get().strip() or find_term or "단어"
@@ -1086,7 +1083,6 @@ class UIScreensMixin:
             if not confirm:
                 return
 
-            import translation_memory
             for i in selected_indices:
                 item = current_items[i]
                 translation_memory.delete_memory_entry(item["category"], item["src"])
@@ -1141,8 +1137,6 @@ class UIScreensMixin:
                 if not src or not tgt:
                     messagebox.showwarning("경고", "원문과 번역문을 모두 입력해주세요.", parent=dlg)
                     return
-
-                import translation_memory
 
                 # 신규 등록 전 오역률 검증
                 err_rate, val_rate, verdict, det = translation_memory.calculate_translation_error_rate(src, tgt)
