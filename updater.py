@@ -76,8 +76,14 @@ def check_for_updates(current_version=APP_VERSION, timeout=6.0):
                 if name.endswith(".exe"):
                     exe_asset = asset
                     break
-                elif name.endswith(".zip") and "windows" in name:
-                    zip_asset = asset
+                elif name.endswith(".zip"):
+                    # 업데이트용으로 without_cache(경량 84MB) 우선 선택, 없으면 일반 zip 선택
+                    if zip_asset and "without_cache" in zip_asset.get("name", "").lower():
+                        continue
+                    if "without_cache" in name:
+                        zip_asset = asset
+                    elif not zip_asset:
+                        zip_asset = asset
 
             chosen = exe_asset or zip_asset
             if chosen:
