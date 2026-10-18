@@ -15,9 +15,13 @@ def _get_cache_dir():
     """로컬 캐시 파일이 저장될 전용 폴더 (항상 dist 하위 폴더에 저장)"""
     import sys
     if getattr(sys, 'frozen', False):
-        # PyInstaller EXE 실행 환경: 실행 파일이 위치한 폴더의 dist 하위 폴더
+        # PyInstaller EXE 실행 환경: 실행 파일이 위치한 폴더 기준
         exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-        base = os.path.join(exe_dir, "dist")
+        # 만약 EXE가 이미 dist 폴더 내에 위치한다면 하위에 또 dist를 만들지 않음
+        if os.path.basename(exe_dir).lower() == "dist":
+            base = exe_dir
+        else:
+            base = os.path.join(exe_dir, "dist")
     else:
         # 개발 환경: 프로젝트 루트의 dist 폴더
         repo_root = os.path.dirname(os.path.abspath(__file__))
@@ -31,19 +35,18 @@ MEMORY_FILE = os.path.join(CACHE_DIR, "translation_memory.json")
 BACKUP_FILE = os.path.join(CACHE_DIR, "translation_memory.json.bak")
 ITEMS_MEMORY_FILE = os.path.join(CACHE_DIR, "translation_memory_items.json")
 BOOKS_MEMORY_FILE = os.path.join(CACHE_DIR, "translation_memory_books.json")
+SYNC_STATE_FILE = os.path.join(CACHE_DIR, "cloud_sync_state.json")
+PENDING_COMMITS_FILE = os.path.join(CACHE_DIR, "pending_commits.json")
+CLOUD_CONFIG_FILE = os.path.join(CACHE_DIR, "cloud_config.json")
 SHORT_TEXT_THRESHOLD = 30
 
 # ====================================================================
-# Supabase 클라우드 설정
+# Cloudflare R2 (순수 파일 스토리지 큐 & 커밋 방식) 클라우드 설정
 # ====================================================================
-SUPABASE_URL = "https://rwyedqmztbxsflndgsmt.supabase.co"
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ3eWVkcW16dGJ4c2ZsbmRnc210Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc4MTIzNDksImV4cCI6MjEwMzM4ODM0OX0.8Lrxcp1af5ea6JYMhVIBXZAybkmRumindRUWgcq8Kdc"
-
-TABLE_MAP = {
-    "general": "translation_memory",
-    "items": "translation_memory_items",
-    "books": "translation_memory_books",
-}
+# cloudflare_worker.js 배포 후 발급받은 Worker URL을 입력하거나,
+# dist/cloud_config.json 에 {"worker_url": "https://..."} 형태로 저장하세요.
+DEFAULT_CLOUDFLARE_WORKER_URL = "https://quest-translator-sync.kimraon84.workers.dev"
+CLOUDFLARE_WORKER_URL = os.environ.get("QUEST_CLOUDFLARE_URL", DEFAULT_CLOUDFLARE_WORKER_URL).strip()
 
 _global_cache = {}
 _modpack_cache = {}
@@ -266,7 +269,7 @@ _dirty_general = {}
 _dirty_items = {}
 _dirty_books = {}
 
-def _store(cache, text, translated_text, target_lang_norm):
+def _store(cache, text, translated_text, target_lang_norm, force_override=False):
     target_lang_key = target_lang_norm
     for k in cache.keys():
         if k.replace(" ", "") == target_lang_norm:
@@ -274,27 +277,29 @@ def _store(cache, text, translated_text, target_lang_norm):
             break
     if target_lang_key not in cache:
         cache[target_lang_key] = {}
+    prev_val = cache[target_lang_key].get(text)
     cache[target_lang_key][text] = translated_text
     
-    # 더티 캐시(새로 추가된 데이터)에도 저장하여 DB 업로드 시 전체가 아닌 신규 데이터만 업로드되도록 함
-    dirty_target = None
-    if cache is _global_cache:
-        dirty_target = _dirty_general
-    elif cache is _items_cache:
-        dirty_target = _dirty_items
-    elif cache is _books_cache:
-        dirty_target = _dirty_books
+    # 더티 캐시(새로 추가/변경된 데이터 또는 공식 한글패치 강제 덮어쓰기)에 저장하여 클라우드 DB까지 덮어쓰도록 보장
+    if force_override or prev_val != translated_text:
+        dirty_target = None
+        if cache is _global_cache:
+            dirty_target = _dirty_general
+        elif cache is _items_cache:
+            dirty_target = _dirty_items
+        elif cache is _books_cache:
+            dirty_target = _dirty_books
 
-    if dirty_target is not None:
-        if target_lang_key not in dirty_target:
-            dirty_target[target_lang_key] = {}
-        dirty_target[target_lang_key][text] = translated_text
+        if dirty_target is not None:
+            if target_lang_key not in dirty_target:
+                dirty_target[target_lang_key] = {}
+            dirty_target[target_lang_key][text] = translated_text
 
     _index_template(text, translated_text, target_lang_norm)
 
 
 def load_memory():
-    """로컬 메모리 로드 및 Supabase 최신 데이터 동기화"""
+    """로컬 메모리 로드 및 Cloudflare 최신 데이터 동기화"""
     global _global_loaded, _items_loaded, _books_loaded
     with _lock:
         if not _global_loaded:
@@ -313,7 +318,7 @@ def load_memory():
             _books_cache.update(loaded_b)
             _books_loaded = True
 
-    sync_from_supabase()
+    sync_from_cloudflare()
 
 
 def _load_modpack_memory():
@@ -357,7 +362,7 @@ def get_cached_translation(text, target_lang="한국어 (Korean)"):
     return None
 
 
-def add_to_memory(text, translated_text, target_lang="한국어 (Korean)"):
+def add_to_memory(text, translated_text, target_lang="한국어 (Korean)", force_override=False):
     if not is_valid_translation(text, translated_text, target_lang):
         return
 
@@ -368,9 +373,9 @@ def add_to_memory(text, translated_text, target_lang="한국어 (Korean)"):
     with _lock:
         if _current_modpack_id:
             _load_modpack_memory()
-            _store(_modpack_cache, text, translated_text, target_lang_norm)
+            _store(_modpack_cache, text, translated_text, target_lang_norm, force_override=force_override)
         # 클라우드 동기화 및 전역 재사용을 위해 _global_cache에도 동시 보존
-        _store(_global_cache, text, translated_text, target_lang_norm)
+        _store(_global_cache, text, translated_text, target_lang_norm, force_override=force_override)
 
 
 def get_cached_item_translation(text, target_lang="한국어 (Korean)"):
@@ -393,14 +398,61 @@ def get_cached_item_translation(text, target_lang="한국어 (Korean)"):
     return None
 
 
-def add_item_to_memory(text, translated_text, target_lang="한국어 (Korean)"):
+def add_item_to_memory(text, translated_text, target_lang="한국어 (Korean)", force_override=False):
     if not is_valid_translation(text, translated_text, target_lang):
         return
     if not _items_loaded:
         load_memory()
     target_lang_norm = target_lang.replace(" ", "")
     with _lock:
-        _store(_items_cache, text, translated_text, target_lang_norm)
+        _store(_items_cache, text, translated_text, target_lang_norm, force_override=force_override)
+        # 아이템/블록/기계 명사구가 퀘스트 본문/설명/가이드북에서도 1차 완전일치로 즉시 치환되도록 _global_cache에도 동시 보존
+        _store(_global_cache, text, translated_text, target_lang_norm, force_override=force_override)
+
+
+
+def add_official_ko_to_memory(text, translated_text, target_lang="한국어 (Korean)", is_item=False):
+    """
+    모드 내장 공식 한글패치(ko_kr)에서 불러온 데이터를 기존 AI 번역 캐시보다 항상 최우선으로 덮어씁니다.
+    이미 다른 캐시(_global_cache, _items_cache, _modpack_cache, _books_cache)에 이전 번역 데이터가 남아 있더라도
+    모두 공식 한글패치 데이터로 일괄 덮어씌워 구버전 번역이 튀어나오는 현상을 원천 차단합니다.
+    """
+    if not is_valid_translation(text, translated_text, target_lang):
+        return
+    if not _global_loaded or not _items_loaded or not _books_loaded:
+        load_memory()
+
+    target_lang_norm = target_lang.replace(" ", "")
+    with _lock:
+        if _current_modpack_id:
+            _load_modpack_memory()
+            _store(_modpack_cache, text, translated_text, target_lang_norm)
+
+        if is_item:
+            _store(_items_cache, text, translated_text, target_lang_norm)
+            _store(_global_cache, text, translated_text, target_lang_norm)
+        else:
+            _store(_global_cache, text, translated_text, target_lang_norm)
+            # 만약 _items_cache에 동일 원문의 기존 AI 번역이 이미 존재한다면 공식 한글패치로 함께 덮어쓰기
+            for k in list(_items_cache.keys()):
+                if k.replace(" ", "") == target_lang_norm and text in _items_cache[k]:
+                    _store(_items_cache, text, translated_text, target_lang_norm)
+                    break
+
+        # 만약 _books_cache에 동일 원문의 기존 AI 번역이 이미 존재한다면 공식 한글패치로 함께 덮어쓰기
+        for k in list(_books_cache.keys()):
+            if k.replace(" ", "") == target_lang_norm and text in _books_cache[k]:
+                _store(_books_cache, text, translated_text, target_lang_norm)
+                break
+
+    # 공식 한글패치에서 발견된 단어/명사구는 translation_word 단어사전에도 최우선(is_official=True)으로 반영
+    if "한국어" in target_lang or "Korean" in target_lang:
+        try:
+            import translation_word
+            translation_word.learn_from_pair(text, translated_text, is_official=True)
+        except Exception:
+            pass
+
 
 
 def get_cached_book_translation(text, target_lang="한국어 (Korean)"):
@@ -423,14 +475,17 @@ def get_cached_book_translation(text, target_lang="한국어 (Korean)"):
     return None
 
 
-def add_book_to_memory(text, translated_text, target_lang="한국어 (Korean)"):
+def add_book_to_memory(text, translated_text, target_lang="한국어 (Korean)", force_override=False):
     if not is_valid_translation(text, translated_text, target_lang):
         return
     if not _books_loaded:
         load_memory()
     target_lang_norm = target_lang.replace(" ", "")
     with _lock:
-        _store(_books_cache, text, translated_text, target_lang_norm)
+        _store(_books_cache, text, translated_text, target_lang_norm, force_override=force_override)
+        # 가이드북 텍스트가 퀘스트 본문/설명에서도 1차 완전일치로 즉시 치환되도록 _global_cache에도 동시 보존
+        _store(_global_cache, text, translated_text, target_lang_norm, force_override=force_override)
+
 
 
 def _safe_save_file(filepath, data):
@@ -461,8 +516,8 @@ def _safe_save_file(filepath, data):
         return data
 
 
-def save_memory():
-    """로컬 4개 파일 저장 및 Supabase 3개 개별 테이블에 신규(Dirty) 데이터만 비동기 업로드 (UPSERT)"""
+def _save_local_caches_only():
+    """서버 업로드 없이 로컬 4개 캐시 파일만 안전하게 디스크에 병합 저장"""
     with _lock:
         merged_global = _safe_save_file(MEMORY_FILE, _global_cache)
         if merged_global is not None:
@@ -485,7 +540,23 @@ def save_memory():
             _books_cache.clear()
             _books_cache.update(merged_books)
 
-        # 현재 업로드할 더티(신규) 캐시 복사 및 원본 초기화
+
+def save_memory(flush_now=False):
+    """
+    1~2초 단위 호출 시 로컬 4개 파일은 즉시 저장하고,
+    서버 전송은 커밋 대기 큐(_commit_queue)에 모아두었다가 일괄 커밋(Commit) 방식으로 전송합니다.
+    """
+    try:
+        import temp_session_logger
+        if temp_session_logger.is_debug_mode():
+            temp_session_logger.save_temp_session()
+            return
+    except Exception:
+        pass
+
+    _save_local_caches_only()
+
+    with _lock:
         dirty_general_copy = {k: v.copy() for k, v in _dirty_general.items()}
         dirty_items_copy = {k: v.copy() for k, v in _dirty_items.items()}
         dirty_books_copy = {k: v.copy() for k, v in _dirty_books.items()}
@@ -493,23 +564,27 @@ def save_memory():
         _dirty_items.clear()
         _dirty_books.clear()
 
-    # Supabase 3개 개별 테이블로 신규 델타 자동 업로드 (UPSERT)
-    if dirty_general_copy: upload_to_supabase(dirty_general_copy, "general")
-    if dirty_items_copy: upload_to_supabase(dirty_items_copy, "items")
-    if dirty_books_copy: upload_to_supabase(dirty_books_copy, "books")
+    if dirty_general_copy:
+        enqueue_commit(dirty_general_copy, "general")
+    if dirty_items_copy:
+        enqueue_commit(dirty_items_copy, "items")
+    if dirty_books_copy:
+        enqueue_commit(dirty_books_copy, "books")
 
-    # Supabase Storage Master Gzip 자동 패킹 및 동기화 (완전 자동화)
-    upload_master_to_storage()
+    try:
+        import translation_word
+        translation_word.save_words()
+    except Exception:
+        pass
 
-    # DB 테이블 누적 용량 200MB 초과 여부 체크 및 자동 컴팩션
-    check_and_auto_compact()
+    if flush_now:
+        flush_commit_queue(sync_wait=True)
+
 
 
 # ====================================================================
-# 하이브리드 클라우드 동기화 (Master Gzip Storage + Live Delta DB)
+# Cloudflare R2 순수 스토리지 큐(Queue) & 커밋(Commit) 동기화 엔진
 # ====================================================================
-
-STORAGE_BUCKET = "translations"
 
 MASTER_FILES = {
     "general": ("master_general.json.gz", _global_cache),
@@ -517,226 +592,323 @@ MASTER_FILES = {
     "books": ("master_books.json.gz", _books_cache),
 }
 
-# 🛡️ 3단계 안전 차단기 (Safety Circuit Breaker / Shutdown) 설정
-AUTO_COMPACT_SIZE_MB = 100  # 1단계: 100MB 도달 시 자동 압축 및 DB 0MB 리셋
-AUTO_COMPACT_BYTES_THRESHOLD = AUTO_COMPACT_SIZE_MB * 1024 * 1024
+COMMIT_BATCH_THRESHOLD = 500   # 큐에 500문장 이상 모이면 즉시 자동 커밋
+COMMIT_DEBOUNCE_SECONDS = 12.0 # 번역 중 1~2초마다 쌓이는 변경분을 12초 단위로 묶어서 1회 커밋
+SYNC_COOLDOWN_SECONDS = 180.0  # 짧은 시간 내 중복 Pull 방지 (3분 쿨타임)
 
-EMERGENCY_SHUTDOWN_SIZE_MB = 150  # 2단계: 150MB 초과 시 서버 폭주 방지를 위해 클라우드 업로드 즉시 셧다운(로컬 전용 모드 전환)
-EMERGENCY_SHUTDOWN_BYTES = EMERGENCY_SHUTDOWN_SIZE_MB * 1024 * 1024
-
-_is_compacting = False
+_commit_queue = {}  # (category, lang, src) -> tgt
+_commit_timer = None
+_is_committing = False
 _circuit_breaker_until = 0.0
 _consecutive_upload_errors = 0
-_last_size_check_time = 0.0
-_last_known_db_bytes = 0
-
-def _get_server_db_bytes():
-    """서버 측 실제 물리 용량을 조회 (30초 캐싱)"""
-    global _last_size_check_time, _last_known_db_bytes
-    now = time.time()
-    if now - _last_size_check_time < 30 and _last_known_db_bytes > 0:
-        return _last_known_db_bytes
-
-    if "YOUR_PROJECT_REF" in SUPABASE_URL:
-        return 0
-
-    headers = {
-        "apikey": SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-    }
-    total_db_bytes = 0
-    try:
-        rpc_res = requests.post(f"{SUPABASE_URL}/rest/v1/rpc/get_translation_memory_size_bytes", headers=headers, json={}, timeout=5)
-        if rpc_res.status_code == 200 and rpc_res.text.strip().isdigit():
-            total_db_bytes = int(rpc_res.text.strip())
-    except Exception:
-        pass
-
-    if total_db_bytes <= 0:
-        h_count = dict(headers)
-        h_count["Prefer"] = "count=planned"
-        total_rows = 0
-        for cat, table_name in TABLE_MAP.items():
-            try:
-                res = requests.get(f"{SUPABASE_URL}/rest/v1/{table_name}?select=src&limit=1", headers=h_count, timeout=5)
-                cr = res.headers.get("content-range", "")
-                cnt = int(cr.split('/')[-1]) if '/' in cr else 0
-                total_rows += cnt
-            except Exception:
-                pass
-        total_db_bytes = total_rows * 700
-
-    _last_known_db_bytes = total_db_bytes
-    _last_size_check_time = now
-    return total_db_bytes
-
-
-def is_cloud_upload_safe():
-    """클라우드 업로드 전 안전성(서킷 브레이커 & 셧다운) 검사"""
-    now = time.time()
-    if now < _circuit_breaker_until:
-        return False, "통신 오류로 인한 안전 차단기(Circuit Breaker) 활성화 중"
-
-    db_bytes = _get_server_db_bytes()
-    if db_bytes >= EMERGENCY_SHUTDOWN_BYTES:
-        return False, f"DB 용량 한계 도달 ({db_bytes / (1024*1024):.1f}MB >= {EMERGENCY_SHUTDOWN_SIZE_MB}MB) 긴급 셧다운 가동"
-
-    return True, "정상"
-
-
-def check_and_auto_compact(log_callback=None):
-    """DB 3개 테이블의 총 용량이 100MB를 넘으면 Master Gzip으로 완전 통합 압축 후 DB를 0MB로 리셋"""
-    global _is_compacting
-    if _is_compacting or "YOUR_PROJECT_REF" in SUPABASE_URL:
-        return
-
-    def _async_compaction():
-        global _is_compacting
-        _is_compacting = True
-        try:
-            total_db_bytes = _get_server_db_bytes()
-            total_mb = total_db_bytes / (1024 * 1024)
-            if total_db_bytes < AUTO_COMPACT_BYTES_THRESHOLD:
-                return
-
-            if log_callback:
-                log_callback(f"📦 [자동 컴팩션 감지] DB 총 누적 용량이 {total_mb:.1f} MB에 도달하여(기준: {AUTO_COMPACT_SIZE_MB}MB) 마스터 압축 파일로 통합을 시작합니다...")
-
-            headers = {
-                "apikey": SUPABASE_ANON_KEY,
-                "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-            }
-            # 2. 모든 최신 DB 데이터를 메모리로 다운로드 및 병합
-            for cat, table_name in TABLE_MAP.items():
-                target_cache = _global_cache if cat == "general" else (_items_cache if cat == "items" else _books_cache)
-                try:
-                    h_t = dict(headers)
-                    h_t["Prefer"] = "count=planned"
-                    res = requests.get(f"{SUPABASE_URL}/rest/v1/{table_name}?select=src&limit=1", headers=h_t, timeout=10)
-                    cr = res.headers.get("content-range", "")
-                    table_count = int(cr.split('/')[-1]) if '/' in cr else 0
-                    if table_count <= 0:
-                        continue
-
-                    def fetch_p(offset):
-                        u = f"{SUPABASE_URL}/rest/v1/{table_name}?select=lang,src,tgt&limit=1000&offset={offset}"
-                        r = requests.get(u, headers=headers, timeout=15)
-                        return r.json() if r.status_code == 200 else []
-
-                    offsets = list(range(0, table_count, 1000))
-                    with ThreadPoolExecutor(max_workers=8) as ex:
-                        for page in ex.map(fetch_p, offsets):
-                            with _lock:
-                                for row in page:
-                                    lang = row.get("lang", "한국어 (Korean)")
-                                    src = row.get("src")
-                                    tgt = row.get("tgt")
-                                    if is_valid_translation(src, tgt, lang):
-                                        if lang not in target_cache: target_cache[lang] = {}
-                                        target_cache[lang][src] = tgt
-                except Exception as e:
-                    logging.warning(f"컴팩션 중 DB [{table_name}] 다운로드 실패: {e}")
-                    return
-
-            # 3. 마스터 압축 파일(master_*.json.gz) 생성 및 Storage 업로드
-            all_uploads_success = True
-            for cat, (gz_name, cache) in MASTER_FILES.items():
-                with _lock:
-                    data_copy = {k: v.copy() for k, v in cache.items() if isinstance(v, dict)}
-                if not data_copy:
-                    continue
-                raw_json = json.dumps(data_copy, ensure_ascii=False, indent=2).encode("utf-8")
-                gz_bytes = gzip.compress(raw_json, compresslevel=9)
-                
-                upload_url = f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{gz_name}"
-                h = {
-                    "apikey": SUPABASE_ANON_KEY,
-                    "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-                    "Content-Type": "application/gzip",
-                    "x-upsert": "true",
-                }
-                r = requests.post(upload_url, headers=h, data=gz_bytes, timeout=30)
-                if r.status_code not in (200, 201):
-                    r = requests.put(upload_url, headers=h, data=gz_bytes, timeout=30)
-                if r.status_code not in (200, 201):
-                    all_uploads_success = False
-                    break
-
-            # 4. Storage 마스터 업로드가 100% 성공했을 때만 안전하게 DB 테이블 비우기
-            if all_uploads_success:
-                try:
-                    # 보안 RPC 함수를 호출하여 0.01초 만에 안전하게 TRUNCATE 리셋
-                    requests.post(f"{SUPABASE_URL}/rest/v1/rpc/truncate_all_translation_tables", headers=headers, json={}, timeout=15)
-                except Exception as e:
-                    logging.warning(f"DB 리셋 RPC 호출 실패: {e}")
-
-                save_memory()
-                msg = f"✨ [스마트 자동 컴팩션 완료] DB 데이터를 master_memory.json.gz에 통합 압축하고 DB 용량을 0MB로 리셋했습니다!"
-                logging.info(msg)
-                if log_callback:
-                    log_callback(msg)
-        finally:
-            _is_compacting = False
-
-    threading.Thread(target=_async_compaction, daemon=True).start()
-
-_storage_upload_timer = None
-
-def upload_master_to_storage():
-    """인메모리 전체 최신 캐시를 Gzip 초압축하여 Supabase Storage에 100% 자동 백그라운드 동기화"""
-    if "YOUR_PROJECT_REF" in SUPABASE_URL:
-        return
-
-    def _async_pack():
-        try:
-            for cat, (gz_name, cache) in MASTER_FILES.items():
-                with _lock:
-                    data_copy = {k: v.copy() for k, v in cache.items() if isinstance(v, dict)}
-                if not data_copy:
-                    continue
-                raw_json = json.dumps(data_copy, ensure_ascii=False, indent=2).encode("utf-8")
-                gz_bytes = gzip.compress(raw_json, compresslevel=9)
-                
-                upload_url = f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{gz_name}"
-                h = {
-                    "apikey": SUPABASE_ANON_KEY,
-                    "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-                    "Content-Type": "application/gzip",
-                    "x-upsert": "true",
-                }
-                r = requests.post(upload_url, headers=h, data=gz_bytes, timeout=30)
-                if r.status_code not in (200, 201):
-                    requests.put(upload_url, headers=h, data=gz_bytes, timeout=30)
-        except Exception as e:
-            logging.debug(f"자동 마스터 패킹 백그라운드 실패: {e}")
-
-    # 디바운스: 8초 내 중복 호출 방지
-    global _storage_upload_timer
-    with _lock:
-        if _storage_upload_timer:
-            _storage_upload_timer.cancel()
-        _storage_upload_timer = threading.Timer(8.0, lambda: threading.Thread(target=_async_pack, daemon=True).start())
-        _storage_upload_timer.start()
-
+_last_sync_timestamp = 0.0
 _cloud_sync_done = threading.Event()
 _is_syncing = False
 
-def wait_for_cloud_sync(timeout=8.0):
-    """클라우드 마스터 메모리가 완전히 다운로드될 때까지 대기"""
+
+def get_worker_url():
+    """환경변수, dist/cloud_config.json, 또는 상수에서 Cloudflare Worker URL을 가져옵니다."""
+    if CLOUDFLARE_WORKER_URL and "YOUR_" not in CLOUDFLARE_WORKER_URL:
+        return CLOUDFLARE_WORKER_URL.rstrip("/")
+    if os.path.exists(CLOUD_CONFIG_FILE):
+        try:
+            with open(CLOUD_CONFIG_FILE, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                url = str(cfg.get("worker_url", "")).strip()
+                if url and "YOUR_" not in url:
+                    return url.rstrip("/")
+        except Exception:
+            pass
+    return ""
+
+
+def set_worker_url(worker_url):
+    """Cloudflare Worker URL을 설정하고 dist/cloud_config.json에 영구 저장합니다."""
+    global CLOUDFLARE_WORKER_URL
+    clean_url = str(worker_url or "").strip().rstrip("/")
+    CLOUDFLARE_WORKER_URL = clean_url
+    try:
+        with open(CLOUD_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump({"worker_url": clean_url}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.warning(f"Cloudflare 설정 저장 실패: {e}")
+
+
+def _load_sync_state():
+    if os.path.exists(SYNC_STATE_FILE):
+        try:
+            with open(SYNC_STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    last_id = data.get("last_commit_id", "")
+                    # 레거시 D1의 정수 ID는 R2 커밋 키 체계와 다르므로 빈 문자열로 정규화
+                    if isinstance(last_id, int) or (isinstance(last_id, str) and last_id.isdigit() and len(last_id) < 10):
+                        data["last_commit_id"] = ""
+                    return data
+        except Exception:
+            pass
+    return {"last_commit_id": "", "etags": {}}
+
+
+def _save_sync_state(state):
+    try:
+        tmp = SYNC_STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, SYNC_STATE_FILE)
+    except Exception as e:
+        logging.debug(f"동기화 상태 저장 실패: {e}")
+
+
+def _load_pending_commits_from_disk():
+    """앱 재시작 시 미전송된 로컬 커밋 큐 복원"""
+    if not os.path.exists(PENDING_COMMITS_FILE):
+        return
+    try:
+        with open(PENDING_COMMITS_FILE, "r", encoding="utf-8") as f:
+            items = json.load(f)
+        if isinstance(items, list):
+            with _lock:
+                for row in items:
+                    cat = row.get("cat", "general")
+                    lang = row.get("lang", "한국어 (Korean)")
+                    src = row.get("src")
+                    tgt = row.get("tgt")
+                    if src and tgt:
+                        _commit_queue[(cat, lang, src)] = tgt
+    except Exception:
+        pass
+
+
+def _save_pending_commits_to_disk():
+    """커밋 대기 큐를 로컬 파일에 안전 백업 (오프라인/종료 시 유실 방지)"""
+    try:
+        with _lock:
+            items = [
+                {"cat": cat, "lang": lang, "src": src, "tgt": tgt}
+                for (cat, lang, src), tgt in _commit_queue.items()
+            ]
+        if not items:
+            if os.path.exists(PENDING_COMMITS_FILE):
+                try:
+                    os.remove(PENDING_COMMITS_FILE)
+                except Exception:
+                    pass
+            return
+        tmp = PENDING_COMMITS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False)
+        os.replace(tmp, PENDING_COMMITS_FILE)
+    except Exception as e:
+        logging.debug(f"대기 커밋 저장 실패: {e}")
+
+
+def is_cloud_upload_safe():
+    """클라우드 업로드 전 서킷 브레이커 상태 검사"""
+    now = time.time()
+    if now < _circuit_breaker_until:
+        return False, "통신 오류로 인한 안전 차단기(Circuit Breaker) 활성화 중"
+    return True, "정상"
+
+
+def enqueue_commit(cache_dict, category="general"):
+    """
+    1~2초마다 발생하는 신규 번역을 즉시 HTTP 전송하지 않고
+    메모리 큐(_commit_queue)에 병합 적재한 뒤, 일정량/일정시간마다 단일 커밋으로 푸시합니다.
+    """
+    try:
+        import temp_session_logger
+        if temp_session_logger.is_debug_mode():
+            return
+    except Exception:
+        pass
+
+    global _commit_timer
+    if not cache_dict:
+        return
+
+    added = 0
+    with _lock:
+        for lang, entries in list(cache_dict.items()):
+            if not isinstance(entries, dict):
+                continue
+            for src, tgt in list(entries.items()):
+                if is_valid_translation(src, tgt, lang):
+                    _commit_queue[(category, lang, src)] = tgt
+                    added += 1
+        queue_size = len(_commit_queue)
+
+    if added == 0:
+        return
+
+    _save_pending_commits_to_disk()
+
+    # 1) 큐에 500개 이상 쌓였으면 즉시 배치 커밋 실행
+    if queue_size >= COMMIT_BATCH_THRESHOLD:
+        flush_commit_queue()
+        return
+
+    # 2) 그렇지 않으면 디바운스 타이머(12초)를 걸어 1~2초 단위 업데이트들을 하나로 묶어서 커밋
+    with _lock:
+        if _commit_timer is not None:
+            _commit_timer.cancel()
+        _commit_timer = threading.Timer(COMMIT_DEBOUNCE_SECONDS, flush_commit_queue)
+        _commit_timer.daemon = True
+        _commit_timer.start()
+
+
+def flush_commit_queue(sync_wait=False):
+    """큐(_commit_queue)에 대기 중인 모든 신규 번역을 Gzip 압축하여 단일 커밋(POST /commit)으로 전송"""
+    try:
+        import temp_session_logger
+        if temp_session_logger.is_debug_mode():
+            return
+    except Exception:
+        pass
+
+    global _commit_timer, _is_committing
+
+    with _lock:
+        if _commit_timer is not None:
+            _commit_timer.cancel()
+            _commit_timer = None
+        if not _commit_queue or _is_committing:
+            return
+        worker_url = get_worker_url()
+        if not worker_url:
+            # 아직 Cloudflare Worker URL이 설정되지 않은 경우 로컬 pending_commits.json에만 보존
+            return
+        safe, _ = is_cloud_upload_safe()
+        if not safe:
+            return
+
+        _is_committing = True
+        snapshot_items = [
+            {"cat": cat, "lang": lang, "src": src, "tgt": tgt}
+            for (cat, lang, src), tgt in _commit_queue.items()
+        ]
+        _commit_queue.clear()
+
+    def _do_commit():
+        global _is_committing, _consecutive_upload_errors, _circuit_breaker_until
+        # Cloudflare Worker 무료 플랜 CPU 제한(10ms) 및 타임아웃 방지를 위해 500개 단위로 안전 분할 전송
+        chunk_size = 500
+        committed_total = 0
+        failed_items = []
+
+
+        try:
+            for idx in range(0, len(snapshot_items), chunk_size):
+                chunk = snapshot_items[idx:idx + chunk_size]
+                try:
+                    raw_bytes = json.dumps({"items": chunk}, ensure_ascii=False).encode("utf-8")
+                    gz_payload = gzip.compress(raw_bytes, compresslevel=6)
+                    headers = {
+                        "Content-Type": "application/json",
+                        "Content-Encoding": "gzip",
+                    }
+                    r = requests.post(f"{worker_url}/commit", headers=headers, data=gz_payload, timeout=30)
+                    if r.status_code in (200, 201):
+                        committed_total += len(chunk)
+                        try:
+                            res_json = r.json()
+                            new_last_id = res_json.get("latest_id") or res_json.get("key")
+                            if new_last_id:
+                                sync_state = _load_sync_state()
+                                sync_state["last_commit_id"] = str(new_last_id)
+                                _save_sync_state(sync_state)
+                        except Exception:
+                            pass
+                    else:
+                        failed_items.extend(chunk)
+                        logging.warning(f"⚠️ Cloudflare 커밋 청크 응답 오류 (HTTP {r.status_code}): {r.text[:150]}")
+                except Exception as chunk_err:
+                    failed_items.extend(chunk)
+                    logging.warning(f"⚠️ Cloudflare 커밋 전송 보류 (다음 주기에 재시도): {chunk_err}")
+
+            if not failed_items:
+                _consecutive_upload_errors = 0
+                _save_pending_commits_to_disk()
+                logging.info(f"✅ [Cloudflare Commit] 신규 번역 {committed_total:,}개 일괄 커밋 완료!")
+            else:
+                _consecutive_upload_errors += 1
+                with _lock:
+                    for item in failed_items:
+                        key = (item["cat"], item["lang"], item["src"])
+                        if key not in _commit_queue:
+                            _commit_queue[key] = item["tgt"]
+                _save_pending_commits_to_disk()
+                if committed_total > 0:
+                    logging.info(f"✅ [Cloudflare Commit] {committed_total:,}개 커밋 완료 (보류 {len(failed_items):,}개는 다음 주기에 재시도)")
+                if _consecutive_upload_errors >= 3:
+                    _circuit_breaker_until = time.time() + 180
+        finally:
+            _is_committing = False
+
+    t = threading.Thread(target=_do_commit, daemon=True)
+    t.start()
+    if sync_wait:
+        t.join(timeout=15.0)
+
+
+def upload_snapshots_to_cloudflare(force=False):
+    """
+    force=True 호출 시 현재 로컬 3대 마스터 캐시를 Gzip 압축하여 Cloudflare R2 스냅샷(/snapshot/:cat)으로 업로드합니다.
+    평상시(force=False)에는 매번 50MB 스냅샷을 재업로드하지 않고 가벼운 /commit 큐 방식만 사용합니다.
+    """
+    if not force:
+        return
+    worker_url = get_worker_url()
+    if not worker_url:
+        return
+
+    def _async_pack():
+        for cat, (gz_name, cache) in MASTER_FILES.items():
+            try:
+                with _lock:
+                    data_copy = {k: v.copy() for k, v in cache.items() if isinstance(v, dict)}
+                if not data_copy:
+                    continue
+                raw_json = json.dumps(data_copy, ensure_ascii=False, indent=2).encode("utf-8")
+                gz_bytes = gzip.compress(raw_json, compresslevel=9)
+                r = requests.put(
+                    f"{worker_url}/snapshot/{cat}",
+                    headers={"Content-Type": "application/gzip"},
+                    data=gz_bytes,
+                    timeout=60,
+                )
+                if r.status_code in (200, 201):
+                    logging.info(f"✅ Cloudflare R2 스냅샷 업로드 성공 [{gz_name}] ({len(gz_bytes)/1024:.1f} KB)")
+                else:
+                    logging.warning(f"⚠️ Cloudflare R2 스냅샷 업로드 실패 [{gz_name}]: {r.status_code} {r.text}")
+            except Exception as e:
+                logging.warning(f"스냅샷 업로드 오류 ({cat}): {e}")
+
+    threading.Thread(target=_async_pack, daemon=True).start()
+
+
+def wait_for_cloud_sync(timeout=6.0):
+    """클라우드 동기화(Pull)가 완료될 때까지 대기"""
     if _cloud_sync_done.is_set():
         return True
     return _cloud_sync_done.wait(timeout=timeout)
 
 
-def sync_from_supabase(force_wait=False):
+def sync_from_cloudflare(force_wait=False):
     """
-    하이브리드 2단계 고속 동기화:
-    1단계: Supabase Storage에서 3MB 마스터 압축 파일(master_*.json.gz)을 0.3초 만에 병렬 다운로드하여 Base Memory 구축
-    2단계: Supabase DB 테이블에서 최신 Delta 레코드를 동기화하여 실시간 병합
+    Cloudflare R2 순수 스토리지 기반 Git-Pull 증분 동기화:
+    1) 이미 최근 3분 이내에 동기화했다면 중복 네트워크 호출 없이 즉시 통과 (0 Byte 소모)
+    2) 로컬 캐시가 비어 있거나 스냅샷 ETag가 변경된 경우에만 R2에서 master_*.json.gz 다운로드 (304 Not Modified 지원)
+    3) 내 마지막 커밋 키(last_commit_id) 이후에 다른 유저들이 올린 신규 델타 커밋만 /pull 로 가볍게 병합
     """
     global _is_syncing
-    if "YOUR_PROJECT_REF" in SUPABASE_URL:
+    worker_url = get_worker_url()
+    if not worker_url:
         _cloud_sync_done.set()
+        return
+
+    now = time.time()
+    if _cloud_sync_done.is_set() and (now - _last_sync_timestamp < SYNC_COOLDOWN_SECONDS) and not force_wait:
         return
 
     with _lock:
@@ -744,20 +916,22 @@ def sync_from_supabase(force_wait=False):
             return
         _is_syncing = True
 
-    headers = {
-        "apikey": SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-    }
-
-    def _download_master_storage(category, filename, target_cache):
-        """Storage에서 master_*.json.gz 초고속 단일 다운로드 및 decompress"""
+    def _download_r2_master_if_needed(category, target_cache, sync_state):
+        """로컬 캐시가 비어있거나 스냅샷이 갱신되었을 때만 ETag 기반으로 R2 마스터 다운로드"""
         try:
-            url = f"{SUPABASE_URL}/storage/v1/object/public/{STORAGE_BUCKET}/{filename}?t={int(time.time())}"
-            r = requests.get(url, headers=headers, timeout=15)
+            etags = sync_state.setdefault("etags", {})
+            saved_etag = etags.get(category, "")
+            has_local_data = bool(target_cache)
+
+            headers = {}
+            if has_local_data and saved_etag:
+                headers["If-None-Match"] = saved_etag
+
+            r = requests.get(f"{worker_url}/master/{category}", headers=headers, timeout=15)
+            if r.status_code == 304:
+                return False
             if r.status_code == 200 and r.content:
-                raw_bytes = r.content
-                if filename.endswith(".gz"):
-                    raw_bytes = gzip.decompress(raw_bytes)
+                raw_bytes = gzip.decompress(r.content)
                 parsed = json.loads(raw_bytes.decode("utf-8"))
                 if isinstance(parsed, dict):
                     with _lock:
@@ -770,135 +944,105 @@ def sync_from_supabase(force_wait=False):
                             lang_norm = lang.replace(" ", "")
                             for src, tgt in entries.items():
                                 _index_template(src, tgt, lang_norm)
-                    logging.info(f"✅ Storage Master [{filename}] 로드 성공")
+                    new_etag = r.headers.get("ETag", "")
+                    if new_etag:
+                        etags[category] = new_etag
+                    logging.info(f"✅ Cloudflare R2 마스터 스냅샷 [{category}] 로드 완료")
+                    return True
         except Exception as e:
-            logging.debug(f"Storage Master [{filename}] 조회 실패 또는 미생성 (DB Fallback): {e}")
+            logging.debug(f"R2 마스터 [{category}] 확인 스킵: {e}")
+        return False
 
-    def _sync_single_table(category, table_name, target_cache):
-        """DB 테이블에서 최신 변경분(Delta) 동기화"""
+    def _pull_incremental_commits(sync_state):
+        """마지막 커밋 키(last_commit_id) 이후에 추가된 신규 델타 커밋만 Pull (R2 Git Pull 방식)"""
+        import urllib.parse
+        last_id = str(sync_state.get("last_commit_id", "") or "").strip()
+        if last_id.isdigit() and len(last_id) < 10:
+            last_id = ""
+        pulled_total = 0
         try:
-            h = dict(headers)
-            h["Prefer"] = "count=planned"
-            res = requests.get(f"{SUPABASE_URL}/rest/v1/{table_name}?select=src&limit=1", headers=h, timeout=10)
-            if res.status_code not in (200, 206):
-                return
-            content_range = res.headers.get("content-range", "")
-            total_count = int(content_range.split('/')[-1]) if '/' in content_range else 0
-            if total_count <= 0:
-                return
+            while True:
+                encoded_since = urllib.parse.quote(last_id)
+                r = requests.get(f"{worker_url}/pull?since={encoded_since}&limit=20", timeout=12)
+                if r.status_code != 200:
+                    break
+                data = r.json()
+                commits = data.get("commits", [])
+                latest_id = str(data.get("latest_id", last_id) or last_id).strip()
 
-            def fetch_page(offset):
-                url = f"{SUPABASE_URL}/rest/v1/{table_name}?select=lang,src,tgt&limit=1000&offset={offset}"
-                r = requests.get(url, headers=headers, timeout=15)
-                return r.json() if r.status_code == 200 else []
-
-            offsets = list(range(0, total_count, 1000))
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                for page in executor.map(fetch_page, offsets):
+                if commits:
                     with _lock:
-                        for row in page:
+                        for row in commits:
+                            cat = row.get("cat") or row.get("category") or "general"
                             lang = row.get("lang", "한국어 (Korean)")
                             src = row.get("src")
                             tgt = row.get("tgt")
                             if not is_valid_translation(src, tgt, lang):
                                 continue
+                            target_cache = _global_cache if cat == "general" else (_items_cache if cat == "items" else _books_cache)
                             if lang not in target_cache:
                                 target_cache[lang] = {}
                             target_cache[lang][src] = tgt
                             _index_template(src, tgt, lang.replace(" ", ""))
+                            pulled_total += 1
+
+                if latest_id and latest_id != last_id:
+                    last_id = latest_id
+                    sync_state["last_commit_id"] = last_id
+
+                if not data.get("has_more"):
+                    break
+
+            if pulled_total > 0:
+                logging.info(f"🔄 [Cloudflare R2 Pull] 신규 커밋 {pulled_total:,}개 증분 병합 완료 (최신: {last_id})")
         except Exception as e:
-            logging.warning(f"Supabase DB [{table_name}] 동기화 실패: {e}")
+            logging.debug(f"Cloudflare 증분 Pull 실패: {e}")
+        return pulled_total > 0
 
-    def _async_hybrid_sync():
-        global _is_syncing
+    def _async_cloudflare_sync():
+        global _is_syncing, _last_sync_timestamp
         try:
-            # 1단계: Storage Master 초고속 병렬 로드 (0.3초)
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                executor.submit(_download_master_storage, "general", "master_general.json.gz", _global_cache)
-                executor.submit(_download_master_storage, "items", "master_items.json.gz", _items_cache)
-                executor.submit(_download_master_storage, "books", "master_books.json.gz", _books_cache)
+            _load_pending_commits_from_disk()
+            sync_state = _load_sync_state()
 
-            # 2단계: DB Table Live Delta 동기화
+            # 1단계: 필요한 경우에만 R2 마스터 스냅샷 로드
+            changed_master = False
             with ThreadPoolExecutor(max_workers=3) as executor:
-                executor.submit(_sync_single_table, "general", TABLE_MAP["general"], _global_cache)
-                executor.submit(_sync_single_table, "items", TABLE_MAP["items"], _items_cache)
-                executor.submit(_sync_single_table, "books", TABLE_MAP["books"], _books_cache)
+                f1 = executor.submit(_download_r2_master_if_needed, "general", _global_cache, sync_state)
+                f2 = executor.submit(_download_r2_master_if_needed, "items", _items_cache, sync_state)
+                f3 = executor.submit(_download_r2_master_if_needed, "books", _books_cache, sync_state)
+                changed_master = any([f1.result(), f2.result(), f3.result()])
 
-            # 3단계: 로컬 백업 자동 저장
-            save_memory()
+            # 2단계: 마지막 커밋 이후 추가된 신규 델타 커밋만 Pull
+            changed_pull = _pull_incremental_commits(sync_state)
+
+            _save_sync_state(sync_state)
+            _last_sync_timestamp = time.time()
+
+            # 3단계: 단어사전(translation_memory_words.json) 무압축 원본 동기화
+            try:
+                import translation_word
+                translation_word.sync_words_from_cloudflare()
+            except Exception:
+                pass
+
+            # 4단계: 변경사항이 있었을 때만 로컬 파일 업데이트
+            if changed_master or changed_pull:
+                _save_local_caches_only()
+
+            # 5단계: 이전에 오프라인이라 못 보낸 대기 커밋이 있으면 자동 푸시
+            if _commit_queue:
+                flush_commit_queue()
         finally:
             _is_syncing = False
             _cloud_sync_done.set()
 
-    t = threading.Thread(target=_async_hybrid_sync, daemon=True)
+
+    t = threading.Thread(target=_async_cloudflare_sync, daemon=True)
     t.start()
     if force_wait:
-        t.join(timeout=10.0)
+        t.join(timeout=8.0)
 
-
-def upload_to_supabase(cache_dict, category="general"):
-    """Supabase 해당 테이블에 번역 데이터 일괄 업로드 (중복 자동 병합 - UPSERT)"""
-    global _consecutive_upload_errors, _circuit_breaker_until
-    if "YOUR_PROJECT_REF" in SUPABASE_URL or not cache_dict:
-        return
-
-    safe, reason = is_cloud_upload_safe()
-    if not safe:
-        logging.warning(f"🛡️ [클라우드 안전 셧다운] {reason}. 로컬 디스크에만 안전하게 저장합니다.")
-        return
-
-    table_name = TABLE_MAP.get(category, "translation_memory")
-
-    records = []
-    for lang, entries in list(cache_dict.items()):
-        if not isinstance(entries, dict):
-            continue
-        for src, tgt in list(entries.items()):
-            if is_valid_translation(src, tgt, lang):
-                records.append({
-                    "lang": lang,
-                    "src": src,
-                    "tgt": tgt,
-                })
-
-    if not records:
-        return
-
-    def _async_upload(records_to_upload):
-        global _consecutive_upload_errors, _circuit_breaker_until
-        headers = {
-            "apikey": SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates",  # 충돌 시 자동 업데이트 (UPSERT)
-        }
-        
-        # 3개 분리 테이블 모두 on_conflict=lang,src 입니다.
-        url = f"{SUPABASE_URL}/rest/v1/{table_name}?on_conflict=lang,src"
-
-        # 1000개씩 청크 단위로 분할 업로드
-        batch_size = 1000
-        for i in range(0, len(records_to_upload), batch_size):
-            chunk = records_to_upload[i:i + batch_size]
-            try:
-                r = requests.post(url, headers=headers, json=chunk, timeout=20)
-                if r.status_code not in (200, 201):
-                    _consecutive_upload_errors += 1
-                    logging.warning(f"Supabase 업로드 실패 ({table_name}): {r.status_code} {r.text}")
-                    if _consecutive_upload_errors >= 3:
-                        _circuit_breaker_until = time.time() + 300  # 5분간 차단
-                        logging.warning("⚠️ [서킷 브레이커 작동] 연속 통신 실패로 인해 5분간 클라우드 업로드를 중단합니다.")
-                else:
-                    _consecutive_upload_errors = 0
-                    logging.info(f"✅ Supabase [{table_name}] {len(chunk)}개 동기화 성공")
-            except Exception as e:
-                _consecutive_upload_errors += 1
-                logging.warning(f"Supabase 업로드 통신 오류 ({table_name}): {e}")
-                if _consecutive_upload_errors >= 3:
-                    _circuit_breaker_until = time.time() + 300
-                    logging.warning("⚠️ [서킷 브레이커 작동] 연속 통신 실패로 인해 5분간 클라우드 업로드를 중단합니다.")
-
-    threading.Thread(target=_async_upload, args=(records,), daemon=True).start()
 
 # ====================================================================
 # Memory Editor API (검색, 수정, 삭제)
@@ -918,7 +1062,6 @@ def search_memory(query, category="all", target_lang="한국어 (Korean)", limit
     query_lower = query.lower()
 
     def _search_in_cache(cache, cat_name):
-        nonlocal results
         for lang_key, entries in cache.items():
             if lang_key.replace(" ", "") != target_lang_norm:
                 continue
@@ -946,7 +1089,7 @@ def search_memory(query, category="all", target_lang="한국어 (Korean)", limit
     return results
 
 def update_memory_entry(category, original_src, new_tgt, target_lang="한국어 (Korean)"):
-    """캐시 업데이트 후 로컬/클라우드에 저장합니다."""
+    """캐시 업데이트 후 로컬 저장 및 클라우드 커밋 큐에 반영합니다."""
     target_lang_norm = target_lang.replace(" ", "")
     cache_to_update = None
     
@@ -956,23 +1099,13 @@ def update_memory_entry(category, original_src, new_tgt, target_lang="한국어 
     else: return False
 
     with _lock:
-        target_lang_key = target_lang_norm
-        for k in cache_to_update.keys():
-            if k.replace(" ", "") == target_lang_norm:
-                target_lang_key = k
-                break
-        if target_lang_key not in cache_to_update:
-            cache_to_update[target_lang_key] = {}
-            
-        cache_to_update[target_lang_key][original_src] = new_tgt
-        _index_template(original_src, new_tgt, target_lang_norm)
+        _store(cache_to_update, original_src, new_tgt, target_lang_norm)
         
-    # 백그라운드로 저장 & 업로드 트리거 (이 파일 내 함수 활용)
-    save_memory()
+    save_memory(flush_now=True)
     return True
 
 def delete_memory_entry(category, original_src, target_lang="한국어 (Korean)"):
-    """캐시에서 항목을 삭제하고, 클라우드 DB에서도 삭제를 수행합니다."""
+    """로컬 캐시에서 항목을 삭제합니다."""
     target_lang_norm = target_lang.replace(" ", "")
     cache_to_update = None
     
@@ -991,25 +1124,7 @@ def delete_memory_entry(category, original_src, target_lang="한국어 (Korean)"
                 break
                 
     if deleted:
-        save_memory()
-        
-        # Supabase DELETE 요청
-        def _async_delete():
-            if "YOUR_PROJECT_REF" in SUPABASE_URL: return
-            table_name = TABLE_MAP.get(category, "translation_memory")
-            headers = {
-                "apikey": SUPABASE_ANON_KEY,
-                "Authorization": f"Bearer {SUPABASE_ANON_KEY}"
-            }
-            try:
-                import urllib.parse
-                safe_src = urllib.parse.quote(original_src)
-                url = f"{SUPABASE_URL}/rest/v1/{table_name}?src=eq.{safe_src}"
-                requests.delete(url, headers=headers, timeout=10)
-            except Exception as e:
-                logging.warning(f"Supabase 삭제 실패: {e}")
-                
-        threading.Thread(target=_async_delete, daemon=True).start()
+        _save_local_caches_only()
     return True
 
 

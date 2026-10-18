@@ -1,5 +1,5 @@
 FONT_NAME = "Malgun Gothic"
-APP_VERSION = "v1.5.3-hotfix"
+APP_VERSION = "v1.5.4"
 TARGET_EXTENSIONS = ('.snbt', '.json', '.lang', '.hqm')
 SCAN_IGNORE_DIRS = {
     '.git', '.venv', '__pycache__',

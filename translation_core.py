@@ -2,6 +2,8 @@ import os
 import json
 import shutil
 import zipfile
+import tempfile
+import time
 import re
 from constants import has_non_latin
 import translation_memory
@@ -32,6 +34,31 @@ def _save_progress(out_dir, completed):
             json.dump({'completed': sorted(completed)}, f, ensure_ascii=False)
     except Exception:
         pass
+
+
+def cleanup_old_temp_files(max_age_seconds=3600):
+    """이전 세션의 비정상 종료나 취소로 인해 Temp 폴더에 남은 찌꺼기 임시 파일/폴더를 안전하게 정리합니다."""
+    temp_dir = tempfile.gettempdir()
+    now = time.time()
+    cleaned = 0
+    try:
+        for name in os.listdir(temp_dir):
+            if name.startswith(("_temp_raw_", "_temp_out_", "QuestTranslator_")):
+                full_path = os.path.join(temp_dir, name)
+                try:
+                    mtime = os.path.getmtime(full_path)
+                    if now - mtime > max_age_seconds:
+                        if os.path.isdir(full_path):
+                            shutil.rmtree(full_path, ignore_errors=True)
+                            cleaned += 1
+                        elif os.path.isfile(full_path):
+                            os.remove(full_path)
+                            cleaned += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return cleaned
 
 
 class TranslationUIContext:
@@ -181,15 +208,73 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
         skipped_translated = 0
         skipped_resume = 0
 
+        is_korean_target = ("한국어" in target_lang or "Korean" in target_lang)
+
+        def _find_sibling_ko_file(en_file_path, orig_rel_dir, ext):
+            if not is_korean_target:
+                return None
+            candidates_paths = []
+            raw_parent = os.path.dirname(en_file_path)
+            for ko_name in (f"ko_kr{ext}", f"ko_KR{ext}"):
+                candidates_paths.append(os.path.join(raw_parent, ko_name))
+                if modpack_path:
+                    candidates_paths.append(os.path.join(modpack_path, orig_rel_dir, ko_name) if orig_rel_dir else os.path.join(modpack_path, ko_name))
+            for cp in candidates_paths:
+                if os.path.isfile(cp):
+                    return cp
+            return None
+
+        def _is_target_untranslated(raw_text):
+            if not raw_text or not str(raw_text).strip():
+                return False
+            clean_text = re.sub(r'^[&§][0-9a-fk-orA-FK-OR]', '', str(raw_text)).strip()
+            if not clean_text:
+                return False
+            # 1. 한글 또는 목표 언어 비라틴 문자가 이미 포함된 경우 -> 이미 번역됨
+            if has_non_latin(clean_text, target_lang=target_lang):
+                return False
+            words = clean_text.split()
+            # 2. 3단어 이상의 긴 문장인데 목표 언어 문자가 없다면 100% 미번역 본문
+            if len(words) >= 3:
+                return True
+            # 3. 1~2단어 짧은 고유명사/약어/티어 명칭:
+            from translation_engines import is_code_or_id
+            if is_code_or_id(clean_text):
+                return False
+            # 이미 번역 메모리(캐시)에 등록되어 있는 문장이면 (원문 유지 번역 포함) 번역 완료로 판정
+            cached = (translation_memory.get_cached_translation(clean_text, target_lang) or
+                      translation_memory.get_cached_item_translation(clean_text, target_lang) or
+                      translation_memory.get_cached_book_translation(clean_text, target_lang))
+            if cached is not None:
+                return False
+            return True
+
+        # 클라우드 마스터 번역 메모리를 먼저 동기화 완료한 뒤 내장 ko_kr 패치를 적용하여
+        # 백그라운드 클라우드 동기화가 내장 공식 한글패치를 덮어쓰는 현상 방지
+        context.set_status("🌐 클라우드 마스터 번역 메모리 확인 중...")
+        translation_memory.load_memory()
+        translation_memory.wait_for_cloud_sync(timeout=6.0)
+
+        harvested_ko_keys = 0
+
         for idx, file_path in enumerate(target_files, 1):
             rel_path = os.path.relpath(file_path, raw_dir)
-            
-            # en_us.lang 등의 영어 언어 파일을 ko_kr.lang으로 변환하여 생성
+            orig_rel_dir = os.path.dirname(rel_path)
             base_name = os.path.basename(rel_path).lower()
+
+            # 같은 폴더에 en_us가 존재하는 경우, 단독 ko_kr 파일은 en_us 병합 시 함께 처리하므로 중복 덮어쓰기 방지
+            if base_name in ('ko_kr.lang', 'ko_kr.json') and ('lang' in rel_path.lower() or 'resources' in rel_path.lower()):
+                ext = '.json' if base_name.endswith('.json') else '.lang'
+                raw_parent = os.path.dirname(file_path)
+                if os.path.isfile(os.path.join(raw_parent, f"en_us{ext}")) or os.path.isfile(os.path.join(raw_parent, f"en_US{ext}")):
+                    continue
+
+            # en_us.lang 등의 영어 언어 파일을 ko_kr.lang으로 변환하여 생성
+            sibling_ko_path = None
             if base_name in ('en_us.lang', 'en_us.json') and ('lang' in rel_path.lower() or 'resources' in rel_path.lower()):
                 new_ext = '.json' if base_name.endswith('.json') else '.lang'
-                dir_name = os.path.dirname(rel_path)
-                rel_path = os.path.join(dir_name, f"ko_kr{new_ext}") if dir_name else f"ko_kr{new_ext}"
+                sibling_ko_path = _find_sibling_ko_file(file_path, orig_rel_dir, new_ext)
+                rel_path = os.path.join(orig_rel_dir, f"ko_kr{new_ext}") if orig_rel_dir else f"ko_kr{new_ext}"
 
             target_path = os.path.join(out_dir, rel_path)
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
@@ -201,12 +286,6 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
             if file_path.lower().endswith('.snbt'):
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
-                if has_non_latin(content):
-                    skipped_translated += 1
-                    shutil.copy2(file_path, target_path)
-                    completed_set.add(rel_path)
-                    _save_progress(out_dir, completed_set)
-                    continue
                 lines, targets = extract_snbt_targets(content)
                 if not targets:
                     skipped_no_targets += 1
@@ -214,8 +293,15 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                     completed_set.add(rel_path)
                     _save_progress(out_dir, completed_set)
                     continue
+                untranslated_targets = [t for t in targets if _is_target_untranslated(t[2])]
+                if not untranslated_targets:
+                    skipped_translated += 1
+                    shutil.copy2(file_path, target_path)
+                    completed_set.add(rel_path)
+                    _save_progress(out_dir, completed_set)
+                    continue
                 jobs.append({"kind": "snbt", "target_path": target_path, "rel_path": rel_path,
-                             "lines": lines, "targets": targets, "translated_map": {}})
+                             "lines": lines, "targets": untranslated_targets, "translated_map": {}})
             elif file_path.lower().endswith('.hqm'):
                 with open(file_path, 'rb') as f:
                     hqm_content = f.read()
@@ -251,12 +337,36 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     lines = f.read().splitlines()
 
+                ko_dict = {}
+                if sibling_ko_path:
+                    try:
+                        with open(sibling_ko_path, 'r', encoding='utf-8', errors='ignore') as kf:
+                            for kline in kf.read().splitlines():
+                                if '=' in kline and not kline.strip().startswith('#'):
+                                    kp = kline.split('=', 1)
+                                    if len(kp) == 2 and kp[0].strip() and kp[1].strip():
+                                        ko_dict[kp[0].strip()] = kp[1].strip()
+                    except Exception:
+                        pass
+
                 targets = []
                 for i, line in enumerate(lines):
                     if '=' in line and not line.strip().startswith('#'):
                         parts = line.split('=', 1)
                         if len(parts) == 2 and parts[1].strip() and not is_code_or_id(parts[1]):
-                            key_lower = parts[0].strip().lower()
+                            raw_key = parts[0].strip()
+                            en_val = parts[1].strip()
+                            key_lower = raw_key.lower()
+
+                            # 내장 ko_kr.lang에 이미 번역된 키가 있으면 기존 캐시 유무와 무관하게 무조건 공식 한글패치로 덮어쓰기
+                            if raw_key in ko_dict:
+                                ko_val = ko_dict[raw_key]
+                                if ko_val and ko_val != en_val and translation_memory.is_valid_translation(en_val, ko_val, target_lang):
+                                    lines[i] = f"{parts[0]}={ko_val}"
+                                    harvested_ko_keys += 1
+                                    is_it_key = key_lower.endswith('.name') or key_lower.startswith(('item.', 'block.', 'tile.', 'entity.'))
+                                    translation_memory.add_official_ko_to_memory(en_val, ko_val, target_lang, is_item=is_it_key)
+                                    continue
                             
                             # 1. 아이템/블록 이름 등은 번역에서 강제 제외 (호환성 보호)
                             if key_lower.endswith('.name') or key_lower.startswith('itemgroup.') or key_lower.startswith('key.'):
@@ -267,13 +377,14 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                             if not any(kw in key_lower for kw in valid_keywords):
                                 continue
 
-                            # 3. 한글이 이미 포함되어 있다면 번역 건너뛰기
-                            if not has_non_latin(parts[1]):
+                            # 3. 이미 번역되었거나 캐시/코드인 경우 건너뛰기
+                            if _is_target_untranslated(parts[1]):
                                 targets.append((i, parts[0] + "=", parts[1], ""))
                 
                 if not targets:
                     skipped_no_targets += 1
-                    shutil.copy2(file_path, target_path)
+                    with open(target_path, 'w', encoding='utf-8', newline='\n') as f:
+                        f.write('\n'.join(lines))
                     completed_set.add(rel_path)
                     _save_progress(out_dir, completed_set)
                     continue
@@ -289,14 +400,23 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                         completed_set.add(rel_path)
                         _save_progress(out_dir, completed_set)
                         continue
-                if has_non_latin(json.dumps(data, ensure_ascii=False)):
-                    skipped_translated += 1
-                    with open(target_path, 'w', encoding='utf-8') as f:
-                        json.dump(data, f, ensure_ascii=False, indent=2)
-                    completed_set.add(rel_path)
-                    _save_progress(out_dir, completed_set)
-                    continue
-                
+
+                if sibling_ko_path and isinstance(data, dict):
+                    try:
+                        with open(sibling_ko_path, 'r', encoding='utf-8', errors='ignore') as kf:
+                            ko_data = json.load(kf)
+                        if isinstance(ko_data, dict):
+                            for k_json, en_val in list(data.items()):
+                                if isinstance(en_val, str) and en_val.strip() and k_json in ko_data and isinstance(ko_data[k_json], str):
+                                    ko_val = ko_data[k_json].strip()
+                                    if ko_val and ko_val != en_val.strip() and translation_memory.is_valid_translation(en_val, ko_val, target_lang):
+                                        data[k_json] = ko_val
+                                        harvested_ko_keys += 1
+                                        is_it_key = k_json.lower().startswith(('item.', 'block.', 'tile.', 'entity.'))
+                                        translation_memory.add_official_ko_to_memory(en_val, ko_val, target_lang, is_item=is_it_key)
+                    except Exception:
+                        pass
+
                 from file_processors import collect_json_targets
                 node_targets = []
                 collect_json_targets(data, node_targets)
@@ -307,8 +427,25 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                     completed_set.add(rel_path)
                     _save_progress(out_dir, completed_set)
                     continue
+
+                # 이미 번역되었거나 캐시/코드인 노드는 번역 대상에서 제외
+                untranslated_node_targets = [nt for nt in node_targets if _is_target_untranslated(nt[2])]
+                if not untranslated_node_targets:
+                    skipped_translated += 1
+                    with open(target_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                    completed_set.add(rel_path)
+                    _save_progress(out_dir, completed_set)
+                    continue
+
                 jobs.append({"kind": "json", "target_path": target_path, "rel_path": rel_path,
-                             "data": data, "targets": node_targets})
+                             "data": data, "targets": untranslated_node_targets})
+
+        if harvested_ko_keys > 0:
+            context.log(f"🇰🇷 기존 ko_kr 언어 파일에서 {harvested_ko_keys:,}개의 공식 한글 키를 캐시로 가져와 번역 메모리에 저장했습니다.")
+            import translation_engines
+            if not getattr(translation_engines, "MOCK_MODE", False):
+                translation_memory.save_memory()
 
         context.log(f"🔎 분석 완료: 총 {total_files}개 중 {len(jobs)}개 번역 대기 (건너뜀: 재개 {skipped_resume}개, 완료됨 {skipped_translated}개, 텍스트없음 {skipped_no_targets}개)")
 
@@ -397,12 +534,27 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
             apply_mode = False
 
         if apply_mode is None:
-            context.log(f"⚠️ 저장 및 적용이 취소되었습니다. 임시 결과 폴더에 파일이 남아있습니다:\n{out_dir}")
+            context.log("⚠️ 저장 및 적용이 취소되었습니다. 임시 작업 폴더를 정리합니다.")
+            shutil.rmtree(out_dir, ignore_errors=True)
             return
 
         if apply_mode is True:
             context.log(f"\n📦 원본 모드팩에 즉시 덮어쓰기 시작: {modpack_path}")
+            # _progress.json 파일은 모드팩에 유출되지 않도록 복사 전 제거
+            prog_in_out = os.path.join(out_dir, PROGRESS_FILE)
+            if os.path.exists(prog_in_out):
+                try:
+                    os.remove(prog_in_out)
+                except Exception:
+                    pass
             shutil.copytree(out_dir, modpack_path, dirs_exist_ok=True)
+            # 모드팩 루트에 예전 버전에서 복사되었던 _progress.json 잔여물이 있다면 자동 제거
+            prog_in_modpack = os.path.join(modpack_path, PROGRESS_FILE)
+            if os.path.exists(prog_in_modpack):
+                try:
+                    os.remove(prog_in_modpack)
+                except Exception:
+                    pass
             context.log(f"💾 덮어쓰기 완료: {modpack_path}")
             
             _generate_zip_review_report(context, raw_dir, out_dir, "덮어쓰기 완료: 번역 검수 리포트")
@@ -433,7 +585,8 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
             context.show_messagebox("info", "완료", f"모든 작업이 완료되었습니다!\n\n저장 위치:\n{out_zip_path}")
             shutil.rmtree(out_dir, ignore_errors=True)
         else:
-            context.log(f"⚠️ 저장 폴더 선택이 취소되었습니다. 번역 결과는 여기 남아있습니다:\n{out_dir}")
+            context.log("⚠️ 저장 폴더 선택이 취소되었습니다. 임시 작업 폴더를 정리합니다.")
+            shutil.rmtree(out_dir, ignore_errors=True)
 
     except TranslationCancelledError as e:
         context.log(f"\n🛑 {str(e)}")

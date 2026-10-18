@@ -29,6 +29,8 @@ a = Analysis(
         'anthropic',
         'translation_memory',
         'translation_core',
+        'translation_word',
+        'temp_session_logger',
         'patchouli_processor',
         'custom_book_processor',
         'constants',

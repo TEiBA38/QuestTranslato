@@ -491,6 +491,17 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
                         time.sleep(0.1)
                 else:
                     raise QuotaExceededError("Gemini API 한도(RPM/RPD) 초과로 더 이상 진행할 수 없습니다. 작업을 중단합니다.")
+            elif any(k in err for k in ("503", "UNAVAILABLE", "500", "502", "504", "overloaded", "high demand")):
+                if attempt < max_retries:
+                    wait_time = 8 * attempt
+                    if log_callback:
+                        log_callback(f"⚠️ [서버 일시 과부하(503)] {wait_time}초 대기 후 자동 재시도합니다... ({attempt}/{max_retries})")
+                    for _ in range(wait_time * 10):
+                        if cancel_checker and cancel_checker():
+                            raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+                        time.sleep(0.1)
+                else:
+                    raise Exception(f"Gemini 서버 일시 과부하(503)로 응답이 지연되고 있습니다. 잠시 후 다시 시도해주세요. ({err})")
             elif "API_KEY_INVALID" in err or "401" in err or "UNAUTHENTICATED" in err:
                 raise Exception("Gemini API 키가 유효하지 않습니다. 올바른 API 키인지 확인해주세요.")
             elif "404" in err or "NOT_FOUND" in err:

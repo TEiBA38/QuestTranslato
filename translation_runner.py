@@ -193,14 +193,15 @@ class TranslationMixin:
                 self.log("🗂️ 전체 모드(.lang) 번역 및 리소스팩 생성을 시작합니다...")
                 import mod_jar_extractor
                 import file_processors
-                import re
                 
                 mods_dir = os.path.join(modpack_dir, "mods")
                 if not os.path.isdir(mods_dir):
                     self.log("⚠️ mods 폴더를 찾을 수 없어 언어 파일을 번역할 수 없습니다.")
                     return
                     
-                langs_map = mod_jar_extractor.extract_lang_files_from_jars(mods_dir, log_callback=self.log)
+                langs_map, ko_langs_map = mod_jar_extractor.extract_lang_files_from_jars(
+                    mods_dir, log_callback=self.log, include_ko_kr=True
+                )
                 if not langs_map:
                     self.log("⚠️ 번역할 .lang 파일을 찾지 못했습니다.")
                     return
@@ -234,10 +235,55 @@ class TranslationMixin:
                         return False
                     return True
 
+                def _parse_ko_content(ko_zip_path, ko_content):
+                    res = {}
+                    try:
+                        if ko_zip_path.lower().endswith(('.json', '.json5')):
+                            ko_json = mod_jar_extractor._load_relaxed_json(ko_content)
+                            for k_item, v_item in ko_json.items():
+                                if isinstance(v_item, str) and v_item.strip():
+                                    res[k_item] = v_item.strip()
+                        else:
+                            for line in ko_content.splitlines():
+                                if '=' in line and not line.strip().startswith('#'):
+                                    k_item, v_item = line.split('=', 1)
+                                    k_item, v_item = k_item.strip(), v_item.strip()
+                                    if k_item and v_item:
+                                        res[k_item] = v_item
+                    except Exception as e:
+                        logging.debug(f"내장 ko_kr 파싱 스킵 ({ko_zip_path}): {e}")
+                    return res
+
+                # 클라우드 마스터 캐시를 먼저 동기화한 뒤 모드 내장 ko_kr을 덮어써서 공식 한글패치가 최우선 유지되도록 보장
+                self.set_status("🌐 클라우드 마스터 번역 메모리 확인 중...")
+                translation_memory.load_memory()
+                translation_memory.wait_for_cloud_sync(timeout=6.0)
+
+                is_korean_target = ("한국어" in target_lang or "Korean" in target_lang)
+                official_ko_map = {}  # (jar_name, zip_path, key) -> clean_ko_val
+                official_ko_mods = set()
+
+                def _register_official_ko(jar_name, zip_path, k, en_v, ko_dict, is_it):
+                    if not is_korean_target or k not in ko_dict:
+                        return
+                    raw_ko = ko_dict[k].strip()
+                    suffix = f" ({en_v})"
+                    clean_ko = raw_ko[:-len(suffix)].strip() if raw_ko.endswith(suffix) else raw_ko
+                    if clean_ko and clean_ko != en_v.strip() and translation_memory.is_valid_translation(en_v, clean_ko, target_lang):
+                        official_ko_map[(jar_name, zip_path, k)] = clean_ko
+                        official_ko_mods.add(jar_name)
+                        # 이미 다른 번역 데이터가 캐시에 있더라도 공식 한글패치(ko_kr) 데이터로 모든 캐시(_items, _global, _modpack, _books)를 강제 덮어쓰기
+                        translation_memory.add_official_ko_to_memory(en_v, clean_ko, target_lang, is_item=is_it)
+
                 parsed_langs_map = {}
                 for jar_name, zip_dict in langs_map.items():
                     parsed_langs_map[jar_name] = {}
                     for zip_path, content in zip_dict.items():
+                        ko_dict = {}
+                        if is_korean_target and jar_name in ko_langs_map and zip_path in ko_langs_map[jar_name]:
+                            ko_zip_path, ko_content = ko_langs_map[jar_name][zip_path]
+                            ko_dict = _parse_ko_content(ko_zip_path, ko_content)
+
                         if zip_path.lower().endswith('.json') or zip_path.lower().endswith('.json5'):
                             try:
                                 json_data = mod_jar_extractor._load_relaxed_json(content)
@@ -246,6 +292,7 @@ class TranslationMixin:
                                     if isinstance(v, str) and v.strip():
                                         is_short = should_append_english(k, v)
                                         is_it = is_item_key_or_name(k, v)
+                                        _register_official_ko(jar_name, zip_path, k, v, ko_dict, is_it)
                                         all_targets.append((jar_name, zip_path, k, k, v, is_short, is_it))
                                         parsed_lines[k] = v
                                 parsed_langs_map[jar_name][zip_path] = ('json', parsed_lines, json_data)
@@ -262,11 +309,18 @@ class TranslationMixin:
                                     if v:
                                         is_short = should_append_english(k, v)
                                         is_it = is_item_key_or_name(k, v)
+                                        _register_official_ko(jar_name, zip_path, k, v, ko_dict, is_it)
                                         all_targets.append((jar_name, zip_path, idx, k, v, is_short, is_it))
                                     parsed_lines.append([k, v]) # [0] key, [1] value
                                 else:
                                     parsed_lines.append(line) # 그냥 텍스트
                             parsed_langs_map[jar_name][zip_path] = ('lang', parsed_lines, None)
+
+                if official_ko_map:
+                    self.log(f"🇰🇷 내장 한글패치 우선 적용: {len(official_ko_mods)}개 모드에서 {len(official_ko_map):,}개의 공식 한글 키를 캐시로 불러와 번역 메모리에 저장했습니다.")
+                    import translation_engines
+                    if not getattr(translation_engines, "MOCK_MODE", False):
+                        translation_memory.save_memory()
                 
                 # 중복 제거 (Batch 번역 최적화) 및 아이템 여부 매핑
                 unique_texts = []
@@ -290,7 +344,6 @@ class TranslationMixin:
                     if not is_item and translation_memory.get_cached_translation(t, target_lang) is None
                 ]
                 try:
-                    import random
                     if len(uncached_for_glossary) >= 50:
                         samples = uncached_for_glossary.copy()
                         random.shuffle(samples)
@@ -339,7 +392,6 @@ class TranslationMixin:
                 translation_dict = dict(zip(unique_texts, translated_unique))
                 
                 self.log("📦 번역된 텍스트를 .lang 구조에 맞게 조립합니다...")
-                import re
                 def validate_format_specifiers(orig, trans):
                     if not orig or not trans: return False
                     # Minecraft uses Java String.format, e.g., %s, %d, %1$s, %.2f, %%
@@ -350,13 +402,13 @@ class TranslationMixin:
 
                 # 재조립
                 for (jar_name, zip_path, idx, k, v, is_short, is_it) in all_targets:
-                    trans_v = translation_dict.get(v, v)
+                    trans_v = official_ko_map.get((jar_name, zip_path, k)) or translation_dict.get(v, v)
                     
                     # 🚀 크래시 방지 로직: 원본에 %s 같은 포맷 문자가 있는데 번역본에서 누락되었거나 변형되었다면 원본으로 복구
                     if trans_v != v and not validate_format_specifiers(v, trans_v):
                         trans_v = v
 
-                    if trans_v and is_short and str(trans_v).strip() != str(v).strip():
+                    if trans_v and is_short and str(trans_v).strip() != str(v).strip() and not str(trans_v).strip().endswith(f"({v})"):
                         # 아이템 이름이면 영어 병기 (한국어 이름 (English Name))
                         # 단, 원본에 %s 등 포맷 지정자가 있으면 병기하면 안됨 (개수가 2배로 불어나서 크래시)
                         has_fmt = re.search(r'%(\d+\$)?[a-zA-Z]', v)
@@ -386,7 +438,6 @@ class TranslationMixin:
                                     out_lines.append(line)
                             final_langs_map[jar_name][zip_path] = "\n".join(out_lines)
                         else:
-                            import json
                             for k, v in lines_or_dict.items():
                                 orig_json[k] = v
                             final_langs_map[jar_name][zip_path] = json.dumps(orig_json, ensure_ascii=False, indent=2)
@@ -430,8 +481,6 @@ class TranslationMixin:
                 if os.path.exists(partial_pack_path):
                     if mb.askyesno("이어하기", "이전에 중단된 부분 번역 리소스팩이 발견되었습니다.\n이어서 번역하시겠습니까? (이전에 번역된 페이지는 API를 소모하지 않고 건너뜁니다)"):
                         self.log("🔄 부분 번역 데이터에서 진행 상황을 복구합니다...")
-                        import zipfile
-                        import json
                         try:
                             with zipfile.ZipFile(partial_pack_path, 'r') as zf:
                                 for name in zf.namelist():
@@ -487,10 +536,13 @@ class TranslationMixin:
                     unique_texts = list(dict.fromkeys(original_texts))
                     self.log(f"✂️ 중복 제거 후 실제 번역할 고유 텍스트는 {len(unique_texts)}개 입니다. 일괄 번역 시작!")
                     
+                    self.set_status("🌐 클라우드 마스터 번역 메모리 확인 중...")
+                    translation_memory.load_memory()
+                    translation_memory.wait_for_cloud_sync(timeout=6.0)
+
                     # 용어 자동 추출: 실제로 새로 번역할 텍스트가 충분히 많을 때만 실행
                     uncached_patchouli = [t for t in unique_texts if translation_memory.get_cached_book_translation(t, target_lang) is None]
                     try:
-                        import random
                         if len(uncached_patchouli) >= 50:
                             samples = uncached_patchouli.copy()
                             random.shuffle(samples)
@@ -518,7 +570,6 @@ class TranslationMixin:
                         self.log(f"⚠️ 용어 추출 중 오류가 발생했으나 번역은 계속 진행합니다: {e}")
                     
                     import file_processors
-                    from translation_engines import translate_deepl, translate_openai, translate_google
                     
                     def prog_cb(c, t):
                         self.update_progress(c / t if t > 0 else 1)
@@ -608,7 +659,6 @@ class TranslationMixin:
             import mod_jar_extractor
             import custom_book_processor
             import file_processors
-            from translation_engines import translate_deepl, translate_openai, translate_google
             
             mods_dir = os.path.join(modpack_dir, "mods")
             if not os.path.isdir(mods_dir):
@@ -619,6 +669,10 @@ class TranslationMixin:
                 self.log("⚠️ 번역할 커스텀 가이드북을 찾지 못했습니다.")
                 return {}
                 
+            self.set_status("🌐 클라우드 마스터 번역 메모리 확인 중...")
+            translation_memory.load_memory()
+            translation_memory.wait_for_cloud_sync(timeout=6.0)
+
             def check_cancel():
                 return getattr(self.app_state, 'cancel_requested', False)
                 
@@ -776,7 +830,7 @@ class TranslationMixin:
         if not file_path:
             return
         threading.Thread(target=self._process_single_file,
-                         args=(file_path, engine_key, api_key, is_paid, ai_model, target_lang), daemon=True).start()
+                         args=(file_path, engine_key, api_key, is_paid, ai_model, target_lang, custom_url), daemon=True).start()
 
     def _process_single_file(self, file_path, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):
         self.app_state.cancel_requested = False
@@ -790,12 +844,21 @@ class TranslationMixin:
         self.log(f"\n🎯 파일 작업 시작: '{file_name}'")
         self.log(f"🧩 선택 옵션: 엔진={engine_label} / 모드={mode_str}")
 
+        import temp_session_logger
+        if temp_session_logger.is_debug_mode():
+            self.log("🛠️ [샌드박스 디버그 모드 ON] 원본 캐시 파일 보호 중 | 결과는 dist/temp/ 폴더에 안전하게 기록됩니다.")
+
         def progress_cb(current, total):
             prog = current / total if total > 0 else 1
             self.update_progress(prog)
             self.set_status(f"⏳ 번역 진행 중... [{current}/{total}] ({int(prog * 100)}%)")
 
         try:
+            self.set_status("🌐 클라우드 마스터 번역 메모리 확인 중...")
+            translation_memory.load_memory()
+            translation_memory.wait_for_cloud_sync(timeout=6.0)
+
+            glossary_map = self.app_state.glossaries_by_lang.get(target_lang, {}) or getattr(self.app_state, 'glossary', {}) or {}
             translated_content = None
             json_data = None
             source_content = None
@@ -806,7 +869,7 @@ class TranslationMixin:
                     content = f.read()
                 source_content = content
                 translated_content = process_snbt_with_progress(
-                    content, engine_key, api_key, is_paid, progress_cb, self.route_log, self.is_cancelled, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
+                    content, engine_key, api_key, is_paid, progress_cb, self.route_log, self.is_cancelled, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
             elif file_path.lower().endswith('.json'):
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     try:
@@ -814,14 +877,14 @@ class TranslationMixin:
                     except json.JSONDecodeError as e:
                         raise Exception(f"'{file_name}' 파일이 올바른 JSON 형식이 아닙니다 ({e.lineno}:{e.colno}: {e.msg})")
                 source_json_data = json.loads(json.dumps(json_data, ensure_ascii=False))
-                process_json_safely(json_data, engine_key, api_key, is_paid, progress_cb, self.route_log, self.is_cancelled, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
+                process_json_safely(json_data, engine_key, api_key, is_paid, progress_cb, self.route_log, self.is_cancelled, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
             elif file_path.lower().endswith('.hqm'):
                 with open(file_path, 'rb') as f:
                     content = f.read()
                 source_content = content
                 try:
                     translated_content = process_hqm_with_progress(
-                        content, engine_key, api_key, is_paid, progress_cb, self.route_log, self.is_cancelled, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
+                        content, engine_key, api_key, is_paid, progress_cb, self.route_log, self.is_cancelled, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
                 except ValueError as exc:
                     self.log(f"⚠️ HQM 처리 경고: {exc}")
                     translated_content = content
@@ -896,7 +959,7 @@ class TranslationMixin:
         if not zip_path:
             return
         threading.Thread(target=self._process_zip_file,
-                         args=(zip_path, engine_key, api_key, is_paid, ai_model, target_lang), daemon=True).start()
+                         args=(zip_path, engine_key, api_key, is_paid, ai_model, target_lang, None, custom_url), daemon=True).start()
 
     def _translate_jobs_parallel(self, jobs, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", on_job_completed=None):
         all_targets = []
@@ -924,7 +987,7 @@ class TranslationMixin:
             self.set_status(f"⏳ Gemini 묶음 번역 진행 중... [{c}/{t}]")
             self.update_progress(c / t if t > 0 else 1)
 
-        glossary_map = getattr(self, 'glossary', {}) or {}
+        glossary_map = self.app_state.glossaries_by_lang.get(target_lang, {}) or getattr(self.app_state, 'glossary', {}) or {}
 
         import file_processors
         translated_texts = file_processors._run_batch_jobs(
@@ -946,7 +1009,8 @@ class TranslationMixin:
         for (job, item), trans in zip(all_targets, translated_texts):
             if job["kind"] == "snbt":
                 line_idx, prefix, _, suffix = item
-                job["translated_map"][line_idx] = f'{prefix}"{str(trans).replace(chr(34), chr(92)+chr(34))}"{suffix}'
+                clean_trans = file_processors._clean_snbt_string(trans)
+                job["translated_map"][line_idx] = f'{prefix}"{clean_trans}"{suffix}'
             elif job["kind"] == "lang":
                 line_idx, prefix, _, suffix = item
                 job["translated_map"][line_idx] = f'{prefix}{trans}{suffix}'
@@ -961,6 +1025,7 @@ class TranslationMixin:
 
     def _translate_jobs_sequential(self, jobs, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", on_job_completed=None, custom_url=None):
         total_files = len(jobs)
+        glossary_map = self.app_state.glossaries_by_lang.get(target_lang, {}) or getattr(self.app_state, 'glossary', {}) or {}
         try:
             for idx, job in enumerate(jobs, 1):
                 if self.is_cancelled():
@@ -975,12 +1040,8 @@ class TranslationMixin:
                 if job["kind"] == "snbt":
                     job["final_text"] = process_snbt_with_progress(
                         "\n".join(job["lines"]), engine_key, api_key, is_paid,
-                        progress_cb, self.route_log, self.is_cancelled, verbose=False, reference_map=None, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
+                        progress_cb, self.route_log, self.is_cancelled, verbose=False, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
                 elif job["kind"] == "lang":
-                    from translation_engines import translate_deepl, translate_openai, translate_google, translate_local_ai
-                    total_targets = len(job["targets"])
-                    glossary_map = getattr(self, 'glossary', {}) or {}
-                    
                     import file_processors
                     translated_texts = file_processors._run_batch_jobs(
                         job["targets"],
@@ -1004,7 +1065,7 @@ class TranslationMixin:
                 else:
                     process_json_safely(
                         job["data"], engine_key, api_key, is_paid,
-                        progress_cb, self.route_log, self.is_cancelled, verbose=False, reference_map=None, glossary=getattr(self, 'glossary', {}), ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
+                        progress_cb, self.route_log, self.is_cancelled, verbose=False, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
                 
                 if on_job_completed:
                     on_job_completed(job)
@@ -1378,6 +1439,14 @@ class TranslationMixin:
                 translation_memory.set_current_modpack(modpack_dir)
                 self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
                 
+                import temp_session_logger
+                if temp_session_logger.is_debug_mode():
+                    self.log("\n=======================================================")
+                    self.log("🛠️ [샌드박스 디버그 모드 작동 중]")
+                    self.log("  - 원본 캐시 파일(translation_memory_*.json)을 보호합니다.")
+                    self.log("  - 클라우드 커밋이 차단되며, 결과는 dist/temp/ 폴더에 안전하게 기록됩니다.")
+                    self.log("=======================================================")
+
                 # 1. Patchouli Books
                 self.update_progress(0.0)
                 self.log("\n==========================================")
@@ -1415,24 +1484,33 @@ class TranslationMixin:
                     clean_lang = lang_match.group(1).strip() if lang_match else target_lang.strip()
                     pack_filename = f"{modpack_name}[{clean_lang}].zip"
 
-                    output_zip = os.path.join(modpack_dir, pack_filename)
-                    mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map)
-                    self.log(f"🎉 통합 리소스팩 생성 완료!\n파일명: {pack_filename}\n경로: {output_zip}")
-
-                    # 마인크래프트 resourcepacks 폴더에도 자동 복사 배치
+                    # 마인크래프트 resourcepacks 폴더가 있으면 바로 그 안에 생성 (루트 중복 복제 방지)
                     rp_dir = os.path.join(modpack_dir, "resourcepacks")
                     if os.path.isdir(rp_dir):
-                        try:
-                            shutil.copy2(output_zip, os.path.join(rp_dir, pack_filename))
-                            self.log(f"📦 마인크래프트 resourcepacks 폴더에도 자동 연동되었습니다: {pack_filename}")
-                        except Exception as e:
-                            logging.debug(f"resourcepacks 폴더 복사 실패: {e}")
+                        output_zip = os.path.join(rp_dir, pack_filename)
+                        # 모드팩 루트에 예전에 생성되었던 중복 파일이 남아있다면 자동 정리
+                        legacy_root_zip = os.path.join(modpack_dir, pack_filename)
+                        if os.path.isfile(legacy_root_zip):
+                            try:
+                                os.remove(legacy_root_zip)
+                            except Exception:
+                                pass
+                    else:
+                        output_zip = os.path.join(modpack_dir, pack_filename)
+
+                    mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map)
+                    self.log(f"🎉 통합 리소스팩 생성 완료!\n파일명: {pack_filename}\n경로: {output_zip}")
                     
                     msg = f"모드팩 전체 번역이 완료되었습니다!\n\n생성된 리소스팩: '{pack_filename}'\n마인크래프트 리소스팩 설정에서 적용해주세요."
                     if not custom_map.get("pi_xml"):
                         mods_dir = os.path.join(modpack_dir, "mods")
                         if os.path.isdir(mods_dir) and any('draconic' in f.lower() or 'projectintelligence' in f.lower() for f in os.listdir(mods_dir)):
                             msg += "\n\n⚠️ 주의: 드라코닉 에볼루션 등(Project Intelligence)은 매뉴얼을 게임 내에서 실시간 다운로드합니다.\n게임을 켜서 인게임 태블릿을 한 번 연 뒤, 툴을 다시 돌려주셔야 해당 매뉴얼 한글화가 적용됩니다!"
+
+                    import temp_session_logger
+                    if temp_session_logger.is_debug_mode():
+                        saved_summary = temp_session_logger.save_temp_session()
+                        msg += f"\n\n🛠️ [샌드박스 디버그 모드 알림]\n원본 캐시 및 클라우드는 보호되었으며, 세션 결과가 아래에 임시 저장되었습니다:\n{saved_summary}"
                     
                     messagebox.showinfo("번역 완료", msg)
             finally:
@@ -1441,5 +1519,4 @@ class TranslationMixin:
                 self.update_progress(1.0)
                 self.set_status("대기 중")
 
-        import threading
         threading.Thread(target=run_translation_task, daemon=True).start()

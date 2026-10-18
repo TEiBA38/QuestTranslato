@@ -17,18 +17,59 @@ from translation_engines import (
 )
 
 import translation_memory
+import translation_word
+import temp_session_logger
+from constants import has_non_latin
+
+
+def _build_chunk_glossary(texts_chunk, base_glossary=None):
+
+    """
+    번역할 청크(texts_chunk)에 실제로 등장하는 순수 고유명사(Proper Nouns)만 추출하여
+    최소한의 토큰으로 동적 용어집(Dynamic Glossary)을 구성합니다.
+    """
+    dynamic_proper = translation_word.extract_proper_noun_glossary(texts_chunk)
+    if not base_glossary and not dynamic_proper:
+        return None
+
+    merged = {}
+    if isinstance(base_glossary, dict):
+        # 기본 용어집에서도 문맥 오염을 유발하는 단일 일반 영단어(동음이의어)는 배제하고,
+        # 복합 명사구이거나 고유명사 사전에 부합하는 항목만 선별
+        chunk_joined_lower = " ".join(texts_chunk).lower()
+        for k, v in base_glossary.items():
+            k_str = str(k).strip()
+            if not k_str:
+                continue
+            # 단어 경계(\b) 매칭: 'per'가 'copper' 등에 부분일치하지 않도록 독립 단어 검사
+            pattern = r'\b' + re.escape(k_str.lower()) + r'\b'
+            if not re.search(pattern, chunk_joined_lower):
+                continue
+            # 2단어 이상 고유 명칭이거나 일반 어휘가 아닌 경우만 허용
+            if " " in k_str or not translation_word.is_base_english_word(k_str):
+                merged[k_str] = str(v).split("#")[0].strip()
+
+    # translation_word의 검증된 고유명사 사전이 최우선
+    for en_low, ko_val in dynamic_proper.items():
+        merged[en_low] = ko_val
+
+    return merged if merged else None
+
 
 def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary=None, ai_model=None, target_lang="한국어 (Korean)", log_prefix="API 번역 진행 중", custom_url=None, is_item_flags=None, is_book_flags=None):
     total = len(items)
     translated_results = [None] * total
 
-    # 1단계: 글로벌/모드팩/아이템/가이드북 번역 메모리 조회
+    # 0단계: 백그라운드 클라우드 동기화가 진행 중이라면 완료될 때까지 짧게 대기 (다른 PC 간 캐시 누락 방지)
+    translation_memory.wait_for_cloud_sync(timeout=4.0)
+
+    # 1단계: 글로벌/모드팩/아이템/가이드북 마스터 번역 메모리 100% 일치 조회
     uncached_indices = []
     uncached_texts = []
     
     for i, item in enumerate(items):
         original_text = text_extractor(item)
-        if is_code_or_id(original_text):
+        if is_code_or_id(original_text) or has_non_latin(original_text):
             translated_results[i] = original_text
             continue
 
@@ -62,83 +103,128 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
         if cached_count > 0:
             log_callback(f"💾 [캐시 복원] 전체 {total:,}개 중 {cached_count:,}개({pct:.1f}%)를 클라우드/캐시에서 즉시 불러왔습니다! ➡️ 실제 번역 대상: {remaining_count:,}개")
         else:
-            log_callback(f"📝 [신규 번역] 캐시된 문장이 없어 전체 {total:,}개 문장을 AI로 번역합니다.")
+            log_callback(f"📝 [신규 번역] 캐시된 문장이 없어 전체 {total:,}개 문장을 분석 및 번역합니다.")
 
-    total_uncached = len(uncached_texts)
-
-    # 2단계: 파일 레벨 고유 텍스트 추출 및 역매핑 (중복 문장 토큰/비용 30~50% 절감!)
+    # 2단계: 파일 레벨 고유 텍스트 추출 및 역매핑 (중복 문장 토큰/비용 절감)
     unique_texts = []
+    unique_is_item = []
     text_to_unique_idx = {}
     uncached_to_unique_map = []
     
-    for txt in uncached_texts:
+    for idx_in_global, txt in zip(uncached_indices, uncached_texts):
         pos = text_to_unique_idx.get(txt)
+        is_item_flag = is_item_flags[idx_in_global] if is_item_flags else False
         if pos is None:
             pos = len(unique_texts)
             text_to_unique_idx[txt] = pos
             unique_texts.append(txt)
+            unique_is_item.append(is_item_flag)
+        elif is_item_flag:
+            unique_is_item[pos] = True
         uncached_to_unique_map.append(pos)
 
     total_unique = len(unique_texts)
     unique_translated = [None] * total_unique
 
+    # 3단계: [Case A] 명사구 로컬 단어 조립 (API 호출 없이 단어사전만으로 즉시 합성)
+    llm_target_entries = []  # [(unique_idx, text), ...]
+    assembled_count = 0
+
+    for u_idx, (u_text, u_item_hint) in enumerate(zip(unique_texts, unique_is_item)):
+        assembled = translation_word.try_assemble_noun_phrase(
+            u_text, target_lang=target_lang, is_item_hint=u_item_hint
+        )
+        if assembled is not None:
+            unique_translated[u_idx] = assembled
+            assembled_count += 1
+            temp_session_logger.record_case_a(u_text, assembled, "items" if u_item_hint else "general")
+        else:
+            llm_target_entries.append((u_idx, u_text))
+
+    if temp_session_logger.is_debug_mode() and log_callback:
+        log_callback("🛠️ [샌드박스 디버그 모드 ON] 원본 메모리/클라우드가 보호되며 결과는 dist/temp/session_summary.json 에 기록됩니다.")
+
+    if assembled_count > 0 and log_callback:
+        log_callback(
+            f"⚡ [단어 조립 캐시] {assembled_count:,}개 명사구를 로컬 단어사전 조합으로 즉시 완성했습니다! (API 호출 0, 0토큰)"
+        )
+
+
     def _flush_completed_to_memory():
         """현재까지 번역 완료된 항목들을 실시간으로 translation_memory에 안전하게 기록 (취소 시 유실 방지)"""
         import translation_engines
-        if getattr(translation_engines, "MOCK_MODE", False):
-            return
+        is_mock = getattr(translation_engines, "MOCK_MODE", False)
         for idx_in_global, orig, unique_pos in zip(uncached_indices, uncached_texts, uncached_to_unique_map):
             res = unique_translated[unique_pos]
             if res is not None:
                 translated_results[idx_in_global] = res
-                is_item = is_item_flags[idx_in_global] if is_item_flags else False
-                is_book = is_book_flags[idx_in_global] if is_book_flags else False
-                if is_item:
-                    translation_memory.add_item_to_memory(orig, res, target_lang)
-                elif is_book:
-                    translation_memory.add_book_to_memory(orig, res, target_lang)
-                else:
-                    translation_memory.add_to_memory(orig, res, target_lang)
+                if not is_mock:
+                    is_item = is_item_flags[idx_in_global] if is_item_flags else False
+                    is_book = is_book_flags[idx_in_global] if is_book_flags else False
+                    if is_item:
+                        translation_memory.add_item_to_memory(orig, res, target_lang)
+                    elif is_book:
+                        translation_memory.add_book_to_memory(orig, res, target_lang)
+                    else:
+                        translation_memory.add_to_memory(orig, res, target_lang)
+
+    # 조립 완료된 항목들을 우선 메모리에 즉시 반영
+    if assembled_count > 0:
+        _flush_completed_to_memory()
+        if progress_callback:
+            progress_callback(assembled_count, total_unique)
+
+    # 만약 모든 미번역 항목이 로컬 단어 조립만으로 100% 해결되었다면 즉시 종료!
+    if not llm_target_entries:
+        import translation_engines
+        if not getattr(translation_engines, "MOCK_MODE", False):
+            translation_memory.save_memory(flush_now=True)
+        return translated_results
+
+    total_llm = len(llm_target_entries)
 
     try:
         if is_paid:
             batch_size = 50
-            chunks = [(i, unique_texts[i:i + batch_size]) for i in range(0, total_unique, batch_size)]
-            completed_items = 0
+            chunks = [llm_target_entries[i:i + batch_size] for i in range(0, total_llm, batch_size)]
+            completed_items = assembled_count
 
-            def process_chunk(start_idx, texts_chunk):
+            def process_chunk(entry_chunk):
                 if cancel_checker and cancel_checker():
                     raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+                texts_chunk = [entry[1] for entry in entry_chunk]
+                chunk_glossary = _build_chunk_glossary(texts_chunk, glossary)
+
                 if engine_key == "local_ai":
-                    res = translate_local_ai(texts_chunk, custom_url, ai_model, api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=glossary, target_lang=target_lang)
+                    res = translate_local_ai(texts_chunk, custom_url, ai_model, api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
                 elif engine_key == "deepl":
-                    from translation_engines import translate_deepl
                     res = [translate_deepl(t, api_key, is_pro=is_paid, reference_map=reference_map, target_lang=target_lang) for t in texts_chunk]
                 elif engine_key == "openai":
-                    from translation_engines import translate_openai
-                    res = [translate_openai(t, api_key, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang) for t in texts_chunk]
+                    res = [translate_openai(t, api_key, reference_map=reference_map, glossary=chunk_glossary, ai_model=ai_model, target_lang=target_lang) for t in texts_chunk]
                 elif engine_key == "google":
-                    from translation_engines import translate_google
                     res = [translate_google(t, api_key, reference_map=reference_map, target_lang=target_lang) for t in texts_chunk]
                 else:
-                    res = translate_gemini_batch(texts_chunk, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
-                return start_idx, texts_chunk, res
+                    res = translate_gemini_batch(texts_chunk, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=chunk_glossary, ai_model=ai_model, target_lang=target_lang)
+                return entry_chunk, res, chunk_glossary
 
             with ThreadPoolExecutor(max_workers=min(8, len(chunks) or 1)) as executor:
-                futures = [executor.submit(process_chunk, idx, texts_chunk) for idx, texts_chunk in chunks]
+                futures = [executor.submit(process_chunk, chunk) for chunk in chunks]
                 for future in as_completed(futures):
                     if cancel_checker and cancel_checker():
                         executor.shutdown(wait=False, cancel_futures=True)
                         _flush_completed_to_memory()
                         translation_memory.save_memory()
                         raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                    start_idx, texts_chunk, res_texts = future.result()
+                    entry_chunk, res_texts, chunk_glossary = future.result()
                     
-                    for off, res in enumerate(res_texts):
-                        unique_translated[start_idx + off] = res
+                    for (u_idx, orig_txt), res in zip(entry_chunk, res_texts):
+                        clean_res = translation_word.post_validate_proper_nouns(orig_txt, res, chunk_glossary)
+                        unique_translated[u_idx] = clean_res
+                        translation_word.learn_from_pair(orig_txt, clean_res, is_official=False)
+                        temp_session_logger.record_case_b(orig_txt, clean_res, chunk_glossary, "items" if unique_is_item[u_idx] else "general")
                     
                     _flush_completed_to_memory()
-                    completed_items += len(texts_chunk)
+                    completed_items += len(entry_chunk)
                     if progress_callback:
                         progress_callback(completed_items, total_unique)
                     if log_callback:
@@ -146,37 +232,42 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
         else:
             # 무료 제미나이, Local AI, 또는 순차 번역
             batch_size = 40 if engine_key in ("gemini_batch", "local_ai") else 15
-            for i in range(0, total_unique, batch_size):
+            completed_items = assembled_count
+            for i in range(0, total_llm, batch_size):
                 if cancel_checker and cancel_checker():
                     _flush_completed_to_memory()
                     translation_memory.save_memory()
                     raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
 
-                texts_chunk = unique_texts[i:i + batch_size]
-                current_count = min(i + len(texts_chunk), total_unique)
+                entry_chunk = llm_target_entries[i:i + batch_size]
+                texts_chunk = [entry[1] for entry in entry_chunk]
+                chunk_glossary = _build_chunk_glossary(texts_chunk, glossary)
+
+                current_count = completed_items + len(entry_chunk)
                 if log_callback:
                     log_callback(f"⏳ {log_prefix}... [{current_count}/{total_unique}]")
 
                 if engine_key == "local_ai":
-                    res_texts = translate_local_ai(texts_chunk, custom_url, ai_model, api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=glossary, target_lang=target_lang)
+                    res_texts = translate_local_ai(texts_chunk, custom_url, ai_model, api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
                 elif engine_key == "deepl":
-                    from translation_engines import translate_deepl
                     res_texts = [translate_deepl(t, api_key, is_pro=False, reference_map=reference_map, target_lang=target_lang) for t in texts_chunk]
                 elif engine_key == "openai":
-                    from translation_engines import translate_openai
-                    res_texts = [translate_openai(t, api_key, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang) for t in texts_chunk]
+                    res_texts = [translate_openai(t, api_key, reference_map=reference_map, glossary=chunk_glossary, ai_model=ai_model, target_lang=target_lang) for t in texts_chunk]
                 elif engine_key == "google":
-                    from translation_engines import translate_google
                     res_texts = [translate_google(t, api_key, reference_map=reference_map, target_lang=target_lang) for t in texts_chunk]
                 else:
-                    res_texts = translate_gemini_batch(texts_chunk, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
+                    res_texts = translate_gemini_batch(texts_chunk, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=chunk_glossary, ai_model=ai_model, target_lang=target_lang)
                 
-                for off, res in enumerate(res_texts):
-                    unique_translated[i + off] = res
+                for (u_idx, orig_txt), res in zip(entry_chunk, res_texts):
+                    clean_res = translation_word.post_validate_proper_nouns(orig_txt, res, chunk_glossary)
+                    unique_translated[u_idx] = clean_res
+                    translation_word.learn_from_pair(orig_txt, clean_res, is_official=False)
+                    temp_session_logger.record_case_b(orig_txt, clean_res, chunk_glossary, "items" if unique_is_item[u_idx] else "general")
 
+                completed_items = current_count
                 _flush_completed_to_memory()
                 if progress_callback:
-                    progress_callback(current_count, total_unique)
+                    progress_callback(completed_items, total_unique)
 
         # 최종 전파 확인
         _flush_completed_to_memory()
@@ -185,9 +276,15 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
         _flush_completed_to_memory()
         import translation_engines
         if not getattr(translation_engines, "MOCK_MODE", False):
-            translation_memory.save_memory()
+            translation_memory.save_memory(flush_now=True)
+        if temp_session_logger.is_debug_mode():
+            saved_temp = temp_session_logger.save_temp_session()
+            if log_callback:
+                log_callback(f"📄 [샌드박스 세션 요약 저장] {saved_temp}")
         
     return translated_results
+
+
 
 
 def build_reference_translation_map(source_content, reference_content):
@@ -219,8 +316,8 @@ def extract_snbt_targets(content):
     targets = []
 
     kv_pattern = re.compile(r'^\s*("ftbquests\.[^"]+"\s*:\s*)"((?:[^"\\]|\\.)*)"(.*)$')
-    array_start_pattern = re.compile(r'^(.*?\b(text|description|hover)\s*:\s*\[\s*)(.*)$')
-    key_pattern = re.compile(r'^(.*?\b(title|subtitle|description|text|hover)\s*:\s*)"((?:[^"\\]|\\.)*)"(.*)$')
+    array_start_pattern = re.compile(r'^(.*?\b(text|description|hover|quest_desc|desc|subtitle|chapter_subtitle|quest_subtitle)\s*:\s*\[\s*)(.*)$')
+    key_pattern = re.compile(r'^(.*?\b(title|subtitle|description|text|hover|quest_desc|desc|chapter_subtitle|quest_subtitle)\s*:\s*)"((?:[^"\\]|\\.)*)"(.*)$')
     array_text_pattern = re.compile(r'^(\s*)"((?:[^"\\]|\\.)*)"(.*)$')
 
     for idx, line in enumerate(lines):
@@ -340,20 +437,28 @@ def process_snbt_with_progress(content, engine_key, api_key, is_paid=False, prog
     return rebuild_snbt(lines, translated_map)
 
 
-def collect_json_targets(node, target_list):
+def collect_json_targets(node, target_list, parent_key=""):
+    ignore_keys = ("command", "command:8", "cmd", "id", "id:8", "icon", "icon:10", "type", "type:8", "uid", "sound", "sound:8")
     if isinstance(node, dict):
         for k, v in node.items():
+            k_clean = str(k).strip().lower()
+            if k_clean in ignore_keys or any(k_clean.startswith(ign) for ign in ("command", "icon:", "item:", "tasks:")):
+                continue
             if isinstance(v, str) and v.strip() and not is_code_or_id(v):
-                if k.startswith("ftbquests.") or k in ["name:8", "desc:8", "name", "title", "subtitle", "description", "text", "details"]:
+                if k.startswith("ftbquests.") or k in ["name:8", "desc:8", "name", "title", "subtitle", "description", "text", "details", "quest_desc", "chapter_subtitle"]:
                     target_list.append((node, k, v))
-                elif len(v) > 3 and " " in v:
+                elif len(v) > 3 and " " in v and not any(k_clean.startswith(ign) for ign in ("id", "type", "tag")):
                     target_list.append((node, k, v))
             elif isinstance(v, (dict, list)):
-                collect_json_targets(v, target_list)
+                collect_json_targets(v, target_list, parent_key=k)
     elif isinstance(node, list):
-        for item in node:
-            if isinstance(item, (dict, list)):
-                collect_json_targets(item, target_list)
+        for idx, item in enumerate(node):
+            if isinstance(item, str) and item.strip() and not is_code_or_id(item):
+                # 명시적 설명문/텍스트 부모 키 아래에 있는 문자열 리스트만 수집 (명령어/태그 리스트 배제)
+                if parent_key in ["desc:8", "description", "text", "quest_desc", "details", "lines"]:
+                    target_list.append((node, idx, item))
+            elif isinstance(item, (dict, list)):
+                collect_json_targets(item, target_list, parent_key=parent_key)
 
 
 def process_json_safely(node, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, verbose=True, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):

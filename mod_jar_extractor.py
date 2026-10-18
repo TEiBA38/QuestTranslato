@@ -40,7 +40,16 @@ def _load_relaxed_json(json_string):
     # 3. Trailing commas (], 또는 }, 전에 있는 ,) 제거
     json_string = re.sub(r',\s*([\]}])', r'\1', json_string)
     
-    return json.loads(json_string)
+    # 4. 모드 제작자가 문자열 내부에 탭(\t)/개행 등 제어문자를 넣거나 파일 끝에 쓰레기 데이터를 남긴 경우까지 안전 파싱
+    json_string_stripped = json_string.strip()
+    try:
+        return json.loads(json_string_stripped, strict=False)
+    except json.JSONDecodeError as e:
+        if "Extra data" in str(e):
+            decoder = json.JSONDecoder(strict=False)
+            obj, _ = decoder.raw_decode(json_string_stripped)
+            return obj
+        raise
 
 def find_patchouli_books_in_jars(mods_dir, log_callback=None):
     """
@@ -160,7 +169,13 @@ def find_custom_guidebooks_in_jars(mods_dir, log_callback=None):
                         
                 # 3. Markdown (OpenComputers, BuildCraft)
                 if 'opencomputers' in jar_file.lower() or 'buildcraft' in jar_file.lower():
-                    md_files = [n for n in all_names if n.lower().startswith('assets/') and n.endswith('.md')]
+                    all_names_lower = {n.lower() for n in all_names}
+                    md_files = [
+                        n for n in all_names
+                        if n.lower().startswith('assets/') and n.endswith('.md')
+                        and ('en_us' in n.lower())
+                        and not (n.lower().replace('en_us', 'ko_kr') in all_names_lower)
+                    ]
                     for f in md_files:
                         content = zf.read(f).decode('utf-8', errors='ignore')
                         if jar_file not in found_books["markdown"]:
@@ -171,7 +186,12 @@ def find_custom_guidebooks_in_jars(mods_dir, log_callback=None):
 
                 # 4. Extra Utilities 2 (en_us.json book)
                 if 'extrautils2' in jar_file.lower():
-                    eu2_files = [n for n in all_names if n.lower().startswith('assets/extrautils2/lang/book/') and n.endswith('.json')]
+                    all_names_lower = {n.lower() for n in all_names}
+                    eu2_files = [
+                        n for n in all_names
+                        if n.lower().startswith('assets/extrautils2/lang/book/') and n.lower().endswith('en_us.json')
+                        and not (n.lower().replace('en_us.json', 'ko_kr.json') in all_names_lower)
+                    ]
                     for f in eu2_files:
                         try:
                             content = _load_relaxed_json(zf.read(f).decode('utf-8', errors='ignore'))
@@ -193,7 +213,7 @@ def find_custom_guidebooks_in_jars(mods_dir, log_callback=None):
     if os.path.isdir(pi_docs_dir):
         for root, dirs, files in os.walk(pi_docs_dir):
             for file in files:
-                if file.endswith('.xml'):
+                if file.lower().endswith('.xml') and ('en_us' in file.lower() or 'en_us' in root.lower()) and 'ko_kr' not in file.lower():
                     file_path = os.path.join(root, file)
                     try:
                         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -295,29 +315,37 @@ def create_resource_pack(output_zip_path, translated_books_map, pack_description
                 json_str = json.dumps(json_data, ensure_ascii=False, indent=2)
                 zf.writestr(write_path, json_str)
 
-def extract_lang_files_from_jars(mods_dir, log_callback=None):
+def extract_lang_files_from_jars(mods_dir, log_callback=None, include_ko_kr=False):
     """
     mods 폴더 안의 모든 .jar 파일을 검사하여 assets/*/lang/en_us.lang 파일들을 찾습니다.
-    반환값: dict - { "jar_filename": { "zip_path": "lang_content_string" } }
+    include_ko_kr=True일 경우 모드 내장 한국어 파일(ko_kr.lang, ko_kr.json 등)도 함께 추출하여 반환합니다.
+    반환값:
+      - include_ko_kr=False: dict - { "jar_filename": { "zip_path": "lang_content_string" } }
+      - include_ko_kr=True: (found_langs, found_ko_langs)
+        found_ko_langs 형식: { "jar_filename": { "en_zip_path": ("ko_zip_path", "ko_content_string") } }
     """
     found_langs = {}
+    found_ko_langs = {}
     if not os.path.isdir(mods_dir):
         if log_callback:
             log_callback(f"⚠️ mods 폴더를 찾을 수 없습니다: {mods_dir}")
-        return found_langs
+        return (found_langs, found_ko_langs) if include_ko_kr else found_langs
 
     jar_files = [f for f in os.listdir(mods_dir) if f.lower().endswith('.jar')]
     
     if log_callback:
-        log_callback(f"🔍 {len(jar_files)}개의 모드(.jar) 파일에서 en_us.lang 파일을 스캔합니다...")
+        log_callback(f"🔍 {len(jar_files)}개의 모드(.jar) 파일에서 언어 파일(en_us / ko_kr)을 스캔합니다...")
+
+    global_ko_by_dir = {}  # { "assets/modid/lang": ("ko_zip_path", "ko_content_string") }
 
     for jar_file in jar_files:
         jar_path = os.path.join(mods_dir, jar_file)
         try:
             with zipfile.ZipFile(jar_path, 'r') as zf:
+                namelist = zf.namelist()
                 # assets/.../lang/en_us.lang 또는 en_us.json 찾기
                 lang_files = [
-                    name for name in zf.namelist() 
+                    name for name in namelist 
                     if (name.lower().endswith('en_us.lang') or name.lower().endswith('en_us.json') or name.lower().endswith('en_us.json5')) 
                     and name.startswith('assets/') 
                     and '/lang/' in name.lower()
@@ -326,22 +354,62 @@ def extract_lang_files_from_jars(mods_dir, log_callback=None):
                     and '/lexicon/' not in name.lower()
                 ]
                 
+                ko_files = []
+                if include_ko_kr:
+                    ko_files = [
+                        name for name in namelist
+                        if (name.lower().endswith('ko_kr.lang') or name.lower().endswith('ko_kr.json') or name.lower().endswith('ko_kr.json5'))
+                        and name.startswith('assets/')
+                        and '/lang/' in name.lower()
+                        and '/book/' not in name.lower()
+                        and '/patchouli_books/' not in name.lower()
+                        and '/lexicon/' not in name.lower()
+                    ]
+
+                jar_ko_by_dir = {}
+                for kf in ko_files:
+                    try:
+                        ko_data = zf.read(kf)
+                        ko_text = ko_data.decode('utf-8', errors='ignore')
+                        dir_key = os.path.dirname(kf).lower()
+                        jar_ko_by_dir[dir_key] = (kf, ko_text)
+                        global_ko_by_dir[dir_key] = (kf, ko_text)
+                    except Exception as e:
+                        logging.warning(f"Error parsing ko_kr lang {kf} in {jar_file}: {e}")
+
                 if lang_files:
                     jar_langs = {}
+                    jar_ko_matched = {}
                     for lf in lang_files:
                         try:
                             data = zf.read(lf)
                             text_content = data.decode('utf-8', errors='ignore')
                             jar_langs[lf] = text_content
+                            dir_key = os.path.dirname(lf).lower()
+                            if dir_key in jar_ko_by_dir:
+                                jar_ko_matched[lf] = jar_ko_by_dir[dir_key]
                         except Exception as e:
                             logging.warning(f"Error parsing lang {lf} in {jar_file}: {e}")
                     
                     if jar_langs:
                         found_langs[jar_file] = jar_langs
+                    if jar_ko_matched:
+                        found_ko_langs[jar_file] = jar_ko_matched
         except Exception as e:
             logging.debug(f"Failed to read jar {jar_file}: {e}")
 
-    return found_langs
+    # 다른 JAR(예: 별도 한글패치/리소스 모드 JAR)에 분리되어 있는 ko_kr 파일도 네임스페이스(assets/modid/lang) 기준으로 매칭
+    if include_ko_kr and global_ko_by_dir:
+        for jar_file, jar_langs in found_langs.items():
+            for lf in jar_langs.keys():
+                dir_key = os.path.dirname(lf).lower()
+                if dir_key in global_ko_by_dir:
+                    if jar_file not in found_ko_langs:
+                        found_ko_langs[jar_file] = {}
+                    if lf not in found_ko_langs[jar_file]:
+                        found_ko_langs[jar_file][lf] = global_ko_by_dir[dir_key]
+
+    return (found_langs, found_ko_langs) if include_ko_kr else found_langs
 
 def create_lang_resource_pack(translated_langs, output_zip_path, modpack_dir=None):
     """
@@ -549,8 +617,8 @@ def apply_hybrid_patchouli_translations(mods_dir, translated_books_map, log_call
                 log_callback(f"⚠️ '{jar_name}' 하이브리드 패치 중 오류: {err}")
 
 def hotpatch_resource_pack(pack_zip_path, old_tgt, new_tgt):
-    import os, tempfile, shutil, json
-    import zipfile
+    import tempfile
+    import shutil
     
     if not os.path.exists(pack_zip_path):
         return

@@ -8,6 +8,11 @@ UI 구성(_setup_ui)과 생명주기 메서드만 담고,
   ui_screens.py       - 화면 전환, 레이아웃, 로그, 입력 검증
   modpack_manager.py  - 모드팩 스캔, 카드, 썸네일
   translation_runner.py - 번역 실행 (단일/ZIP/모드팩)
+
+TODO (구현 예정):
+  - [ ] 피드백(Feedback) 기능 추가 (Discord Webhook 연동)
+  - [ ] 버그 리포트(Bug Report) 기능 추가 (실행 로그 파일 자동 첨부 및 API 키 마스킹 후 Discord 전송)
+  - [ ] UI 성능 최적화 (CustomTkinter 병목 수술 및 장기적 PySide6/Qt6 전환 검토)
 """
 
 import os
@@ -57,7 +62,6 @@ if ctk is not None and TkinterDnD is not None:
             self._setup_ui()
 
         def _setup_logging(self):
-            import logging
             import datetime
             appdata_dir = os.getenv("APPDATA") or os.path.expanduser("~")
             log_dir = os.path.join(appdata_dir, "QuestTranslatorPro", "logs")
@@ -71,6 +75,11 @@ if ctk is not None and TkinterDnD is not None:
                 encoding='utf-8'
             )
             logging.info("================ QuestTranslatorPro Started ================")
+            try:
+                from translation_core import cleanup_old_temp_files
+                threading.Thread(target=cleanup_old_temp_files, kwargs={"max_age_seconds": 1800}, daemon=True).start()
+            except Exception:
+                pass
 
 
 
@@ -79,14 +88,16 @@ if ctk is not None and TkinterDnD is not None:
         # ====================================================================
 
         def _setup_ui(self):
-            self.title("Quest Translator Pro")
+            import temp_session_logger
+            if temp_session_logger.is_debug_mode():
+                self.title("Quest Translator Pro 🛠️ [샌드박스 디버그 모드 ON - 원본 캐시 보호 중]")
+            else:
+                self.title("Quest Translator Pro")
             self.geometry("1120x760")
             self.minsize(760, 560)
             self.resizable(True, True)
             self.configure(fg_color="#0b0b0f")
             
-            import sys
-            import os
             try:
                 base_path = sys._MEIPASS
             except Exception:
@@ -161,7 +172,7 @@ if ctk is not None and TkinterDnD is not None:
 
             # GitHub 바로가기 버튼 (배경 검은색, 공식 GitHub 화이트 로고)
             try:
-                import base64, io, webbrowser
+                import base64, io
                 from PIL import Image
                 gh_data = base64.b64decode(GITHUB_ICON_B64)
                 gh_pil = Image.open(io.BytesIO(gh_data))
@@ -187,6 +198,22 @@ if ctk is not None and TkinterDnD is not None:
                 command=lambda: webbrowser.open(GITHUB_REPO_URL)
             )
             self.github_btn.pack(side="right")
+
+            import temp_session_logger
+            if temp_session_logger.is_debug_mode():
+                self.debug_mode_badge = ctk.CTkButton(
+                    self.header_actions_frame,
+                    text="🛠️ 샌드박스 모드 ON (폴더 열기)",
+                    font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+                    fg_color="#b45309",
+                    hover_color="#d97706",
+                    text_color="#ffffff",
+                    height=30,
+                    corner_radius=8,
+                    cursor="hand2",
+                    command=lambda: os.startfile(temp_session_logger.get_temp_dir()) if hasattr(os, "startfile") else None
+                )
+                self.debug_mode_badge.pack(side="right", padx=(0, 8))
 
             self.update_banner_btn = ctk.CTkButton(
                 self.header_actions_frame, text="✨ 새 버전 출시! 클릭하여 업데이트",
@@ -215,7 +242,6 @@ if ctk is not None and TkinterDnD is not None:
                     info = updater.check_for_updates(timeout=6.0)
                     res.append(info)
                 except Exception as e:
-                    import logging
                     logging.debug(f"백그라운드 업데이트 확인 실패: {e}")
             threading.Thread(target=_worker, daemon=True).start()
 
@@ -283,7 +309,6 @@ if ctk is not None and TkinterDnD is not None:
                             "새로운 업데이트가 출시되면 다시 알려드립니다."
                         )
                 except Exception as err:
-                    import logging
                     logging.error(f"Manual update check error: {err}")
                 finally:
                     try:
@@ -801,13 +826,13 @@ if ctk is not None and TkinterDnD is not None:
                 with open(self.settings_path, "w", encoding="utf-8") as sf:
                     json.dump(settings, sf, ensure_ascii=False, indent=2)
             except Exception as e:
-                import logging
                 logging.error(f"설정 저장 실패: {e}")
 
         def on_close(self):
             try:
                 self.save_user_settings()
-                translation_memory.save_memory()
+                translation_memory.save_memory(flush_now=True)
+                translation_memory.flush_commit_queue(sync_wait=True)
                 if not self.do_backup_on_close():
                     return  # 사용자가 종료를 취소함
             except Exception:
@@ -817,7 +842,6 @@ if ctk is not None and TkinterDnD is not None:
                     self.destroy()
                 except Exception:
                     pass
-                import os
                 os._exit(0)
 
 else:
