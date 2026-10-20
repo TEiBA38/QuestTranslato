@@ -158,7 +158,7 @@ while (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {{
 }}
 Start-Sleep -Milliseconds 1000
 
-# 3. 파일 교체 시도 (최대 20회 재시도, 파일 잠금 해제 대기)
+# 3. 파일 교체 시도 (최대 20회 재시도, 파일 잠금 해제 대기 및 NTFS Rename 안전망)
 $copied = $false
 for ($i = 0; $i -lt 20; $i++) {{
     try {{
@@ -166,7 +166,18 @@ for ($i = 0; $i -lt 20; $i++) {{
         $copied = $true
         break
     }} catch {{
-        Start-Sleep -Milliseconds 500
+        # 파일이 잠겨있을 경우 NTFS Rename 트릭 (기존 파일 .old 로 이동 후 복사)
+        try {{
+            $oldBak = "$target.old"
+            Remove-Item -LiteralPath $oldBak -Force -ErrorAction SilentlyContinue
+            Rename-Item -LiteralPath $target -NewName ([System.IO.Path]::GetFileName($oldBak)) -Force -ErrorAction Stop
+            Copy-Item -LiteralPath $newBin -Destination $target -Force -ErrorAction Stop
+            $copied = $true
+            Remove-Item -LiteralPath $oldBak -Force -ErrorAction SilentlyContinue
+            break
+        }} catch {{
+            Start-Sleep -Milliseconds 500
+        }}
     }}
 }}
 
@@ -219,7 +230,8 @@ if ($copied) {{
         close_fds=True
     )
 
-    sys.exit(0)
+    import os
+    os._exit(0)
 
 
 class UpdateDialog(ctk.CTkToplevel):

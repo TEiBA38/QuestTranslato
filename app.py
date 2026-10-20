@@ -90,6 +90,14 @@ if ctk is not None and TkinterDnD is not None:
                 os.makedirs(dist_dir, exist_ok=True)
                 modpack_dir = os.path.join(dist_dir, "translation_modpack")
                 os.makedirs(modpack_dir, exist_ok=True)
+
+                # 3. 이전 업데이트 백업 잔여물(.old) 정리
+                old_bin = os.path.join(target_dir, "QuestTranslatorPro.exe.old")
+                if os.path.exists(old_bin):
+                    try:
+                        os.remove(old_bin)
+                    except Exception:
+                        pass
             except Exception as e:
                 logging.warning(f"[AutoDeploy] 번들 리소스 배포 중 오류: {e}")
 

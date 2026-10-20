@@ -55,6 +55,7 @@
 ---
 
 ### 📦 배포 패키지 구성 (QuestTranslatorPro_v1.5.5)
-* **`QuestTranslatorPro_v1.5.5_with_cache.zip`**: 모든 마스터 캐시 및 모드팩별 캐시가 사전 탑재된 풀 패키지 (~125 MB)
-* **`QuestTranslatorPro_v1.5.5_without_cache.zip`**: 실행 파일 및 문서만 포함된 경량 패키지 (클라우드에서 필요한 캐시 자동 동기화, ~84 MB)
+* **`QuestTranslatorPro_v1.5.5_with_cache_windows.zip`**: 모든 마스터 캐시 및 모드팩별 캐시가 사전 탑재된 풀 패키지 (~125 MB)
+* **`QuestTranslatorPro_v1.5.5_without_cache_windows.zip`**: 실행 파일 및 문서만 포함된 경량 패키지 (클라우드에서 필요한 캐시 자동 동기화, ~85 MB)
+* **`QuestTranslatorPro.exe`**: 단독 실행 파일 (~85 MB)
 
