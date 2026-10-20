@@ -46,6 +46,9 @@ def package_release(build_exe=False, fix_folder_name=True):
     print(f"📄 EXE 복사: {exe_source} ➡️ {target_dir}")
     shutil.copy2(exe_source, os.path.join(target_dir, "QuestTranslatorPro.exe"))
 
+    # release 루트에도 단독 실행 파일 복사 (구버전 직접 exe 탐색 및 수동 다운로더 지원)
+    shutil.copy2(exe_source, os.path.join(release_root, "QuestTranslatorPro.exe"))
+
     try:
         from scripts.generate_readme_txt import generate_readme_txt
         generate_readme_txt(REPO_ROOT)
@@ -62,7 +65,6 @@ def package_release(build_exe=False, fix_folder_name=True):
         print(f"📄 텍스트 가이드 복사: README.txt ➡️ {target_dir}")
 
     # 3. 필수 로컬 캐시 파일 복사 (dist/ 하위)
-    # ※ master_*.json.gz는 R2 클라우드 동기화용 다운로드 스냅샷이므로 로컬 배포본에 이중 동봉하지 않아 42MB 절약
     essential_files = [
         "translation_memory.json",
         "translation_memory_items.json",
@@ -97,25 +99,25 @@ def package_release(build_exe=False, fix_folder_name=True):
 
     print(f"💾 필수 캐시 파일 {copied_files}개 + 모드팩 캐시 {modpack_copied}개 복사 완료 ({total_bytes / 1024 / 1024:.2f} MB)")
 
-    # 4. 캐시 포함 배포본 ZIP 생성 (ZIP 파일명에는 버전 포함)
-    zip_with_cache = os.path.join(release_root, f"QuestTranslatorPro_{clean_ver}_with_cache.zip")
-    zip_default = os.path.join(release_root, f"QuestTranslatorPro_{clean_ver}.zip")
-    print(f"🗜️ [캐시 포함] 배포용 ZIP 압축 중: {zip_with_cache}")
+    # 4. 캐시 포함 배포본 ZIP 생성 (구버전 호환을 위해 반드시 'windows' 키워드 포함)
+    zip_with_cache_win = os.path.join(release_root, f"QuestTranslatorPro_{clean_ver}_with_cache_windows.zip")
+    print(f"🗜️ [캐시 포함] 배포용 ZIP 압축 중: {zip_with_cache_win}")
 
-    with zipfile.ZipFile(zip_with_cache, 'w', zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(zip_with_cache_win, 'w', zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(target_dir):
             for f in files:
                 full_path = os.path.join(root, f)
                 rel_path = os.path.relpath(full_path, release_root)
                 zf.write(full_path, rel_path)
 
-    # 기본 이름 및 구형 호환용 복사본
-    shutil.copy2(zip_with_cache, zip_default)
-    legacy_with_cache = os.path.join(release_root, f"QuestTranslator_{clean_ver}_with_cache.zip")
-    shutil.copy2(zip_with_cache, legacy_with_cache)
-    sz_with_cache = os.path.getsize(zip_with_cache) / 1024 / 1024
+    # 호환용 복사본들 (구버전 updater의 'windows' 검색 및 명칭 변형 전수 지원)
+    shutil.copy2(zip_with_cache_win, os.path.join(release_root, f"QuestTranslatorPro_{clean_ver}_with_cache.zip"))
+    shutil.copy2(zip_with_cache_win, os.path.join(release_root, f"QuestTranslator_{clean_ver}_with_cache_windows.zip"))
+    shutil.copy2(zip_with_cache_win, os.path.join(release_root, f"QuestTranslator_{clean_ver}_with_cache.zip"))
+    shutil.copy2(zip_with_cache_win, os.path.join(release_root, f"QuestTranslatorPro_{clean_ver}.zip"))
+    sz_with_cache = os.path.getsize(zip_with_cache_win) / 1024 / 1024
 
-    # 5. 캐시 미포함 (Lite) 배포본 생성
+    # 5. 캐시 미포함 (Lite) 배포본 생성 (구버전 호환을 위해 반드시 'windows' 키워드 포함)
     lite_folder_name = "QuestTranslatorPro" if fix_folder_name else f"QuestTranslatorPro_{clean_ver}_without_cache"
     lite_target_dir = os.path.join(release_root, f"{folder_name}_lite_temp")
     if os.path.exists(lite_target_dir):
@@ -131,14 +133,13 @@ def package_release(build_exe=False, fix_folder_name=True):
     os.makedirs(os.path.join(lite_target_dir, "dist"), exist_ok=True)
     os.makedirs(os.path.join(lite_target_dir, "dist", "translation_modpack"), exist_ok=True)
 
-    zip_without_cache = os.path.join(release_root, f"QuestTranslatorPro_{clean_ver}_without_cache.zip")
-    print(f"🗜️ [캐시 미포함/Lite] 배포용 ZIP 압축 중: {zip_without_cache}")
+    zip_without_cache_win = os.path.join(release_root, f"QuestTranslatorPro_{clean_ver}_without_cache_windows.zip")
+    print(f"🗜️ [캐시 미포함/Lite] 배포용 ZIP 압축 중: {zip_without_cache_win}")
 
-    with zipfile.ZipFile(zip_without_cache, 'w', zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(zip_without_cache_win, 'w', zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(lite_target_dir):
             for f in files:
                 full_path = os.path.join(root, f)
-                # ZIP 내부 최상위 디렉터리를 'QuestTranslatorPro'로 패키징
                 rel_inside = os.path.relpath(full_path, lite_target_dir)
                 archive_name = os.path.join("QuestTranslatorPro", rel_inside)
                 zf.write(full_path, archive_name)
@@ -146,15 +147,17 @@ def package_release(build_exe=False, fix_folder_name=True):
     # 임시 폴더 정리
     shutil.rmtree(lite_target_dir, ignore_errors=True)
 
-    # 구형 명칭 호환용 복사본
-    legacy_without_cache = os.path.join(release_root, f"QuestTranslator_{clean_ver}_without_cache.zip")
-    shutil.copy2(zip_without_cache, legacy_without_cache)
-    sz_without_cache = os.path.getsize(zip_without_cache) / 1024 / 1024
+    # 호환용 복사본들
+    shutil.copy2(zip_without_cache_win, os.path.join(release_root, f"QuestTranslatorPro_{clean_ver}_without_cache.zip"))
+    shutil.copy2(zip_without_cache_win, os.path.join(release_root, f"QuestTranslator_{clean_ver}_without_cache_windows.zip"))
+    shutil.copy2(zip_without_cache_win, os.path.join(release_root, f"QuestTranslator_{clean_ver}_without_cache.zip"))
+    sz_without_cache = os.path.getsize(zip_without_cache_win) / 1024 / 1024
 
     print(f"\n🎉 [배포 패키징 완료!]")
-    print(f"📦 1. 캐시 포함 배포본: {zip_with_cache} ({sz_with_cache:.2f} MB)")
-    print(f"📦 2. 캐시 미포함 배포본: {zip_without_cache} ({sz_without_cache:.2f} MB)")
-    print(f"\n[압축 내부 폴더 구조 (버전 없이 깔끔하게 고정)]")
+    print(f"📦 1. 캐시 포함 배포본 (Windows): {zip_with_cache_win} ({sz_with_cache:.2f} MB)")
+    print(f"📦 2. 캐시 미포함 배포본 (Windows): {zip_without_cache_win} ({sz_without_cache:.2f} MB)")
+    print(f"📦 3. 단독 실행 파일: {os.path.join(release_root, 'QuestTranslatorPro.exe')}")
+    print(f"\n[압축 내부 폴더 구조]")
     print(f"QuestTranslatorPro/")
     print(f" ├── QuestTranslatorPro.exe")
     print(f" ├── README.md")
