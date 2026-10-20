@@ -58,8 +58,40 @@ if ctk is not None and TkinterDnD is not None:
         def __init__(self):
             super().__init__()
             self._setup_logging()
+            self._ensure_bundled_resources()
             self.TkdndVersion = TkinterDnD._require(self)
             self._setup_ui()
+
+        def _ensure_bundled_resources(self):
+            """
+            구 버전(v1.5.3/v1.5.4)에서 exe만 교체 업데이트되어 실행되었더라도,
+            새 실행 파일(v1.5.5+) 내부에 번들된 README.md, README.txt 등을
+            프로그램 실행 폴더에 자동으로 추출/동기화합니다.
+            """
+            try:
+                if getattr(sys, 'frozen', False):
+                    base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+                    target_dir = os.path.dirname(os.path.abspath(sys.executable))
+                else:
+                    base_dir = os.path.dirname(os.path.abspath(__file__))
+                    target_dir = os.path.abspath(".")
+
+                # 1. README 파일 복사 / 갱신
+                for fname in ("README.md", "README.txt"):
+                    src = os.path.join(base_dir, fname)
+                    dst = os.path.join(target_dir, fname)
+                    if os.path.exists(src) and os.path.abspath(src) != os.path.abspath(dst):
+                        import shutil
+                        shutil.copy2(src, dst)
+                        logging.info(f"[AutoDeploy] {fname} 자동 배포 완료 -> {dst}")
+
+                # 2. dist 폴더 및 translation_modpack 폴더 보장
+                dist_dir = os.path.join(target_dir, "dist")
+                os.makedirs(dist_dir, exist_ok=True)
+                modpack_dir = os.path.join(dist_dir, "translation_modpack")
+                os.makedirs(modpack_dir, exist_ok=True)
+            except Exception as e:
+                logging.warning(f"[AutoDeploy] 번들 리소스 배포 중 오류: {e}")
 
         def _setup_logging(self):
             import datetime

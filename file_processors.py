@@ -20,6 +20,7 @@ import translation_memory
 import translation_word
 import temp_session_logger
 from constants import has_non_latin
+from translation_word import sanitize_minecraft_formatting
 
 
 def _build_chunk_glossary(texts_chunk, base_glossary=None):
@@ -218,7 +219,7 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                     entry_chunk, res_texts, chunk_glossary = future.result()
                     
                     for (u_idx, orig_txt), res in zip(entry_chunk, res_texts):
-                        clean_res = translation_word.post_validate_proper_nouns(orig_txt, res, chunk_glossary)
+                        clean_res = sanitize_minecraft_formatting(orig_txt, translation_word.post_validate_proper_nouns(orig_txt, res, chunk_glossary))
                         unique_translated[u_idx] = clean_res
                         translation_word.learn_from_pair(orig_txt, clean_res, is_official=False)
                         temp_session_logger.record_case_b(orig_txt, clean_res, chunk_glossary, "items" if unique_is_item[u_idx] else "general")
@@ -259,7 +260,7 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                     res_texts = translate_gemini_batch(texts_chunk, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=chunk_glossary, ai_model=ai_model, target_lang=target_lang)
                 
                 for (u_idx, orig_txt), res in zip(entry_chunk, res_texts):
-                    clean_res = translation_word.post_validate_proper_nouns(orig_txt, res, chunk_glossary)
+                    clean_res = sanitize_minecraft_formatting(orig_txt, translation_word.post_validate_proper_nouns(orig_txt, res, chunk_glossary))
                     unique_translated[u_idx] = clean_res
                     translation_word.learn_from_pair(orig_txt, clean_res, is_official=False)
                     temp_session_logger.record_case_b(orig_txt, clean_res, chunk_glossary, "items" if unique_is_item[u_idx] else "general")

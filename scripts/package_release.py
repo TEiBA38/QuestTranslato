@@ -31,9 +31,9 @@ def package_release(build_exe=False):
         print(f"❌ 실행 파일({exe_source})을 찾을 수 없습니다.")
         return False
 
-    # 1. 릴리즈 대상 폴더 생성
+    # 1. 릴리즈 대상 폴더 생성 (QuestTranslatorPro_v1.5.5)
     clean_ver = APP_VERSION.strip()
-    folder_name = f"QuestTranslator_{clean_ver}"
+    folder_name = f"QuestTranslatorPro_{clean_ver}"
     release_root = os.path.join(REPO_ROOT, "release")
     target_dir = os.path.join(release_root, folder_name)
     target_dist = os.path.join(target_dir, "dist")
@@ -42,9 +42,24 @@ def package_release(build_exe=False):
         shutil.rmtree(target_dir, ignore_errors=True)
     os.makedirs(target_dist, exist_ok=True)
 
-    # 2. EXE 복사
+    # 2. EXE 및 가이드 문서 복사
     print(f"📄 EXE 복사: {exe_source} ➡️ {target_dir}")
     shutil.copy2(exe_source, os.path.join(target_dir, "QuestTranslatorPro.exe"))
+
+    try:
+        from scripts.generate_readme_txt import generate_readme_txt
+        generate_readme_txt(REPO_ROOT)
+    except Exception as e:
+        print(f"⚠️ README.txt 자동 생성 건너뜀: {e}")
+
+    readme_source = os.path.join(REPO_ROOT, "README.md")
+    readme_txt_source = os.path.join(REPO_ROOT, "README.txt")
+    if os.path.isfile(readme_source):
+        shutil.copy2(readme_source, os.path.join(target_dir, "README.md"))
+        print(f"📄 가이드 복사: README.md ➡️ {target_dir}")
+    if os.path.isfile(readme_txt_source):
+        shutil.copy2(readme_txt_source, os.path.join(target_dir, "README.txt"))
+        print(f"📄 텍스트 가이드 복사: README.txt ➡️ {target_dir}")
 
     # 3. 필수 마스터 캐시 및 데이터 파일 복사 (dist/ 하위)
     essential_files = [
@@ -59,10 +74,17 @@ def package_release(build_exe=False):
         "cloud_sync_state.json",
     ]
 
-    # 모드팩별 특화 캐시도 포함
-    for f in os.listdir(dist_source):
-        if f.startswith("translation_memory_modpack_") and f.endswith(".json") and not f.endswith(".bak"):
-            essential_files.append(f)
+    # 모드팩별 특화 캐시 폴더 생성 및 복사
+    target_modpack_dir = os.path.join(target_dist, "translation_modpack")
+    os.makedirs(target_modpack_dir, exist_ok=True)
+
+    src_modpack_dir = os.path.join(dist_source, "translation_modpack")
+    modpack_copied = 0
+    if os.path.isdir(src_modpack_dir):
+        for f in os.listdir(src_modpack_dir):
+            if f.endswith(".json") and not f.endswith(".bak"):
+                shutil.copy2(os.path.join(src_modpack_dir, f), os.path.join(target_modpack_dir, f))
+                modpack_copied += 1
 
     copied_files = 0
     total_bytes = 0
@@ -75,7 +97,7 @@ def package_release(build_exe=False):
             total_bytes += sz
             copied_files += 1
 
-    print(f"💾 필수 캐시 파일 {copied_files}개 복사 완료 ({total_bytes / 1024 / 1024:.2f} MB)")
+    print(f"💾 필수 캐시 파일 {copied_files}개 + 모드팩 캐시 {modpack_copied}개 복사 완료 ({total_bytes / 1024 / 1024:.2f} MB)")
 
     # 4. 캐시 포함 배포본 ZIP 생성
     zip_with_cache = os.path.join(release_root, f"{folder_name}_with_cache.zip")
@@ -89,20 +111,28 @@ def package_release(build_exe=False):
                 rel_path = os.path.relpath(full_path, release_root)
                 zf.write(full_path, rel_path)
 
-    # 기본 이름으로도 복사 유지 (기존 다운로더 호환)
+    # 기본 이름으로도 복사 유지 (호환용)
     shutil.copy2(zip_with_cache, zip_default)
+    # 구형 명칭 호환용 복사본
+    legacy_with_cache = os.path.join(release_root, f"QuestTranslator_{clean_ver}_with_cache.zip")
+    shutil.copy2(zip_with_cache, legacy_with_cache)
     sz_with_cache = os.path.getsize(zip_with_cache) / 1024 / 1024
 
     # 5. 캐시 미포함 (Lite) 배포본 생성
-    lite_folder_name = f"QuestTranslator_{clean_ver}_without_cache"
+    lite_folder_name = f"{folder_name}_without_cache"
     lite_target_dir = os.path.join(release_root, lite_folder_name)
     if os.path.exists(lite_target_dir):
         shutil.rmtree(lite_target_dir, ignore_errors=True)
     os.makedirs(lite_target_dir, exist_ok=True)
 
-    # Lite: 실행 파일만 포함 (클라우드 동기화로 필요시 캐시 자동 다운로드)
+    # Lite: 실행 파일 및 가이드 문서 포함 (클라우드 동기화로 필요시 캐시 자동 다운로드)
     shutil.copy2(exe_source, os.path.join(lite_target_dir, "QuestTranslatorPro.exe"))
+    if os.path.isfile(readme_source):
+        shutil.copy2(readme_source, os.path.join(lite_target_dir, "README.md"))
+    if os.path.isfile(readme_txt_source):
+        shutil.copy2(readme_txt_source, os.path.join(lite_target_dir, "README.txt"))
     os.makedirs(os.path.join(lite_target_dir, "dist"), exist_ok=True)
+    os.makedirs(os.path.join(lite_target_dir, "dist", "translation_modpack"), exist_ok=True)
 
     zip_without_cache = os.path.join(release_root, f"{folder_name}_without_cache.zip")
     print(f"🗜️ [캐시 미포함/Lite] 배포용 ZIP 압축 중: {zip_without_cache}")
@@ -114,6 +144,9 @@ def package_release(build_exe=False):
                 rel_path = os.path.relpath(full_path, release_root)
                 zf.write(full_path, rel_path)
 
+    # 구형 명칭 호환용 복사본
+    legacy_without_cache = os.path.join(release_root, f"QuestTranslator_{clean_ver}_without_cache.zip")
+    shutil.copy2(zip_without_cache, legacy_without_cache)
     sz_without_cache = os.path.getsize(zip_without_cache) / 1024 / 1024
 
     print(f"\n🎉 [배포 패키징 완료!]")
@@ -123,11 +156,15 @@ def package_release(build_exe=False):
     print(f"\n[구조 (캐시 포함)]")
     print(f"{folder_name}/")
     print(f" ├── QuestTranslatorPro.exe")
-    print(f" └── dist/ (마스터 캐시 {copied_files}개)")
+    print(f" ├── README.md")
+    print(f" ├── README.txt")
+    print(f" └── dist/ (마스터 캐시 {copied_files}개 + 모드팩 캐시 {modpack_copied}개)")
     print(f"\n[구조 (캐시 미포함)]")
     print(f"{lite_folder_name}/")
     print(f" ├── QuestTranslatorPro.exe")
-    print(f" └── dist/ (빈 폴더, 클라우드 자동 동기화)")
+    print(f" ├── README.md")
+    print(f" ├── README.txt")
+    print(f" └── dist/ (클라우드 자동 동기화용 빈 폴더)")
 
     return True
 

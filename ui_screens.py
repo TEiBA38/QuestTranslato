@@ -139,13 +139,19 @@ class UIScreensMixin:
     # 반응형 레이아웃
     # ====================================================================
 
-    def _on_window_resize(self, _event=None):
+    def _on_window_resize(self, event=None):
+        if event is not None and getattr(event, "widget", None) is not self:
+            return
+        new_width = max(self.winfo_width(), 1)
+        if hasattr(self, '_last_resize_width') and abs(new_width - self._last_resize_width) < 10:
+            return
         if self._resize_job is not None:
             self.after_cancel(self._resize_job)
-        self._resize_job = self.after(100, self._apply_responsive_layout)
+        self._resize_job = self.after(150, self._apply_responsive_layout)
 
     def _apply_responsive_layout(self):
         width = max(self.winfo_width(), 1)
+        self._last_resize_width = width
         self._arrange_path_buttons(width)
         self._arrange_quick_buttons(width)
 
@@ -193,20 +199,50 @@ class UIScreensMixin:
     # ====================================================================
 
     def log(self, message):
-        if threading.current_thread() is not threading.main_thread():
-            self.after(0, lambda: self.log(message))
+        if not message:
             return
-
-        if message and not message.startswith("⏳"):
+        if not message.startswith("⏳"):
             logging.info(message)
+
+        if not hasattr(self, '_log_queue'):
+            self._log_queue = []
+            self._log_flush_job = None
+            self._log_queue_lock = threading.Lock()
+
+        with self._log_queue_lock:
+            self._log_queue.append(message)
+            if self._log_flush_job is None:
+                if threading.current_thread() is threading.main_thread():
+                    self._log_flush_job = self.after(60, self._flush_log_queue)
+                else:
+                    self.after(0, self._schedule_log_flush)
+
+    def _schedule_log_flush(self):
+        if hasattr(self, '_log_flush_job') and self._log_flush_job is None:
+            self._log_flush_job = self.after(60, self._flush_log_queue)
+
+    def _flush_log_queue(self):
+        self._log_flush_job = None
+        if not hasattr(self, '_log_queue'):
+            return
+        with self._log_queue_lock:
+            if not self._log_queue:
+                return
+            batch = list(self._log_queue)
+            self._log_queue.clear()
+
         if not hasattr(self, 'log_textbox') or self.log_textbox is None:
             return
+
         try:
             self.log_textbox.configure(state="normal")
-            self.log_textbox.insert("end", message + "\n")
+            self.log_textbox.insert("end", "\n".join(batch) + "\n")
+            # 3500줄 초과 시 메모리 누수 방지 자동 가지치기
+            line_count = int(float(self.log_textbox.index("end-1c")))
+            if line_count > 3500:
+                self.log_textbox.delete("1.0", f"{line_count - 3000}.0")
             self.log_textbox.see("end")
             self.log_textbox.configure(state="disabled")
-            self.update_idletasks()
         except Exception:
             pass
 
@@ -860,22 +896,21 @@ class UIScreensMixin:
                 self.save_user_settings()
                 self.log(f"📖 [용어집 등록] '{clean_src}' = '{clean_tgt}' 규칙 저장 (향후 AI 오역 재발 방지)")
 
-        def do_search(*args):
-            for widget in list_frame.winfo_children():
-                widget.destroy()
-            current_items.clear()
-            check_vars.clear()
+        rendered_count = [0]
+        all_results = []
+        more_btn_frame = [None]
 
-            q = query_var.get().strip()
-            if len(q) < 2:
-                update_selected_count()
-                return
+        def render_batch():
+            if more_btn_frame[0] is not None:
+                try:
+                    more_btn_frame[0].destroy()
+                except Exception:
+                    pass
+                more_btn_frame[0] = None
 
-            f_val = field_var.get()
-            s_field = "src" if "EN" in f_val else ("tgt" if "KO" in f_val else "all")
-            results = translation_memory.search_memory(q, category=cat_var.get(), limit=300, search_field=s_field)
-
-            for i, r in enumerate(results):
+            start = rendered_count[0]
+            chunk = all_results[start:start + 40]
+            for r in chunk:
                 current_items.append(r)
                 var = ctk.BooleanVar(value=False)
                 check_vars.append(var)
@@ -895,7 +930,42 @@ class UIScreensMixin:
                 btn = ctk.CTkButton(row, text="선택", width=55, height=26, command=lambda item=r: on_item_click(item))
                 btn.pack(side="right", padx=6)
 
+            rendered_count[0] += len(chunk)
             update_selected_count()
+
+            if rendered_count[0] < len(all_results):
+                mf = ctk.CTkFrame(list_frame, fg_color="transparent")
+                mf.pack(fill="x", pady=6)
+                more_btn_frame[0] = mf
+                rem = len(all_results) - rendered_count[0]
+                ctk.CTkButton(
+                    mf,
+                    text=f"⬇️ 더 보기 (+{min(40, rem)}개 표시 / 남은 결과 {rem}개)",
+                    height=28,
+                    fg_color="#27272a",
+                    hover_color="#3f3f46",
+                    command=render_batch
+                ).pack(fill="x", padx=10)
+
+        def do_search(*args):
+            for widget in list_frame.winfo_children():
+                widget.destroy()
+            current_items.clear()
+            check_vars.clear()
+            rendered_count[0] = 0
+            all_results.clear()
+            more_btn_frame[0] = None
+
+            q = query_var.get().strip()
+            if len(q) < 2:
+                update_selected_count()
+                return
+
+            f_val = field_var.get()
+            s_field = "src" if "EN" in f_val else ("tgt" if "KO" in f_val else "all")
+            results = translation_memory.search_memory(q, category=cat_var.get(), limit=300, search_field=s_field)
+            all_results.extend(results)
+            render_batch()
 
         entry_search.bind("<Return>", do_search)
 

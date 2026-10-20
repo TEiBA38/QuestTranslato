@@ -6,7 +6,7 @@ a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.')] + collect_data_files('tkinterdnd2') + collect_data_files('customtkinter'),
+    datas=[('icon.ico', '.'), ('README.md', '.'), ('README.txt', '.')] + collect_data_files('tkinterdnd2') + collect_data_files('customtkinter'),
     hiddenimports=[
         'ui_screens',
         'modpack_manager',

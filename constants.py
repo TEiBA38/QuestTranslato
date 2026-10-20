@@ -1,5 +1,5 @@
 FONT_NAME = "Malgun Gothic"
-APP_VERSION = "v1.5.4"
+APP_VERSION = "v1.5.5"
 TARGET_EXTENSIONS = ('.snbt', '.json', '.lang', '.hqm')
 SCAN_IGNORE_DIRS = {
     '.git', '.venv', '__pycache__',
@@ -226,6 +226,8 @@ def has_non_latin(text, target_lang="한국어 (Korean)"):
         return False
     if "한국어" in target_lang or "Korean" in target_lang:
         return has_hangul(text)
+
+
     elif "일본어" in target_lang or "Japanese" in target_lang:
         for ch in str(text):
             code = ord(ch)
@@ -245,6 +247,7 @@ def has_non_latin(text, target_lang="한국어 (Korean)"):
                 return True
         return False
     return has_hangul(text)
+
 
 GITHUB_REPO_URL = "https://github.com/TEiBA38/QuestTranslato"
 

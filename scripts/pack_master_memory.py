@@ -51,23 +51,26 @@ def fetch_existing_r2_master(category):
 
 
 def fetch_d1_commits():
-    """Cloudflare D1에 쌓인 모든 증분 커밋 데이터를 /pull 엔드포인트로 조회"""
-    print("\n[1/3] Cloudflare D1 증분 커밋 데이터 추출 중...")
+    """Cloudflare R2에 쌓인 모든 증분 커밋 데이터를 /pull 엔드포인트로 조회"""
+    print("\n[1/3] Cloudflare R2 증분 커밋 데이터 추출 중...")
     commits_by_cat = {"general": {}, "items": {}, "books": {}}
-    last_id = 0
+    last_id = ""
     total_rows = 0
+    import urllib.parse
 
     try:
-        while True:
-            r = requests.get(f"{CLOUDFLARE_WORKER_URL}/pull?since={last_id}&limit=5000", timeout=20)
+        # 최대 10페이지(300커밋)까지만 빠르게 수집하여 타임아웃 방지
+        for _ in range(15):
+            encoded_since = urllib.parse.quote(str(last_id))
+            r = requests.get(f"{CLOUDFLARE_WORKER_URL}/pull?since={encoded_since}&limit=30", timeout=12)
             if r.status_code != 200:
                 break
             data = r.json()
             commits = data.get("commits", [])
-            latest_id = int(data.get("latest_id", last_id) or last_id)
+            latest_id = str(data.get("latest_id", last_id) or last_id).strip()
 
             for row in commits:
-                cat = row.get("category", "general")
+                cat = row.get("cat") or row.get("category") or "general"
                 if cat not in commits_by_cat:
                     cat = "general"
                 lang = row.get("lang", "한국어 (Korean)")
@@ -78,14 +81,14 @@ def fetch_d1_commits():
                 commits_by_cat[cat].setdefault(lang, {})[src] = tgt
                 total_rows += 1
 
-            if latest_id > last_id:
+            if latest_id and latest_id != last_id:
                 last_id = latest_id
-            if not data.get("has_more"):
+            if not data.get("has_more") or not commits:
                 break
     except Exception as e:
-        print(f"  ⚠️ D1 커밋 조회 중 오류: {e}")
+        print(f"  ⚠️ R2 커밋 조회 중 오류 (로컬 캐시로 계속 진행): {e}")
 
-    print(f"  -> D1에서 총 {total_rows:,}개 커밋 추출 완료 (최신 Commit #{last_id})")
+    print(f"  -> R2에서 총 {total_rows:,}개 커밋 추출 완료 (최신 Commit: {last_id})")
     return commits_by_cat
 
 
@@ -135,6 +138,29 @@ def main():
                                     local_data[l_k].update(l_v)
                 except Exception:
                     pass
+
+        # general 카테고리의 경우 로컬에 보관된 모든 모드팩 특화 퀘스트 캐시도 함께 전역 마스터로 병합
+        if category == "general":
+            import glob
+            mp_files = glob.glob(os.path.join(dist_dir, "translation_memory_modpack_*.json"))
+            mp_count = 0
+            for mp_path in mp_files:
+                if mp_path.endswith(".bak"):
+                    continue
+                try:
+                    with open(mp_path, "r", encoding="utf-8") as f:
+                        ld = json.load(f)
+                        if isinstance(ld, dict):
+                            for l_k, l_v in ld.items():
+                                if l_k not in local_data:
+                                    local_data[l_k] = {}
+                                if isinstance(l_v, dict):
+                                    local_data[l_k].update(l_v)
+                                    mp_count += len(l_v)
+                except Exception:
+                    pass
+            if mp_count > 0:
+                print(f"  -> 모드팩 특화 퀘스트 파일 {len(mp_files)}개에서 총 {mp_count:,}개 항목을 general 마스터로 함께 병합했습니다.")
 
         merged_data = {}
         all_langs = set(list(existing_data.keys()) + list(commit_data.keys()) + list(local_data.keys()))

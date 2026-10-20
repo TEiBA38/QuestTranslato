@@ -890,8 +890,13 @@ class TranslationMixin:
                     translated_content = content
 
             self.update_progress(1.0)
-            self.log("\n✅ 모든 텍스트 번역 완료! 저장할 위치를 선택해주세요.")
-            save_dir = self._pick_dir_main("번역된 파일을 저장할 폴더 선택")
+            import temp_session_logger
+            if temp_session_logger.is_debug_mode():
+                save_dir = temp_session_logger.get_temp_dir()
+                self.log(f"🛡️ [디버그 모드] 원본 파일 보호: 번역 결과가 임시 폴더에 안전하게 저장됩니다: {save_dir}")
+            else:
+                self.log("\n✅ 모든 텍스트 번역 완료! 저장할 위치를 선택해주세요.")
+                save_dir = self._pick_dir_main("번역된 파일을 저장할 폴더 선택")
 
             if save_dir:
                 out_path = os.path.join(save_dir, file_name)
@@ -1484,22 +1489,30 @@ class TranslationMixin:
                     clean_lang = lang_match.group(1).strip() if lang_match else target_lang.strip()
                     pack_filename = f"{modpack_name}[{clean_lang}].zip"
 
-                    # 마인크래프트 resourcepacks 폴더가 있으면 바로 그 안에 생성 (루트 중복 복제 방지)
-                    rp_dir = os.path.join(modpack_dir, "resourcepacks")
-                    if os.path.isdir(rp_dir):
-                        output_zip = os.path.join(rp_dir, pack_filename)
-                        # 모드팩 루트에 예전에 생성되었던 중복 파일이 남아있다면 자동 정리
-                        legacy_root_zip = os.path.join(modpack_dir, pack_filename)
-                        if os.path.isfile(legacy_root_zip):
-                            try:
-                                os.remove(legacy_root_zip)
-                            except Exception:
-                                pass
+                    import temp_session_logger
+                    if temp_session_logger.is_debug_mode():
+                        temp_rp_dir = os.path.join(temp_session_logger.get_temp_dir(), "resourcepacks")
+                        os.makedirs(temp_rp_dir, exist_ok=True)
+                        output_zip = os.path.join(temp_rp_dir, pack_filename)
+                        mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map)
+                        self.log(f"🛡️ [디버그 모드] 원본 모드팩 보호: 실제 resourcepacks 생성을 차단하고 임시 폴더에만 격리 저장했습니다.\n경로: {output_zip}")
                     else:
-                        output_zip = os.path.join(modpack_dir, pack_filename)
+                        # 마인크래프트 resourcepacks 폴더가 있으면 바로 그 안에 생성 (루트 중복 복제 방지)
+                        rp_dir = os.path.join(modpack_dir, "resourcepacks")
+                        if os.path.isdir(rp_dir):
+                            output_zip = os.path.join(rp_dir, pack_filename)
+                            # 모드팩 루트에 예전에 생성되었던 중복 파일이 남아있다면 자동 정리
+                            legacy_root_zip = os.path.join(modpack_dir, pack_filename)
+                            if os.path.isfile(legacy_root_zip):
+                                try:
+                                    os.remove(legacy_root_zip)
+                                except Exception:
+                                    pass
+                        else:
+                            output_zip = os.path.join(modpack_dir, pack_filename)
 
-                    mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map)
-                    self.log(f"🎉 통합 리소스팩 생성 완료!\n파일명: {pack_filename}\n경로: {output_zip}")
+                        mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map)
+                        self.log(f"🎉 통합 리소스팩 생성 완료!\n파일명: {pack_filename}\n경로: {output_zip}")
                     
                     msg = f"모드팩 전체 번역이 완료되었습니다!\n\n생성된 리소스팩: '{pack_filename}'\n마인크래프트 리소스팩 설정에서 적용해주세요."
                     if not custom_map.get("pi_xml"):

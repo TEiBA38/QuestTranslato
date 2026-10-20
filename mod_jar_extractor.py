@@ -515,6 +515,10 @@ def create_combined_resource_pack(translated_langs, translated_books_map, output
         if custom_map:
             for book_type, type_dict in custom_map.items():
                 if book_type == "pi_xml":
+                    import temp_session_logger
+                    if temp_session_logger.is_debug_mode():
+                        # 디버그 모드 시 원본 모드팩 config 폴더 보호
+                        continue
                     # PI XML은 리소스팩이 아닌 로컬 파일 시스템(config 폴더)에 직접 저장합니다.
                     for path, content in type_dict.items():
                         # en_US를 ko_KR로 변경하여 저장

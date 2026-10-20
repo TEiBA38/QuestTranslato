@@ -539,6 +539,12 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
             return
 
         if apply_mode is True:
+            import temp_session_logger
+            if temp_session_logger.is_debug_mode():
+                context.log(f"\n🛡️ [샌드박스 디버그 모드] 원본 모드팩 보호: 원본 덮어쓰기({modpack_path})를 차단했습니다. 결과물은 임시 작업 폴더에만 안전 보관됩니다.")
+                _generate_zip_review_report(context, raw_dir, out_dir, "디버그 모드 완료: 번역 검수 리포트")
+                context.show_messagebox("info", "디버그 모드 완료", f"샌드박스 디버그 모드이므로 원본 모드팩 파일은 일절 수정되지 않았습니다!\n\n임시 작업 경로:\n{out_dir}")
+                return
             context.log(f"\n📦 원본 모드팩에 즉시 덮어쓰기 시작: {modpack_path}")
             # _progress.json 파일은 모드팩에 유출되지 않도록 복사 전 제거
             prog_in_out = os.path.join(out_dir, PROGRESS_FILE)
@@ -565,7 +571,12 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
             return
 
         # apply_mode is False -> Save as ZIP
-        save_dir = context.ask_save_dir()
+        import temp_session_logger
+        if temp_session_logger.is_debug_mode():
+            save_dir = temp_session_logger.get_temp_dir()
+            context.log(f"🛡️ [디버그 모드] 원본 파일 보호: 번역된 ZIP 파일이 임시 폴더에 저장됩니다: {save_dir}")
+        else:
+            save_dir = context.ask_save_dir()
         if save_dir:
             out_zip_path = os.path.join(save_dir, base_zip_name)
             with zipfile.ZipFile(out_zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_out:

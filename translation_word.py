@@ -624,3 +624,83 @@ def post_validate_proper_nouns(orig_text: str, translated_text: str, chunk_gloss
 
     return result
 
+
+def sanitize_minecraft_formatting(src: str, tgt: str) -> str:
+    """
+    & 또는 § 뒤에 0~9, a~z, A~Z, 또는 헥스(#)가 오지 않는 모든 비정상 서식을 감지하여,
+    원문(src)의 누락된 서식 코드를 상대 위치(Proximity) 기반으로 100% 정밀 복구하거나 불량 기호를 제거합니다.
+    """
+    if not isinstance(tgt, str) or not tgt:
+        return tgt
+    if not isinstance(src, str):
+        src = ""
+
+    # 원문 서식 코드와 상대 위치(0.0 ~ 1.0) 추출 (표준 2글자 서식 및 1.16+ 헥스 컬러 서식 지원)
+    format_code_pattern = r'([&§](?:#[0-9a-fA-F]{6}|[0-9a-zA-Z]))'
+    src_len = max(len(src), 1)
+    src_codes_with_pos = [
+        (m.group(1), m.start() / src_len)
+        for m in re.finditer(format_code_pattern, src)
+    ]
+
+    # 번역문에 이미 존재하는 정상 서식 코드들
+    tgt_valid_codes = re.findall(format_code_pattern, tgt)
+
+    # 원문 코드 중 번역문에서 누락된 코드들 추적
+    remaining_src_codes = list(src_codes_with_pos)
+    for tc in tgt_valid_codes:
+        for idx, (sc, pos) in enumerate(remaining_src_codes):
+            if sc == tc:
+                remaining_src_codes.pop(idx)
+                break
+
+    tgt_len = max(len(tgt), 1)
+
+    def fix_invalid_code(match):
+        prefix = match.group(1)
+        char_after = match.group(2)
+
+        # 원문에 동일한 기호 시퀀스가 원래 있었던 경우(예: '&&', '& ' 등) 원본 유지
+        if match.group(0) in src:
+            return match.group(0)
+
+        # 공백 분리 일반 앰퍼샌드('A & B') 유지
+        start_idx = match.start()
+        if char_after in ' \t' and start_idx > 0 and match.string[start_idx - 1] in ' \t':
+            return match.group(0)
+
+        match_rel_pos = start_idx / tgt_len
+        is_closing_punctuation = bool(char_after and char_after in ".,;:?!\"')]}~")
+
+        # 후보군 필터링
+        candidates = []
+        if is_closing_punctuation or not char_after:
+            candidates = [
+                (idx, code, pos) for idx, (code, pos) in enumerate(remaining_src_codes)
+                if code[0] == prefix and code[1].lower() == 'r'
+            ]
+
+        if not candidates:
+            candidates = [
+                (idx, code, pos) for idx, (code, pos) in enumerate(remaining_src_codes)
+                if code[0] == prefix and code[1].lower() != 'r'
+            ]
+
+        if not candidates:
+            candidates = [
+                (idx, code, pos) for idx, (code, pos) in enumerate(remaining_src_codes)
+                if code[0] == prefix
+            ]
+
+        if candidates:
+            # 상대 위치(거리)가 가장 가까운 최적의 원문 코드 매칭
+            best_idx, best_code, _ = min(candidates, key=lambda c: abs(c[2] - match_rel_pos))
+            remaining_src_codes.pop(best_idx)
+            return f"{best_code}{char_after}"
+        else:
+            return char_after
+
+    result = re.sub(r'([&§])([^0-9a-zA-Z#]|$)', fix_invalid_code, tgt)
+    return result
+
+

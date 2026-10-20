@@ -10,6 +10,7 @@ import requests
 import time
 from concurrent.futures import ThreadPoolExecutor
 from constants import has_hangul
+from translation_word import sanitize_minecraft_formatting
 
 def _get_cache_dir():
     """로컬 캐시 파일이 저장될 전용 폴더 (항상 dist 하위 폴더에 저장)"""
@@ -31,6 +32,8 @@ def _get_cache_dir():
     return base
 
 CACHE_DIR = _get_cache_dir()
+MODPACK_MEMORY_DIR = os.path.join(CACHE_DIR, "translation_modpack")
+os.makedirs(MODPACK_MEMORY_DIR, exist_ok=True)
 MEMORY_FILE = os.path.join(CACHE_DIR, "translation_memory.json")
 BACKUP_FILE = os.path.join(CACHE_DIR, "translation_memory.json.bak")
 ITEMS_MEMORY_FILE = os.path.join(CACHE_DIR, "translation_memory_items.json")
@@ -62,15 +65,38 @@ _current_modpack_file = None
 
 
 def set_current_modpack(modpack_path):
-    """모드팩 컨텍스트 설정 (짧은 문장 격리 및 일관된 해시 보장)"""
+    """모드팩 컨텍스트 설정 (translation_modpack 전용 폴더 및 직관적인 모드팩 이름 파일명 적용)"""
     global _current_modpack_id, _current_modpack_file, _modpack_loaded
     with _lock:
         if modpack_path:
-            # .zip 확장자 여부와 관계없이 동일한 모드팩 식별자 생성
+            # .zip 확장자만 안전하게 제거 (예: Project Infinity 0.1의 마이너 버전 보존)
             base_part = os.path.basename(modpack_path.rstrip(os.sep))
-            modpack_name = os.path.splitext(base_part)[0]
-            _current_modpack_id = hashlib.md5(modpack_name.encode('utf-8')).hexdigest()[:8]
-            _current_modpack_file = os.path.join(CACHE_DIR, f"translation_memory_modpack_{_current_modpack_id}.json")
+            if base_part.lower().endswith(".zip"):
+                modpack_name = base_part[:-4]
+            else:
+                modpack_name = base_part
+
+            # 파일명에 부적합한 특수문자 안전 치환
+            safe_slug = re.sub(r'[/\\*?:"<>|\s]+', '_', modpack_name).strip('_')
+            legacy_hash = hashlib.md5(modpack_name.encode('utf-8')).hexdigest()[:8]
+            _current_modpack_id = safe_slug
+
+            # 파일 탐색 우선순위:
+            # 1. dist/translation_modpack/translation_memory_modpack_<이름>.json (신규 표준)
+            # 2. dist/translation_modpack/translation_memory_modpack_<해시>.json
+            # 3. dist/translation_memory_modpack_<해시>.json (구버전 호환)
+            candidate_named = os.path.join(MODPACK_MEMORY_DIR, f"translation_memory_modpack_{safe_slug}.json")
+            candidate_sub_hash = os.path.join(MODPACK_MEMORY_DIR, f"translation_memory_modpack_{legacy_hash}.json")
+            candidate_legacy = os.path.join(CACHE_DIR, f"translation_memory_modpack_{legacy_hash}.json")
+
+            if os.path.exists(candidate_named):
+                _current_modpack_file = candidate_named
+            elif os.path.exists(candidate_sub_hash):
+                _current_modpack_file = candidate_sub_hash
+            elif os.path.exists(candidate_legacy):
+                _current_modpack_file = candidate_legacy
+            else:
+                _current_modpack_file = candidate_named
         else:
             _current_modpack_id = None
             _current_modpack_file = None
@@ -119,6 +145,7 @@ def _read_and_clean_file(filepath):
                 cleaned[std_lang] = {}
             lang_norm = std_lang.replace(" ", "")
             for src, tgt in translations.items():
+                tgt = sanitize_minecraft_formatting(src, tgt)
                 if is_valid_translation(src, tgt, std_lang):
                     cleaned[std_lang][src] = tgt
                     _index_template(src, tgt, lang_norm)
@@ -363,6 +390,7 @@ def get_cached_translation(text, target_lang="한국어 (Korean)"):
 
 
 def add_to_memory(text, translated_text, target_lang="한국어 (Korean)", force_override=False):
+    translated_text = sanitize_minecraft_formatting(text, translated_text)
     if not is_valid_translation(text, translated_text, target_lang):
         return
 
@@ -412,6 +440,7 @@ def add_item_to_memory(text, translated_text, target_lang="한국어 (Korean)", 
 
 
 def add_official_ko_to_memory(text, translated_text, target_lang="한국어 (Korean)", is_item=False):
+    translated_text = sanitize_minecraft_formatting(text, translated_text)
     """
     모드 내장 공식 한글패치(ko_kr)에서 불러온 데이터를 기존 AI 번역 캐시보다 항상 최우선으로 덮어씁니다.
     이미 다른 캐시(_global_cache, _items_cache, _modpack_cache, _books_cache)에 이전 번역 데이터가 남아 있더라도
