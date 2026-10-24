@@ -1,6 +1,10 @@
 import os
 import sys
 import re
+import time
+import shutil
+import base64
+import zipfile
 import tempfile
 import subprocess
 import threading
@@ -12,6 +16,50 @@ from constants import APP_VERSION, FONT_NAME
 
 GITHUB_REPO = "TEiBA38/QuestTranslato"
 GITHUB_LATEST_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+
+def _get_updater_log_path():
+    appdata_dir = os.getenv("APPDATA") or os.path.expanduser("~")
+    log_dir = os.path.join(appdata_dir, "QuestTranslatorPro", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    return os.path.join(log_dir, "updater.log")
+
+
+def _log_updater_event(msg):
+    try:
+        logging.info(f"[Updater] {msg}")
+        log_path = _get_updater_log_path()
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] [Python] {msg}\n")
+    except Exception:
+        pass
+
+
+def cleanup_old_update_temp_files():
+    """이전 업데이트 시 남은 임시 ZIP/EXE/PS1 파일 정리"""
+    try:
+        temp_dir = tempfile.gettempdir()
+        my_pid = str(os.getpid())
+        now = time.time()
+        for fname in os.listdir(temp_dir):
+            low = fname.lower()
+            if (
+                low.startswith("questtranslatorpro_update_")
+                or low.startswith("questtranslatorpro_extracted_")
+                or low.startswith("qt_updater_")
+            ):
+                if my_pid in fname:
+                    continue
+                fpath = os.path.join(temp_dir, fname)
+                try:
+                    # 생성된 지 60초 이상 지난 임시 파일만 안전하게 삭제
+                    if now - os.path.getmtime(fpath) > 60:
+                        os.remove(fpath)
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 
 def parse_version_tuple(ver_str):
@@ -77,7 +125,7 @@ def check_for_updates(current_version=APP_VERSION, timeout=6.0):
                     exe_asset = asset
                     break
                 elif name.endswith(".zip"):
-                    # 업데이트용으로 without_cache(경량 84MB) 우선 선택, 없으면 일반 zip 선택
+                    # 업데이트용으로 without_cache(경량) 우선 선택, 없으면 일반 zip 선택
                     if zip_asset and "without_cache" in zip_asset.get("name", "").lower():
                         continue
                     if "without_cache" in name:
@@ -115,123 +163,253 @@ def download_file_with_progress(url, dest_path, progress_callback=None, cancel_c
                     downloaded += len(chunk)
                     if progress_callback and total_length > 0:
                         progress_callback(downloaded, total_length)
+
+        if total_length > 0 and downloaded != total_length:
+            raise IOError(f"다운로드가 불완전합니다 ({downloaded}/{total_length} bytes)")
+        if downloaded < 1024 * 1024:
+            raise IOError(f"다운로드된 파일 크기가 비정상적으로 작습니다 ({downloaded} bytes)")
+
     return True
 
 
-def apply_update_and_restart(new_binary_path):
-    import base64
-    if getattr(sys, 'frozen', False):
-        target_exe_path = os.path.abspath(sys.executable)
-    else:
-        repo_root = os.path.dirname(os.path.abspath(__file__))
-        target_exe_path = os.path.join(repo_root, "dist", "QuestTranslatorPro.exe")
+def _validate_pe_executable(exe_path, min_size_bytes=5 * 1024 * 1024):
+    """추출/다운로드된 EXE 파일이 유효한 Windows PE 실행 파일인지 검증"""
+    if not exe_path or not os.path.isfile(exe_path):
+        raise FileNotFoundError(f"업데이트 실행 파일을 찾을 수 없습니다: {exe_path}")
+    size = os.path.getsize(exe_path)
+    if size < min_size_bytes:
+        raise IOError(f"실행 파일 크기가 비정상적입니다 ({size} bytes)")
+    with open(exe_path, "rb") as f:
+        magic = f.read(2)
+    if magic != b"MZ":
+        raise IOError("유효한 Windows 실행 파일(PE MZ 헤더)이 아닙니다.")
+    return size
 
-    target_dir = os.path.dirname(target_exe_path)
-    current_pid = os.getpid()
 
-    # Escape single quotes for PowerShell single-quoted string literals
-    safe_target = target_exe_path.replace("'", "''")
-    safe_new = new_binary_path.replace("'", "''")
-    safe_dir = target_dir.replace("'", "''")
+def apply_update_and_restart(new_binary_path, target_exe_path=None):
+    try:
+        if not target_exe_path:
+            if getattr(sys, 'frozen', False):
+                target_exe_path = os.path.abspath(sys.executable)
+            else:
+                repo_root = os.path.dirname(os.path.abspath(__file__))
+                target_exe_path = os.path.join(repo_root, "dist", "QuestTranslatorPro.exe")
+        else:
+            target_exe_path = os.path.abspath(target_exe_path)
 
-    ps_script = f"""
+        new_binary_path = os.path.abspath(new_binary_path)
+        _validate_pe_executable(new_binary_path)
+
+        target_dir = os.path.dirname(target_exe_path)
+        current_pid = os.getpid()
+        parent_pid = os.getppid()
+        log_file_path = _get_updater_log_path()
+
+        _log_updater_event(
+            f"apply_update_and_restart 시작: child_pid={current_pid}, boot_pid={parent_pid}, "
+            f"new_bin={new_binary_path}, target={target_exe_path}"
+        )
+
+        # Escape single quotes for PowerShell single-quoted string literals
+        safe_target = target_exe_path.replace("'", "''")
+        safe_new = new_binary_path.replace("'", "''")
+        safe_dir = target_dir.replace("'", "''")
+        safe_log = log_file_path.replace("'", "''")
+
+        ps_script = f"""$ErrorActionPreference = 'Continue'
 $target = '{safe_target}'
 $newBin = '{safe_new}'
 $workDir = '{safe_dir}'
-$parentPid = {current_pid}
+$logFile = '{safe_log}'
+$childPid = {current_pid}
+$bootPid = {parent_pid}
 
-# 1. PyInstaller 보안 검증 충돌 방지: 상속된 모든 MEI 및 PYI 환경 변수 완전 제거 & RESET_ENVIRONMENT 설정
+function Write-UpdaterLog([string]$msg) {{
+    try {{
+        $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
+        Add-Content -LiteralPath $logFile -Value "[$ts] [PS] $msg" -Encoding UTF8 -ErrorAction SilentlyContinue
+    }} catch {{}}
+}}
+
+Write-UpdaterLog "=== Updater PowerShell Started (childPid=$childPid, bootPid=$bootPid) ==="
+
+# 1. PyInstaller 환경 변수 완전 초기화 (자식 프로세스 충돌 원천 차단)
 Remove-Item Env:_MEI* -ErrorAction SilentlyContinue
 Remove-Item Env:_PYI* -ErrorAction SilentlyContinue
-$env:PYINSTALLER_RESET_ENVIRONMENT = '1'
-[Environment]::SetEnvironmentVariable('PYINSTALLER_RESET_ENVIRONMENT', '1', 'Process')
-[Environment]::SetEnvironmentVariable('_PYI_APPLICATION_HOME_DIR', $null, 'Process')
-[Environment]::SetEnvironmentVariable('_PYI_ARCHIVE_FILE', $null, 'Process')
-[Environment]::SetEnvironmentVariable('_PYI_PARENT_PROCESS_LEVEL', $null, 'Process')
-[Environment]::SetEnvironmentVariable('_PYI_SPLASH_IPC', $null, 'Process')
-[Environment]::SetEnvironmentVariable('_MEIPASS2', $null, 'Process')
-[Environment]::SetEnvironmentVariable('_MEIPASS', $null, 'Process')
+Remove-Item Env:PYINSTALLER* -ErrorAction SilentlyContinue
+Remove-Item Env:TCL_LIBRARY -ErrorAction SilentlyContinue
+Remove-Item Env:TK_LIBRARY -ErrorAction SilentlyContinue
+Remove-Item Env:OPENSSL_MODULES -ErrorAction SilentlyContinue
+if ($env:PATH) {{
+    $env:PATH = ($env:PATH -split ';' | Where-Object {{ $_ -and ($_ -notlike '*_MEI*') }}) -join ';'
+}}
 
-# 2. 호출한 프로세스 종료 대기
-while (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {{
+# 2. Python 자식 프로세스($childPid) 종료 대기 (최대 3초 대기 후 미종료 시 강제 종료)
+for ($w = 0; $w -lt 15; $w++) {{
+    if (-not (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) {{
+        break
+    }}
     Start-Sleep -Milliseconds 200
 }}
-Start-Sleep -Milliseconds 1000
+if (Get-Process -Id $childPid -ErrorAction SilentlyContinue) {{
+    Write-UpdaterLog "childPid $childPid still alive after 3s; force stopping"
+    Stop-Process -Id $childPid -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 300
+}}
+Write-UpdaterLog "childPid $childPid terminated"
 
-# 3. 파일 교체 시도 (최대 20회 재시도, 파일 잠금 해제 대기 및 NTFS Rename 안전망)
+# 3. PyInstaller 부트로더 부모 프로세스 및 동일 경로($target) 실행 프로세스 종료 대기 (최대 2초)
+#    부트로더가 _MEI 임시 폴더를 정리하고 스스로 종료할 시간을 부여함 (-Name 필터로 1ms 초고속 조회)
+$targetFull = [System.IO.Path]::GetFullPath($target)
+$procName = [System.IO.Path]::GetFileNameWithoutExtension($target)
+for ($w = 0; $w -lt 10; $w++) {{
+    $running = @(Get-Process -Name $procName -ErrorAction SilentlyContinue | Where-Object {{
+        try {{
+            (-not $_.Path) -or ([System.IO.Path]::GetFullPath($_.Path) -ieq $targetFull)
+        }} catch {{
+            $true
+        }}
+    }})
+    if ($running.Count -eq 0) {{
+        break
+    }}
+    Start-Sleep -Milliseconds 200
+}}
+
+# 2초 후에도 남아있는 동일 경로 프로세스가 있다면 강제 종료하여 파일 잠금 해제 보장
+$stuckProcs = @(Get-Process -Name $procName -ErrorAction SilentlyContinue | Where-Object {{
+    try {{
+        (-not $_.Path) -or ([System.IO.Path]::GetFullPath($_.Path) -ieq $targetFull)
+    }} catch {{
+        $true
+    }}
+}})
+foreach ($sp in $stuckProcs) {{
+    Write-UpdaterLog "Force stopping remaining process PID=$($sp.Id)"
+    Stop-Process -Id $sp.Id -Force -ErrorAction SilentlyContinue
+}}
+if ($stuckProcs.Count -gt 0) {{
+    Start-Sleep -Milliseconds 400
+}}
+Write-UpdaterLog "All old processes for $targetFull cleared"
+
+# 4. 파일 교체 시도 (최대 20회 재시도, NTFS Rename 안전망 포함)
 $copied = $false
+$oldBak = "$target.old"
 for ($i = 0; $i -lt 20; $i++) {{
     try {{
         Copy-Item -LiteralPath $newBin -Destination $target -Force -ErrorAction Stop
         $copied = $true
+        Write-UpdaterLog "Copy-Item succeeded on attempt $($i + 1)"
         break
     }} catch {{
-        # 파일이 잠겨있을 경우 NTFS Rename 트릭 (기존 파일 .old 로 이동 후 복사)
+        $errMsg = $_.Exception.Message
+        Write-UpdaterLog "Copy-Item attempt $($i + 1) failed: $errMsg. Trying NTFS rename fallback..."
         try {{
-            $oldBak = "$target.old"
-            Remove-Item -LiteralPath $oldBak -Force -ErrorAction SilentlyContinue
-            Rename-Item -LiteralPath $target -NewName ([System.IO.Path]::GetFileName($oldBak)) -Force -ErrorAction Stop
+            if (Test-Path -LiteralPath $oldBak) {{
+                Remove-Item -LiteralPath $oldBak -Force -ErrorAction SilentlyContinue
+            }}
+            if (Test-Path -LiteralPath $target) {{
+                Rename-Item -LiteralPath $target -NewName ([System.IO.Path]::GetFileName($oldBak)) -Force -ErrorAction Stop
+            }}
             Copy-Item -LiteralPath $newBin -Destination $target -Force -ErrorAction Stop
             $copied = $true
             Remove-Item -LiteralPath $oldBak -Force -ErrorAction SilentlyContinue
+            Write-UpdaterLog "NTFS rename + Copy-Item succeeded on attempt $($i + 1)"
             break
         }} catch {{
+            Write-UpdaterLog "Fallback attempt $($i + 1) failed: $($_.Exception.Message)"
+            if ((-not (Test-Path -LiteralPath $target)) -and (Test-Path -LiteralPath $oldBak)) {{
+                try {{
+                    Rename-Item -LiteralPath $oldBak -NewName ([System.IO.Path]::GetFileName($target)) -Force -ErrorAction SilentlyContinue
+                }} catch {{}}
+            }}
             Start-Sleep -Milliseconds 500
         }}
     }}
 }}
 
-# 4. 교체 완료 후 프로그램 재실행 및 임시 파일 정리
+# 5. 교체 완료 후 프로그램 재실행 및 임시 파일 정리
 if ($copied) {{
-    Remove-Item Env:_MEI* -ErrorAction SilentlyContinue
-    Remove-Item Env:_PYI* -ErrorAction SilentlyContinue
-    $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
-    [Environment]::SetEnvironmentVariable('PYINSTALLER_RESET_ENVIRONMENT', '1', 'Process')
-    [Environment]::SetEnvironmentVariable('_PYI_APPLICATION_HOME_DIR', $null, 'Process')
-    [Environment]::SetEnvironmentVariable('_PYI_ARCHIVE_FILE', $null, 'Process')
-    [Environment]::SetEnvironmentVariable('_PYI_PARENT_PROCESS_LEVEL', $null, 'Process')
-    [Environment]::SetEnvironmentVariable('_PYI_SPLASH_IPC', $null, 'Process')
-    [Environment]::SetEnvironmentVariable('_MEIPASS2', $null, 'Process')
-    [Environment]::SetEnvironmentVariable('_MEIPASS', $null, 'Process')
-    Start-Process -FilePath $target -WorkingDirectory $workDir
-    Start-Sleep -Seconds 1
+    try {{
+        $proc = Start-Process -FilePath $target -WorkingDirectory $workDir -PassThru -ErrorAction Stop
+        Write-UpdaterLog "Launched updated executable: PID=$($proc.Id) Path=$target"
+    }} catch {{
+        Write-UpdaterLog "Start-Process failed ($($_.Exception.Message)), retrying via explorer.exe..."
+        try {{
+            Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$target`""
+            Write-UpdaterLog "Launched updated executable via explorer.exe"
+        }} catch {{
+            Write-UpdaterLog "CRITICAL: Failed to launch updated executable: $($_.Exception.Message)"
+        }}
+    }}
+    Start-Sleep -Seconds 2
     Remove-Item -LiteralPath $newBin -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $oldBak -Force -ErrorAction SilentlyContinue
+    Write-UpdaterLog "=== Updater Finished Successfully ==="
+}} else {{
+    Write-UpdaterLog "CRITICAL: Failed to replace binary after 20 attempts"
 }}
+Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 """
 
-    b64_script = base64.b64encode(ps_script.encode('utf-16le')).decode('ascii')
+        ps1_path = os.path.join(tempfile.gettempdir(), f"qt_updater_{current_pid}.ps1")
+        with open(ps1_path, "w", encoding="utf-8-sig") as f:
+            f.write(ps_script)
 
-    clean_env = os.environ.copy()
-    for k in list(clean_env.keys()):
-        if k.startswith("_MEI") or k.startswith("_PYI") or k in ("_MEIPASS2", "_MEIPASS", "PYINSTALLER_STRICT_UNPACK_MODE"):
-            clean_env.pop(k, None)
-    clean_env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        clean_env = os.environ.copy()
+        for k in list(clean_env.keys()):
+            k_up = k.upper()
+            if (
+                k_up.startswith("_MEI")
+                or k_up.startswith("_PYI")
+                or k_up.startswith("PYINSTALLER")
+                or k_up in ("TCL_LIBRARY", "TK_LIBRARY", "OPENSSL_MODULES")
+            ):
+                clean_env.pop(k, None)
 
-    startupinfo = None
-    creationflags = 0
-    if os.name == 'nt':
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 0
-        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+        if "PATH" in clean_env and clean_env["PATH"]:
+            clean_env["PATH"] = os.pathsep.join(
+                p for p in clean_env["PATH"].split(os.pathsep)
+                if p and "_MEI" not in p
+            )
 
-    subprocess.Popen(
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-WindowStyle", "Hidden",
-            "-EncodedCommand", b64_script
-        ],
-        cwd=tempfile.gettempdir(),
-        env=clean_env,
-        startupinfo=startupinfo,
-        creationflags=creationflags,
-        close_fds=True
-    )
+        startupinfo = None
+        creationflags = 0
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
 
-    import os
-    os._exit(0)
+        subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy", "Bypass",
+                "-WindowStyle", "Hidden",
+                "-File", ps1_path
+            ],
+            cwd=tempfile.gettempdir(),
+            env=clean_env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+            close_fds=True
+        )
+
+        _log_updater_event(f"PowerShell 업데이터 스크립트 실행 완료 ({ps1_path}). os._exit(0) 호출.")
+        os._exit(0)
+    except Exception as e:
+        _log_updater_event(f"apply_update_and_restart 치명적 오류: {e}")
+        try:
+            from tkinter import messagebox
+            messagebox.showerror("업데이트 적용 오류", f"프로그램 교체 중 오류가 발생했습니다:\n{e}")
+        except Exception:
+            pass
 
 
 class UpdateDialog(ctk.CTkToplevel):
@@ -241,6 +419,7 @@ class UpdateDialog(ctk.CTkToplevel):
         self.update_info = update_info
         self.is_downloading = False
         self.is_cancelled = False
+        self._restart_scheduled = False
         self.temp_dest = None
 
         self.title("Quest Translator Pro 업데이트")
@@ -336,6 +515,8 @@ class UpdateDialog(ctk.CTkToplevel):
                 return
 
         self.is_downloading = True
+        self.is_cancelled = False
+        self._restart_scheduled = False
         self.update_btn.configure(state="disabled", text="다운로드 중...")
         self.close_btn.configure(text="취소")
 
@@ -353,15 +534,19 @@ class UpdateDialog(ctk.CTkToplevel):
         self.after(50, self._poll_download)
 
     def _download_worker(self, url):
+        download_target = None
         try:
+            cleanup_old_update_temp_files()
             temp_dir = tempfile.gettempdir()
             asset_name = (self.update_info.get("asset_name") or url).lower()
             is_zip = asset_name.endswith(".zip")
-            
+
             if is_zip:
                 download_target = os.path.join(temp_dir, f"QuestTranslatorPro_update_{os.getpid()}.zip")
             else:
                 download_target = os.path.join(temp_dir, f"QuestTranslatorPro_update_{os.getpid()}.exe")
+
+            _log_updater_event(f"다운로드 시작: url={url} -> {download_target}")
 
             def on_prog(downloaded, total):
                 self.download_state["progress"] = (downloaded, total)
@@ -374,7 +559,6 @@ class UpdateDialog(ctk.CTkToplevel):
                 if is_zip:
                     self.download_state["status_msg"] = "📦 압축 파일에서 실행 파일을 추출하는 중..."
                     self.download_state["status_color"] = "#fb923c"
-                    import zipfile
                     extracted_exe = os.path.join(temp_dir, f"QuestTranslatorPro_extracted_{os.getpid()}.exe")
                     with zipfile.ZipFile(download_target, 'r') as zf:
                         exe_entry = None
@@ -384,19 +568,40 @@ class UpdateDialog(ctk.CTkToplevel):
                                 break
                         if not exe_entry:
                             raise Exception("압축 파일 내에서 QuestTranslatorPro.exe를 찾을 수 없습니다.")
-                        with open(extracted_exe, 'wb') as ef:
-                            ef.write(zf.read(exe_entry))
+                        with zf.open(exe_entry) as src_f, open(extracted_exe, 'wb') as dst_f:
+                            shutil.copyfileobj(src_f, dst_f, length=1024 * 1024)
+
+                    # 추출 완료 후 대용량 ZIP 임시 파일 즉시 삭제 (Temp 용량 누적 방지)
+                    try:
+                        os.remove(download_target)
+                    except Exception:
+                        pass
+
+                    _validate_pe_executable(extracted_exe)
                     self.download_state["target_path"] = extracted_exe
                 else:
+                    _validate_pe_executable(download_target)
                     self.download_state["target_path"] = download_target
 
+                _log_updater_event(f"다운로드 및 검증 완료: target_path={self.download_state['target_path']}")
                 self.download_state["status_msg"] = "✅ 다운로드 완료! 프로그램을 교체하고 재시작합니다..."
                 self.download_state["status_color"] = "#22c55e"
                 self.download_state["is_done"] = True
             elif self.is_cancelled:
                 self.download_state["is_cancelled"] = True
+                if download_target and os.path.exists(download_target):
+                    try:
+                        os.remove(download_target)
+                    except Exception:
+                        pass
         except Exception as e:
+            _log_updater_event(f"다운로드/추출 오류: {e}")
             self.download_state["error"] = str(e)
+            if download_target and os.path.exists(download_target):
+                try:
+                    os.remove(download_target)
+                except Exception:
+                    pass
 
     def _poll_download(self):
         st = getattr(self, "download_state", None)
@@ -421,6 +626,7 @@ class UpdateDialog(ctk.CTkToplevel):
         if st["error"]:
             self.status_label.configure(text=f"❌ 다운로드 오류: {st['error']}", text_color="#ef4444")
             self.update_btn.configure(state="normal", text="다시 시도")
+            self.close_btn.configure(state="normal", text="닫기")
             return
 
         if st["is_cancelled"]:
@@ -428,13 +634,18 @@ class UpdateDialog(ctk.CTkToplevel):
             return
 
         if st["is_done"]:
-            target_path = st["target_path"]
-            self.after(1200, lambda: apply_update_and_restart(target_path))
+            if not getattr(self, "_restart_scheduled", False):
+                self._restart_scheduled = True
+                self.close_btn.configure(state="disabled")
+                target_path = st["target_path"]
+                self.after(800, lambda: apply_update_and_restart(target_path))
             return
 
         self.after(50, self._poll_download)
 
     def _on_close(self):
+        if getattr(self, "_restart_scheduled", False):
+            return
         if self.is_downloading:
             self.is_cancelled = True
         self.grab_release()
