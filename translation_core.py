@@ -526,6 +526,8 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                 else:
                     context.app._translate_jobs_sequential(jobs, engine_key, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, on_job_completed=on_job_completed, custom_url=custom_url)
 
+        context.log("\n" + translation_memory.get_cache_stats_summary(target_lang))
+
         if modpack_path:
             context.log("\n🎉 모든 번역 완료! 저장 및 적용 방식을 선택해주세요.")
             apply_mode = context.ask_apply_mode()
@@ -553,6 +555,19 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                     os.remove(prog_in_out)
                 except Exception:
                     pass
+            # 덮어쓰기 전 원본 퀘스트/언어 파일 안전 백업(.bak) 생성 (최초 1회 보존)
+            for root_b, _, files_b in os.walk(out_dir):
+                for fb in files_b:
+                    if fb == PROGRESS_FILE:
+                        continue
+                    rel_b = os.path.relpath(os.path.join(root_b, fb), out_dir)
+                    orig_target = os.path.join(modpack_path, rel_b)
+                    bak_target = orig_target + ".bak"
+                    if os.path.isfile(orig_target) and not os.path.exists(bak_target):
+                        try:
+                            shutil.copy2(orig_target, bak_target)
+                        except Exception:
+                            pass
             shutil.copytree(out_dir, modpack_path, dirs_exist_ok=True)
             # 모드팩 루트에 예전 버전에서 복사되었던 _progress.json 잔여물이 있다면 자동 제거
             prog_in_modpack = os.path.join(modpack_path, PROGRESS_FILE)

@@ -80,6 +80,21 @@ class ModpackMixin:
         return count, quest_translated, pack_translated
 
     def _scan_modpack_candidates(self, instance_root):
+        # 사용자가 상위 Instances 폴더가 아닌 개별 모드팩 폴더를 직접 선택한 경우 스마트 감지
+        is_single_modpack = (
+            os.path.isdir(os.path.join(instance_root, "mods"))
+            or os.path.isfile(os.path.join(instance_root, "minecraftinstance.json"))
+            or (
+                os.path.isdir(os.path.join(instance_root, "config"))
+                and os.path.isfile(os.path.join(instance_root, "options.txt"))
+            )
+        )
+        if is_single_modpack:
+            mp_name = os.path.basename(instance_root.rstrip(os.sep)) or instance_root
+            file_count, quest_translated, pack_translated = self._count_translatable_files(instance_root)
+            if file_count > 0 or os.path.isdir(os.path.join(instance_root, "mods")):
+                return [(mp_name, instance_root, max(1, file_count), quest_translated, pack_translated)]
+
         candidates = []
         for entry in os.scandir(instance_root):
             if not entry.is_dir():
@@ -139,9 +154,80 @@ class ModpackMixin:
         self._hide_scan_loading()
         self._set_modpack_candidates(candidates)
         if candidates:
-            self.log(f"✅ 모드팩 {len(candidates)}개를 탐지했습니다. 먼저 모드팩을 선택한 뒤 다음 단계로 이동하세요.")
+            entered_root = os.path.normpath(self.instance_path_entry.get().strip())
+            if len(candidates) == 1 and os.path.normpath(candidates[0][1]) == entered_root:
+                self.select_modpack_from_path(candidates[0][1])
+                self.log(f"💡 단일 모드팩 폴더가 직접 지정되어 자동 선택되었습니다: {candidates[0][0]}")
+            else:
+                self.log(f"✅ 모드팩 {len(candidates)}개를 탐지했습니다. 먼저 모드팩을 선택한 뒤 다음 단계로 이동하세요.")
         else:
             self.log("⚠️ 번역 가능한 모드팩을 찾지 못했습니다.")
+
+    def apply_selected_modpack_resourcepack(self):
+        modpack_dir = getattr(self, "selected_modpack_path", None)
+        if not modpack_dir or not os.path.isdir(modpack_dir):
+            if messagebox:
+                messagebox.showwarning("경고", "먼저 모드팩을 선택해주세요.")
+            return
+        import mod_jar_extractor
+        ok, res_msg = mod_jar_extractor.apply_resource_pack_to_options(modpack_dir)
+        if ok:
+            self.log(f"✅ options.txt에 '{res_msg}' 리소스팩 및 한국어(ko_kr) 설정이 자동 적용되었습니다!")
+            if messagebox:
+                messagebox.showinfo(
+                    "리소스팩 자동 적용 완료",
+                    f"마인크래프트 설정(options.txt)에 한글 리소스팩이 최우선 순위로 적용되었습니다!\n\n"
+                    f"적용된 리소스팩: {res_msg}\n"
+                    f"(마인크래프트 실행 중이라면 재시작하거나 인게임에서 F3+T를 눌러주세요.)"
+                )
+        else:
+            self.log(f"⚠️ 리소스팩 자동 적용 실패: {res_msg}")
+            if messagebox:
+                messagebox.showwarning("리소스팩 적용 안내", res_msg)
+
+    def rollback_modpack(self, modpack_dir, modpack_name=None):
+        if not modpack_dir or not os.path.isdir(modpack_dir):
+            return
+        mp_name = modpack_name or os.path.basename(modpack_dir.rstrip(os.sep))
+        if messagebox and not messagebox.askyesno(
+            "원본 롤백 확인",
+            f"'{mp_name}' 모드팩의 한글화 내역을 원본으로 롤백하시겠습니까?\n\n"
+            f"• 퀘스트 및 설정 원본 백업(.bak) 복원\n"
+            f"• 직접 패치된 모드 JAR 원본(.jar.bak) 복원\n"
+            f"• 생성된 한글 리소스팩(.zip) 삭제 및 options.txt 등록 해제"
+        ):
+            return
+
+        import mod_jar_extractor
+        q_cnt, j_cnt, p_cnt = mod_jar_extractor.restore_modpack_backups(modpack_dir)
+
+        if hasattr(self, "app_state") and hasattr(self.app_state, "translated_history"):
+            self.app_state.translated_history.pop(modpack_dir, None)
+            if hasattr(self, "save_user_settings"):
+                self.save_user_settings()
+
+        if q_cnt + j_cnt + p_cnt > 0:
+            self.log(
+                f"🔄 [{mp_name}] 원본 롤백 완료! "
+                f"(퀘스트/설정 복원: {q_cnt}개 | 모드 JAR 복원: {j_cnt}개 | 리소스팩 삭제: {p_cnt}개)"
+            )
+            if messagebox:
+                messagebox.showinfo(
+                    "원본 롤백 완료",
+                    f"'{mp_name}' 원본 복구가 완료되었습니다!\n\n"
+                    f"• 퀘스트/설정 원본 복원: {q_cnt}개\n"
+                    f"• 패치된 모드 JAR 복원: {j_cnt}개\n"
+                    f"• 한글 리소스팩 삭제 및 등록 해제: {p_cnt}개"
+                )
+            self.scan_modpacks_from_entry(show_screen=False)
+        else:
+            self.log(f"ℹ️ [{mp_name}] 복원할 백업 파일(.bak) 또는 한글 리소스팩이 없습니다.")
+            if messagebox:
+                messagebox.showinfo(
+                    "롤백 안내",
+                    f"'{mp_name}' 모드팩에서 복원할 백업(.bak) 파일이나 한글 리소스팩을 찾지 못했습니다.\n"
+                    f"(백업 생성 기능 도입 이전에 덮어씌워진 퀘스트는 런처의 '프로필 수리/업데이트'로 초기화할 수 있습니다.)"
+                )
 
     def _handle_scan_error(self, exc):
         self.app_state.scan_thread_active = False
@@ -368,10 +454,20 @@ class ModpackMixin:
                     target_card.configure(border_color="#f97316", border_width=2)
                     self.selected_card_widget = target_card
 
-            ctk.CTkButton(card, text="선택", width=64, height=24,
+            btn_row = ctk.CTkFrame(card, fg_color="transparent")
+            btn_row.pack(fill="x", padx=8, pady=(6, 8))
+
+            ctk.CTkButton(btn_row, text="🔄 원본 롤백", width=76, height=24,
+                          fg_color="#3f3f46" if (quest_translated or pack_translated) else "#27272a",
+                          hover_color="#dc2626",
+                          text_color="#f4f4f5" if (quest_translated or pack_translated) else "#71717a",
+                          font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
+                          command=lambda p=path, n=name: self.rollback_modpack(p, n)).pack(side="left")
+
+            ctk.CTkButton(btn_row, text="선택", width=64, height=24,
                           fg_color="#ea580c", hover_color="#c2410c",
                           font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
-                          command=select_this).pack(anchor="e", padx=8, pady=(6, 8))
+                          command=select_this).pack(side="right")
     # ====================================================================
     # 썸네일 & 이미지 로직 (사용자님의 유연한 로직 100% 통합)
     # ====================================================================

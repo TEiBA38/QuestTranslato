@@ -38,3 +38,8 @@ translation_memory*.json
 translation_memory*.json.bak
 *.bak
 app_backup.py
+
+
+# Developer-only local Discord bot & launcher
+discord_bot.py
+discord_bot/

@@ -5,6 +5,7 @@ import requests
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from constants import LANG_CODES
+import translation_memory
 
 try:
     from deep_translator import GoogleTranslator
@@ -105,8 +106,6 @@ def apply_builtin_quest_style_translation(text):
         return text.replace(stripped, mapping[stripped])
     return text
 
-
-import translation_memory
 
 def _translate_wrapper(text, api_key, translate_fn, reference_map=None, target_lang="한국어 (Korean)", is_item=False, is_book=False):
     if not text or not str(text).strip():
@@ -230,6 +229,7 @@ def is_code_or_id(text):
 
 def translate_deepl(text, api_key, is_pro=False, reference_map=None, target_lang="한국어 (Korean)", is_item=False, is_book=False):
     def do_translate(t, key):
+        translation_memory.record_api_call(1)
         url = "https://api.deepl.com/v2/translate" if is_pro else "https://api-free.deepl.com/v2/translate"
         headers = {"Authorization": f"DeepL-Auth-Key {key}", "Content-Type": "application/json"}
         lang_code = "KO" if "Korean" in target_lang or "한국어" in target_lang else "EN-US"
@@ -244,6 +244,7 @@ def translate_google(text, api_key, reference_map=None, target_lang="한국어 (
     def do_translate(t, key):
         if GoogleTranslator is None:
             return t
+        translation_memory.record_api_call(1)
         target_code = LANG_CODES.get(target_lang, ("KO", "ko", "natural Korean"))[1]
         translator = GoogleTranslator(source='en', target=target_code)
         translated = translator.translate(t)
@@ -253,6 +254,7 @@ def translate_google(text, api_key, reference_map=None, target_lang="한국어 (
 
 def translate_openai(text, api_key, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)", is_item=False, is_book=False):
     def do_translate(t, key):
+        translation_memory.record_api_call(1)
         url = "https://api.openai.com/v1/chat/completions"
         model = ai_model if ai_model else "gpt-4o-mini"
         target_prompt = LANG_CODES.get(target_lang, ("KO", "ko", "natural Korean"))[2]
@@ -270,8 +272,7 @@ def translate_openai(text, api_key, reference_map=None, glossary=None, ai_model=
             system_prompt += f"\nGlossary (Strictly replace these words): {glossary_text}"
 
         try:
-            from translation_memory import find_few_shot_examples
-            few_shots = find_few_shot_examples([t], target_lang, max_examples=2)
+            few_shots = translation_memory.find_few_shot_examples([t], target_lang, max_examples=2)
             if few_shots:
                 system_prompt += "\nStyle Reference Examples from previous quests (Follow this tone and style):\n"
                 for src_ex, tgt_ex in few_shots:
@@ -377,8 +378,7 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
             prompt += f"- Glossary (Strictly replace these words): {glossary_text}\n"
 
     try:
-        from translation_memory import find_few_shot_examples
-        few_shots = find_few_shot_examples(unique_unresolved, target_lang, max_examples=2)
+        few_shots = translation_memory.find_few_shot_examples(unique_unresolved, target_lang, max_examples=2)
         if few_shots:
             prompt += "- Style Reference Examples from previous quests (Follow this tone, formatting, and style):\n"
             for src_ex, tgt_ex in few_shots:
@@ -421,6 +421,7 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
                     config = None
 
             try:
+                translation_memory.record_api_call(1)
                 res = client.models.generate_content(
                     model=model_name,
                     contents=prompt,
@@ -604,6 +605,7 @@ def translate_local_ai(text_list, base_url, model_name, api_key=None, log_callba
         if cancel_checker and cancel_checker():
             raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
             
+        translation_memory.record_api_call(1)
         response = requests.post(url, headers=headers, json=payload, timeout=300)
         response.raise_for_status()
         data = response.json()
@@ -707,6 +709,7 @@ def auto_extract_glossary(text_samples, engine_key, api_key, ai_model=None, targ
             headers = {"Content-Type": "application/json"}
             if api_key: headers["Authorization"] = f"Bearer {api_key}"
             payload = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}
+            translation_memory.record_api_call(1)
             res = requests.post(url, headers=headers, json=payload, timeout=30)
             res.raise_for_status()
             raw_text = res.json()['choices'][0]['message']['content'].strip()

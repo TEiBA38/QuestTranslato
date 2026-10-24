@@ -795,6 +795,21 @@ class TranslationMixin:
                     final_custom_map["pi_xml"] = custom_book_processor.assemble_pi_xml_books(pi_xml_map, trans_dict)
                     self.log("✅ Project Intelligence 번역 재조립 완료!")
 
+            # --- 6. GuideME (Little Big Redstone, MI, AE2, etc. MDX) ---
+            guideme_map = books_map.get("guideme", {})
+            if guideme_map:
+                total_gm_pages = sum(len(pages) for pages in guideme_map.values())
+                self.log(f"🔎 GuideME MDX 가이드북 ({total_gm_pages}개 페이지) 텍스트 추출 중...")
+                unique_texts, parsed_gm_map = custom_book_processor.extract_guideme_texts(guideme_map)
+                
+                if unique_texts:
+                    translated_unique = do_translation(unique_texts, "GuideME")
+                    if check_cancel(): return {}
+                    
+                    trans_dict = {orig: trans for orig, trans in zip(unique_texts, translated_unique)}
+                    final_custom_map["guideme"] = custom_book_processor.assemble_guideme_books(parsed_gm_map, trans_dict)
+                    self.log(f"✅ GuideME MDX 가이드북 {total_gm_pages}개 페이지 번역 재조립 완료!")
+
             return final_custom_map
             
         except Exception as exc:
@@ -834,6 +849,7 @@ class TranslationMixin:
 
     def _process_single_file(self, file_path, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):
         self.app_state.cancel_requested = False
+        translation_memory.reset_session_stats()
         self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
         self.toggle_buttons(False)
         self.update_progress(0)
@@ -890,6 +906,7 @@ class TranslationMixin:
                     translated_content = content
 
             self.update_progress(1.0)
+            self.log("\n" + translation_memory.get_cache_stats_summary(target_lang))
             import temp_session_logger
             if temp_session_logger.is_debug_mode():
                 save_dir = temp_session_logger.get_temp_dir()
@@ -1320,8 +1337,64 @@ class TranslationMixin:
             self.show_review_report(report_text)
             self.log("🧪 검수 리포트가 결과창으로 표시되었습니다.")
 
+    def _generate_modpack_full_review_report(self, modpack_dir, pack_filename, patchouli_map, custom_map, lang_map, target_lang, auto_applied=False):
+        stats_summary = translation_memory.get_cache_stats_summary(target_lang)
+
+        mp_name = os.path.basename(modpack_dir.rstrip(os.sep))
+        total_patchouli_mods = len(patchouli_map) if patchouli_map else 0
+        total_patchouli_pages = sum(len(v) for v in patchouli_map.values()) if patchouli_map else 0
+
+        total_custom_pages = 0
+        guideme_pages = 0
+        if custom_map:
+            for b_type, t_dict in custom_map.items():
+                cnt = sum(len(v) for v in t_dict.values())
+                total_custom_pages += cnt
+                if b_type == "guideme":
+                    guideme_pages += cnt
+
+        total_lang_mods = len(lang_map) if lang_map else 0
+        total_lang_files = sum(len(v) for v in lang_map.values()) if lang_map else 0
+
+        lines = [
+            "모드팩 전체 한글화 완료 리포트",
+            stats_summary.strip(),
+            "",
+            "[overall]",
+            f"- 대상 모드팩: {mp_name}",
+            f"- 생성된 리소스팩: {pack_filename}",
+            f"- 전체 모드(.lang/.json): 총 {total_lang_mods}개 모드 ({total_lang_files}개 언어 파일)",
+            f"- 패출리(Patchouli) 가이드북: 총 {total_patchouli_mods}개 모드 ({total_patchouli_pages:,}개 페이지)",
+            f"- 커스텀 가이드북(GuideME 등): {total_custom_pages:,}개 페이지" + (f" (GuideME {guideme_pages:,}개)" if guideme_pages > 0 else ""),
+            f"- options.txt 리소스팩 등록: {'자동 등록 완료' if auto_applied else '수동 적용 대기'}",
+            "=" * 42,
+            "",
+            "[번역된 모드 및 가이드북 세부 목록]",
+        ]
+
+        all_mods = set(list((lang_map or {}).keys()) + list((patchouli_map or {}).keys()))
+        if custom_map:
+            for t_dict in custom_map.values():
+                all_mods.update(t_dict.keys())
+
+        for mod in sorted(all_mods):
+            details = []
+            if lang_map and mod in lang_map:
+                details.append(f"언어파일 {len(lang_map[mod])}개")
+            if patchouli_map and mod in patchouli_map:
+                details.append(f"패출리 책 {len(patchouli_map[mod])}페이지")
+            if custom_map:
+                for b_type, t_dict in custom_map.items():
+                    if mod in t_dict:
+                        details.append(f"{b_type} {len(t_dict[mod])}페이지")
+            if details:
+                lines.append(f"- {mod}: {', '.join(details)}")
+
+        return "\n".join(lines)
+
     def _process_zip_file(self, zip_path, engine_key, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", modpack_path=None, custom_url=None, toggle_ui=True):
         self.app_state.cancel_requested = False
+        translation_memory.reset_session_stats()
         self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
         self.toggle_buttons(False)
         self.update_progress(0)
@@ -1399,7 +1472,7 @@ class TranslationMixin:
                     self.app.app_state.translated_history[modpack_path] = time.strftime("%Y-%m-%d %H:%M:%S")
                     self.app.save_user_settings()
                     if hasattr(self.app, "scan_modpacks_from_entry"):
-                        self.app.after(0, self.app.scan_modpacks_from_entry)
+                        self.app.after(0, lambda: self.app.scan_modpacks_from_entry(show_screen=False))
 
         context = AppTranslationContext(self)
         try:
@@ -1441,6 +1514,7 @@ class TranslationMixin:
         def run_translation_task():
             try:
                 self.app_state.cancel_requested = False
+                translation_memory.reset_session_stats()
                 translation_memory.set_current_modpack(modpack_dir)
                 self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
                 
@@ -1477,8 +1551,9 @@ class TranslationMixin:
                     lang_map = self._translate_lang_files(engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url)
 
                 # 3. Create Combined Pack (Even if cancelled, save what we have)
-                if 'lang_map' not in locals(): lang_map = {}
-                if 'custom_map' not in locals(): custom_map = {}
+                if 'lang_map' not in locals() or lang_map is None: lang_map = {}
+                if 'custom_map' not in locals() or custom_map is None: custom_map = {}
+                if 'patchouli_map' not in locals() or patchouli_map is None: patchouli_map = {}
                 if patchouli_map or lang_map or custom_map:
                     import mod_jar_extractor
 
@@ -1497,35 +1572,72 @@ class TranslationMixin:
                         mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map)
                         self.log(f"🛡️ [디버그 모드] 원본 모드팩 보호: 실제 resourcepacks 생성을 차단하고 임시 폴더에만 격리 저장했습니다.\n경로: {output_zip}")
                     else:
-                        # 마인크래프트 resourcepacks 폴더가 있으면 바로 그 안에 생성 (루트 중복 복제 방지)
+                        # 마인크래프트 resourcepacks 폴더 자동 생성 보장 및 루트 중복 복제 방지
                         rp_dir = os.path.join(modpack_dir, "resourcepacks")
-                        if os.path.isdir(rp_dir):
-                            output_zip = os.path.join(rp_dir, pack_filename)
-                            # 모드팩 루트에 예전에 생성되었던 중복 파일이 남아있다면 자동 정리
-                            legacy_root_zip = os.path.join(modpack_dir, pack_filename)
-                            if os.path.isfile(legacy_root_zip):
-                                try:
-                                    os.remove(legacy_root_zip)
-                                except Exception:
-                                    pass
-                        else:
-                            output_zip = os.path.join(modpack_dir, pack_filename)
+                        os.makedirs(rp_dir, exist_ok=True)
+                        output_zip = os.path.join(rp_dir, pack_filename)
+                        legacy_root_zip = os.path.join(modpack_dir, pack_filename)
+                        if os.path.isfile(legacy_root_zip):
+                            try:
+                                os.remove(legacy_root_zip)
+                            except Exception:
+                                pass
 
                         mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map)
                         self.log(f"🎉 통합 리소스팩 생성 완료!\n파일명: {pack_filename}\n경로: {output_zip}")
-                    
-                    msg = f"모드팩 전체 번역이 완료되었습니다!\n\n생성된 리소스팩: '{pack_filename}'\n마인크래프트 리소스팩 설정에서 적용해주세요."
+
+                    self.log("\n" + translation_memory.get_cache_stats_summary(target_lang))
+
+                    msg = f"모드팩 전체 번역이 완료되었습니다!\n\n생성된 리소스팩: '{pack_filename}'"
                     if not custom_map.get("pi_xml"):
                         mods_dir = os.path.join(modpack_dir, "mods")
                         if os.path.isdir(mods_dir) and any('draconic' in f.lower() or 'projectintelligence' in f.lower() for f in os.listdir(mods_dir)):
                             msg += "\n\n⚠️ 주의: 드라코닉 에볼루션 등(Project Intelligence)은 매뉴얼을 게임 내에서 실시간 다운로드합니다.\n게임을 켜서 인게임 태블릿을 한 번 연 뒤, 툴을 다시 돌려주셔야 해당 매뉴얼 한글화가 적용됩니다!"
 
+                    auto_apply = bool(self.auto_apply_rp_var.get()) if hasattr(self, "auto_apply_rp_var") else False
+                    applied_ok = False
+
                     import temp_session_logger
                     if temp_session_logger.is_debug_mode():
                         saved_summary = temp_session_logger.save_temp_session()
                         msg += f"\n\n🛠️ [샌드박스 디버그 모드 알림]\n원본 캐시 및 클라우드는 보호되었으며, 세션 결과가 아래에 임시 저장되었습니다:\n{saved_summary}"
-                    
-                    messagebox.showinfo("번역 완료", msg)
+                        self.show_messagebox("info", "번역 완료", msg)
+                    else:
+                        if auto_apply:
+                            ok, res_msg = mod_jar_extractor.apply_resource_pack_to_options(modpack_dir, pack_filename)
+                            if ok:
+                                applied_ok = True
+                                self.log(f"✅ [리소스팩 자동 적용] options.txt에 '{pack_filename}' 및 한국어(ko_kr) 설정이 자동 적용되었습니다!")
+                                msg += "\n\n✅ '리소스팩 자동 적용' 설정에 따라 마인크래프트 설정(options.txt)에 자동 등록되었습니다!"
+                            else:
+                                self.log(f"⚠️ 리소스팩 자동 적용 실패: {res_msg}")
+                            self.show_messagebox("info", "번역 및 리소스팩 적용 완료", msg)
+                        else:
+                            ask_msg = f"{msg}\n\n리소스팩을 적용하시겠습니까?\n('예' 선택 시 마인크래프트 options.txt에 리소스팩이 자동 등록됩니다)"
+                            if self._ask_main("번역 완료 - 리소스팩 적용", ask_msg):
+                                ok, res_msg = mod_jar_extractor.apply_resource_pack_to_options(modpack_dir, pack_filename)
+                                if ok:
+                                    applied_ok = True
+                                    self.log(f"✅ options.txt에 '{pack_filename}' 리소스팩 및 한국어(ko_kr) 설정이 자동 적용되었습니다!")
+                                    self.show_messagebox(
+                                        "info",
+                                        "리소스팩 적용 완료",
+                                        f"'{pack_filename}' 리소스팩이 마인크래프트 설정(options.txt)에 자동 적용되었습니다!\n"
+                                        f"(마인크래프트가 실행 중이라면 재시작하거나 인게임에서 F3+T를 눌러주세요.)"
+                                    )
+                                else:
+                                    self.log(f"⚠️ 리소스팩 자동 적용 실패: {res_msg}")
+                                    self.show_messagebox("warning", "리소스팩 적용 안내", res_msg)
+
+                    # 퀘스트 번역과 동일하게 전체 한글화 검수 결과 리포트 창 띄우기
+                    try:
+                        report_text = self._generate_modpack_full_review_report(
+                            modpack_dir, pack_filename, patchouli_map, custom_map, lang_map, target_lang, auto_applied=(auto_apply and applied_ok)
+                        )
+                        self.show_review_report(report_text)
+                        self.log("🧪 모드팩 전체 한글화 결과 리포트가 결과창으로 표시되었습니다.")
+                    except Exception as rep_err:
+                        self.log(f"⚠️ 결과 리포트 생성 스킵: {rep_err}")
             finally:
                 self.app_state.is_translating = False
                 self.toggle_buttons(True)

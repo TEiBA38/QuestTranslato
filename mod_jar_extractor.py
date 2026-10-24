@@ -119,6 +119,26 @@ def find_patchouli_books_in_jars(mods_dir, log_callback=None):
 
     return found_books
 
+def get_guideme_target_path(zip_path, target_lang='ko_kr'):
+    """
+    GuideME MDX 가이드북(.md) 파일의 리소스팩 번역 경로(_ko_kr/)를 반환합니다.
+    - assets/<ns>/guides/<book_ns>/<book_id>/path/to/page.md -> assets/<ns>/guides/<book_ns>/<book_id>/_<lang>/path/to/page.md
+    - assets/<ns>/<custom_folder>/path/to/page.md -> assets/<ns>/<custom_folder>/_<lang>/path/to/page.md (ae2guide, mi_guidebook, yai_guidebook 등)
+    """
+    parts = zip_path.replace('\\', '/').split('/')
+    if len(parts) >= 6 and parts[2] == 'guides':
+        ns = parts[1]
+        book_ns = parts[3]
+        book_id = parts[4]
+        rest = '/'.join(parts[5:])
+        return f"assets/{ns}/guides/{book_ns}/{book_id}/_{target_lang}/{rest}"
+    elif len(parts) >= 4:
+        ns = parts[1]
+        folder = parts[2]
+        rest = '/'.join(parts[3:])
+        return f"assets/{ns}/{folder}/_{target_lang}/{rest}"
+    return None
+
 def find_custom_guidebooks_in_jars(mods_dir, log_callback=None):
     """
     McJty(XNet/RFTools), Forestry, OpenComputers, EU2 등의 커스텀 가이드북을 찾습니다.
@@ -129,7 +149,7 @@ def find_custom_guidebooks_in_jars(mods_dir, log_callback=None):
         "eu2": { "jar_filename": { "zip_path": json_data } }
     }
     """
-    found_books = {"mcjty": {}, "forestry": {}, "markdown": {}, "eu2": {}, "pi_xml": {}}
+    found_books = {"mcjty": {}, "forestry": {}, "markdown": {}, "eu2": {}, "pi_xml": {}, "guideme": {}}
     if not os.path.isdir(mods_dir):
         return found_books
 
@@ -203,6 +223,31 @@ def find_custom_guidebooks_in_jars(mods_dir, log_callback=None):
                     if jar_file in found_books["eu2"] and log_callback:
                         log_callback(f"🔍 {jar_file} 에서 EU2 매뉴얼을 찾았습니다.")
 
+                # 6. GuideME (Little Big Redstone, Modern Industrialization, AE2, ExtendedAE, etc.)
+                _GUIDEME_OTHER_LANGS = {'_' + lang for lang in ['ko_kr','zh_cn','zh_tw','ja_jp','pt_br','ru_ru','de_de','fr_fr','es_es','it_it','pl_pl','nl_nl','sv_se','da_dk','nb_no','fi_fi','hu_hu','cs_cz','ro_ro','tr_tr','th_th','vi_vn','uk_ua','el_gr','bg_bg','hr_hr','lt_lt','lv_lv','sk_sk','sl_si','et_ee','ga_ie','mt_mt','ca_es','gl_es','eu_es']}
+                all_names_lower = {n.lower() for n in all_names}
+                for n in all_names:
+                    nl = n.lower()
+                    if nl.startswith('assets/') and nl.endswith('.md'):
+                        parts = nl.split('/')
+                        if len(parts) >= 4:
+                            if any(p in _GUIDEME_OTHER_LANGS for p in parts):
+                                continue
+                            sub = parts[2]
+                            if sub in ('guides', 'ae2guide') or 'guidebook' in sub:
+                                target_ko = get_guideme_target_path(n, 'ko_kr')
+                                if target_ko and target_ko.lower() in all_names_lower:
+                                    continue
+                                try:
+                                    content = zf.read(n).decode('utf-8', errors='ignore')
+                                    if jar_file not in found_books["guideme"]:
+                                        found_books["guideme"][jar_file] = {}
+                                    found_books["guideme"][jar_file][n] = content
+                                except Exception:
+                                    pass
+                if jar_file in found_books["guideme"] and log_callback:
+                    log_callback(f"📚 {jar_file} 에서 GuideME MDX 가이드북 {len(found_books['guideme'][jar_file])}개 페이지를 찾았습니다.")
+
         except Exception as e:
             if log_callback: log_callback(f"⚠️ {jar_file} 읽기 오류: {e}")
             
@@ -223,6 +268,34 @@ def find_custom_guidebooks_in_jars(mods_dir, log_callback=None):
                         pass
         if found_books["pi_xml"] and log_callback:
             log_callback(f"🔍 Project Intelligence에서 다운로드된 XML 매뉴얼 {len(found_books['pi_xml'])}개를 찾았습니다.")
+
+    # 6.1 GuideME in kubejs/assets/
+    modpack_dir = os.path.dirname(mods_dir)
+    kubejs_assets = os.path.join(modpack_dir, "kubejs", "assets")
+    if os.path.isdir(kubejs_assets):
+        _GUIDEME_OTHER_LANGS = {'_' + lang for lang in ['ko_kr','zh_cn','zh_tw','ja_jp','pt_br','ru_ru','de_de','fr_fr','es_es','it_it','pl_pl','nl_nl','sv_se','da_dk','nb_no','fi_fi','hu_hu','cs_cz','ro_ro','tr_tr','th_th','vi_vn','uk_ua','el_gr','bg_bg','hr_hr','lt_lt','lv_lv','sk_sk','sl_si','et_ee','ga_ie','mt_mt','ca_es','gl_es','eu_es']}
+        for root, _, files in os.walk(kubejs_assets):
+            for fn in files:
+                if fn.lower().endswith('.md'):
+                    fp = os.path.join(root, fn)
+                    rel = os.path.relpath(fp, kubejs_assets).replace('\\', '/')
+                    parts = rel.lower().split('/')
+                    if len(parts) >= 3:
+                        if any(p in _GUIDEME_OTHER_LANGS for p in parts):
+                            continue
+                        sub = parts[1]
+                        if sub in ('guides', 'ae2guide') or 'guidebook' in sub:
+                            try:
+                                with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
+                                    content = f.read()
+                                zip_path = f"assets/{rel}"
+                                if "KubeJS" not in found_books["guideme"]:
+                                    found_books["guideme"]["KubeJS"] = {}
+                                found_books["guideme"]["KubeJS"][zip_path] = content
+                            except Exception:
+                                pass
+        if "KubeJS" in found_books["guideme"] and log_callback:
+            log_callback(f"📚 KubeJS 가상 리소스에서 GuideME 가이드북 {len(found_books['guideme']['KubeJS'])}개 페이지를 찾았습니다.")
 
     return found_books
 
@@ -248,9 +321,24 @@ def get_pack_format(modpack_dir):
                     if line.startswith('IntendedVersion='):
                         mc_version = line.split('=')[1].strip()
                         return _version_to_format(mc_version)
+
+        # options.txt의 DataVersion으로 판별 (Modrinth App 등 모든 런처 공통)
+        opt_path = os.path.join(modpack_dir, 'options.txt')
+        if os.path.exists(opt_path):
+            with open(opt_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    if line.startswith('version:'):
+                        dv = int(line.split(':', 1)[1].strip())
+                        if dv >= 3950: return 34
+                        if dv >= 3460: return 15
+                        if dv >= 3100: return 9
+                        if dv >= 2860: return 8
+                        if dv >= 2560: return 6
+                        if dv >= 1500: return 4
+                        return 3
     except Exception:
         pass
-    return 3
+    return 15
 
 def _version_to_format(version_str):
     if version_str.startswith("1.11") or version_str.startswith("1.12"): return 3
@@ -409,6 +497,61 @@ def extract_lang_files_from_jars(mods_dir, log_callback=None, include_ko_kr=Fals
                     if lf not in found_ko_langs[jar_file]:
                         found_ko_langs[jar_file][lf] = global_ko_by_dir[dir_key]
 
+    # KubeJS / OpenLoader / Paxi 외부 가상 리소스팩 언어 파일 스캔
+    modpack_dir = os.path.dirname(mods_dir)
+    external_resource_roots = [
+        os.path.join(modpack_dir, "kubejs", "assets"),
+        os.path.join(modpack_dir, "resources"),
+    ]
+    for sub in ("openloader/resources", "paxi/resourcepacks", "global_packs/required_resources"):
+        p = os.path.join(modpack_dir, *sub.split('/'))
+        if os.path.isdir(p):
+            try:
+                for pack in os.listdir(p):
+                    pack_assets = os.path.join(p, pack, "assets")
+                    if os.path.isdir(pack_assets):
+                        external_resource_roots.append(pack_assets)
+            except Exception:
+                pass
+
+    ext_langs = {}
+    ext_ko_langs = {}
+    for assets_root in external_resource_roots:
+        if not os.path.isdir(assets_root):
+            continue
+        try:
+            for ns in os.listdir(assets_root):
+                lang_dir = os.path.join(assets_root, ns, "lang")
+                if not os.path.isdir(lang_dir):
+                    continue
+                # ⚠️ 절대 data/, models/, recipes/ 등 다른 폴더는 접근하지 않고 오직 assets/<ns>/lang/ 만 핀포인트 수집
+                for fn in os.listdir(lang_dir):
+                    fn_lower = fn.lower()
+                    if fn_lower in ('en_us.json', 'en_us.lang', 'en_us.json5'):
+                        fp = os.path.join(lang_dir, fn)
+                        try:
+                            with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
+                                content = f.read()
+                            zip_path = f"assets/{ns}/lang/{fn}"
+                            ext_langs[zip_path] = content
+                            
+                            ko_fn = fn_lower.replace('en_us', 'ko_kr')
+                            ko_fp = os.path.join(lang_dir, ko_fn)
+                            if os.path.isfile(ko_fp):
+                                with open(ko_fp, 'r', encoding='utf-8', errors='ignore') as f_ko:
+                                    ext_ko_langs[zip_path] = (f"assets/{ns}/lang/{ko_fn}", f_ko.read())
+                        except Exception as e:
+                            logging.debug(f"Error reading external lang file {fp}: {e}")
+        except Exception as e:
+            logging.debug(f"Error scanning external assets root {assets_root}: {e}")
+
+    if ext_langs:
+        found_langs["KubeJS_and_Custom_Packs"] = ext_langs
+        if include_ko_kr and ext_ko_langs:
+            found_ko_langs["KubeJS_and_Custom_Packs"] = ext_ko_langs
+        if log_callback:
+            log_callback(f"📦 KubeJS 및 외부 리소스에서 {len(ext_langs)}개의 추가 언어 파일을 발견했습니다.")
+
     return (found_langs, found_ko_langs) if include_ko_kr else found_langs
 
 def create_lang_resource_pack(translated_langs, output_zip_path, modpack_dir=None):
@@ -469,6 +612,8 @@ def create_combined_resource_pack(translated_langs, translated_books_map, output
 
         # 1. .lang 및 .json 파일 (en_us -> ko_kr)
         if translated_langs:
+            merged_json_langs = {}
+            merged_raw_langs = {}
             for jar_name, lang_dict in translated_langs.items():
                 for original_zip_path, translated_content in lang_dict.items():
                     ko_kr_path = original_zip_path
@@ -476,10 +621,26 @@ def create_combined_resource_pack(translated_langs, translated_books_map, output
                         if ko_kr_path.lower().endswith('en_us' + ext):
                             ko_kr_path = ko_kr_path[:-len('en_us' + ext)] + 'ko_kr' + ext
                             break
-                    if ko_kr_path in written_paths:
-                        continue
-                    written_paths.add(ko_kr_path)
-                    zf.writestr(ko_kr_path, translated_content)
+                    if ko_kr_path.lower().endswith(('.json', '.json5')):
+                        try:
+                            data = _load_relaxed_json(translated_content)
+                            if ko_kr_path not in merged_json_langs:
+                                merged_json_langs[ko_kr_path] = {}
+                            merged_json_langs[ko_kr_path].update(data)
+                        except Exception:
+                            merged_raw_langs[ko_kr_path] = translated_content
+                    else:
+                        merged_raw_langs[ko_kr_path] = translated_content
+
+            for p, d in merged_json_langs.items():
+                if p not in written_paths:
+                    written_paths.add(p)
+                    zf.writestr(p, json.dumps(d, ensure_ascii=False, indent=2))
+
+            for p, content in merged_raw_langs.items():
+                if p not in written_paths:
+                    written_paths.add(p)
+                    zf.writestr(p, content)
 
         # 2. Patchouli JSON 파일 (순수 assets/ 경로 리소스팩 패키징)
         if translated_books_map:
@@ -514,6 +675,15 @@ def create_combined_resource_pack(translated_langs, translated_books_map, output
         # 3. Custom Books (McJty, Forestry, etc)
         if custom_map:
             for book_type, type_dict in custom_map.items():
+                if book_type == "guideme":
+                    for jar_name, files in type_dict.items():
+                        for zip_path, content in files.items():
+                            target_path = get_guideme_target_path(zip_path, 'ko_kr')
+                            if not target_path or target_path in written_paths:
+                                continue
+                            written_paths.add(target_path)
+                            zf.writestr(target_path, content.encode('utf-8'))
+                    continue
                 if book_type == "pi_xml":
                     import temp_session_logger
                     if temp_session_logger.is_debug_mode():
@@ -690,3 +860,240 @@ def hotpatch_resource_pack(pack_zip_path, old_tgt, new_tgt):
     else:
         os.remove(temp_path)
 
+
+
+def apply_resource_pack_to_options(modpack_dir, pack_filename=None):
+    """
+    모드팩의 options.txt에 생성된 리소스팩을 최우선 순위로 자동 등록하고
+    인게임 언어(lang:ko_kr) 설정을 함께 활성화합니다.
+    반환값: (성공여부: bool, 메시지 또는 파일명: str)
+    """
+    import glob
+    import shutil
+
+    if not modpack_dir or not os.path.isdir(modpack_dir):
+        return False, "유효한 모드팩 경로가 아닙니다."
+
+    rp_dir = os.path.join(modpack_dir, "resourcepacks")
+    os.makedirs(rp_dir, exist_ok=True)
+    mp_name = os.path.basename(modpack_dir.rstrip(os.sep))
+
+    # 모드팩 루트에 예전 리소스팩 zip이 잘못 놓여있다면 resourcepacks 폴더로 자동 이동
+    for root_zip in glob.glob(os.path.join(modpack_dir, f"{mp_name}[*].zip")):
+        if os.path.isfile(root_zip):
+            dest_zip = os.path.join(rp_dir, os.path.basename(root_zip))
+            try:
+                if not os.path.exists(dest_zip):
+                    shutil.move(root_zip, dest_zip)
+                else:
+                    os.remove(root_zip)
+            except Exception:
+                pass
+
+    if not pack_filename:
+        candidates = (
+            glob.glob(os.path.join(rp_dir, f"{mp_name}[*].zip"))
+            + glob.glob(os.path.join(rp_dir, "*[Korean].zip"))
+            + glob.glob(os.path.join(rp_dir, "*Korean*.zip"))
+            + glob.glob(os.path.join(rp_dir, "*한글*.zip"))
+            + glob.glob(os.path.join(rp_dir, "QuestTranslatorPro_Pack.zip"))
+        )
+        if not candidates:
+            return False, (
+                "적용할 한글 리소스팩(.zip)을 resourcepacks 폴더에서 찾을 수 없습니다.\n"
+                "먼저 '모드팩 전체 한글화'를 실행하여 리소스팩을 생성해주세요."
+            )
+        pack_filename = os.path.basename(candidates[0])
+
+    p_format = get_pack_format(modpack_dir)
+    options_path = os.path.join(modpack_dir, "options.txt")
+
+    lines = []
+    if os.path.isfile(options_path):
+        try:
+            with open(options_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.read().splitlines()
+        except Exception as e:
+            return False, f"options.txt 읽기 실패: {e}"
+
+    use_file_prefix = p_format >= 4 or any(
+        ("file/" in ln or '"vanilla"' in ln) for ln in lines if ln.startswith("resourcePacks:")
+    )
+    entry_name = f"file/{pack_filename}" if use_file_prefix else pack_filename
+
+    found_rp = False
+    found_incompat = False
+    found_lang = False
+    new_lines = []
+
+    for line in lines:
+        if line.startswith("resourcePacks:"):
+            found_rp = True
+            raw_val = line[len("resourcePacks:"):].strip()
+            try:
+                packs = json.loads(raw_val)
+                if not isinstance(packs, list):
+                    packs = []
+            except Exception:
+                packs = []
+
+            if not packs and use_file_prefix:
+                packs = ["vanilla", "mod_resources"]
+
+            packs = [
+                p for p in packs
+                if p not in (entry_name, pack_filename, f"file/{pack_filename}")
+            ]
+            packs.append(entry_name)
+            new_lines.append("resourcePacks:" + json.dumps(packs, ensure_ascii=False, separators=(",", ":")))
+
+        elif line.startswith("incompatibleResourcePacks:"):
+            found_incompat = True
+            raw_val = line[len("incompatibleResourcePacks:"):].strip()
+            try:
+                incompat = json.loads(raw_val)
+                if not isinstance(incompat, list):
+                    incompat = []
+            except Exception:
+                incompat = []
+            if entry_name not in incompat:
+                incompat.append(entry_name)
+            new_lines.append("incompatibleResourcePacks:" + json.dumps(incompat, ensure_ascii=False, separators=(",", ":")))
+
+        elif line.startswith("lang:"):
+            found_lang = True
+            if "korean" in pack_filename.lower() or "한글" in pack_filename:
+                new_lines.append("lang:ko_kr")
+            else:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+
+    if not found_rp:
+        default_packs = ["vanilla", "mod_resources", entry_name] if use_file_prefix else [entry_name]
+        new_lines.append("resourcePacks:" + json.dumps(default_packs, ensure_ascii=False, separators=(",", ":")))
+    if not found_incompat:
+        new_lines.append("incompatibleResourcePacks:" + json.dumps([entry_name], ensure_ascii=False, separators=(",", ":")))
+    if not found_lang and ("korean" in pack_filename.lower() or "한글" in pack_filename):
+        new_lines.append("lang:ko_kr")
+
+    try:
+        with open(options_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(new_lines) + "\n")
+        return True, pack_filename
+    except Exception as e:
+        return False, f"options.txt 저장 실패: {e}"
+
+
+def restore_modpack_backups(modpack_dir):
+    """
+    모드팩의 한글화 내역을 원본으로 안전하게 롤백합니다:
+    1) 퀘스트/설정/언어 파일 백업(.bak)을 원본으로 복원
+    2) 스마트 하이브리드 패치로 수정된 모드 JAR(.jar.bak)을 원본으로 복원
+    3) 생성된 한글 리소스팩(.zip) 삭제 및 options.txt 등록 해제
+    반환값: (restored_quests_count, restored_jars_count, removed_packs_count)
+    """
+    import glob
+    import shutil
+    from constants import SCAN_IGNORE_DIRS
+
+    restored_quests = 0
+    restored_jars = 0
+    removed_packs = 0
+
+    if not modpack_dir or not os.path.isdir(modpack_dir):
+        return 0, 0, 0
+
+    # 1. 모드 JAR 원본 백업(.jar.bak) 복원
+    mods_dir = os.path.join(modpack_dir, "mods")
+    if os.path.isdir(mods_dir):
+        for fname in os.listdir(mods_dir):
+            if fname.lower().endswith(".jar.bak"):
+                bak_path = os.path.join(mods_dir, fname)
+                orig_path = bak_path[:-4]
+                try:
+                    shutil.copy2(bak_path, orig_path)
+                    os.remove(bak_path)
+                    restored_jars += 1
+                except Exception:
+                    pass
+
+    # 2. 퀘스트 및 설정/언어 파일 원본 백업(.bak) 복원
+    quest_bak_exts = (".snbt.bak", ".json.bak", ".hqm.bak", ".lang.bak", ".cfg.bak", ".txt.bak")
+    for root, dirs, files_list in os.walk(modpack_dir):
+        dirs[:] = [d for d in dirs if d.lower() not in SCAN_IGNORE_DIRS]
+        for fname in files_list:
+            if fname.lower().endswith(quest_bak_exts):
+                bak_path = os.path.join(root, fname)
+                orig_path = bak_path[:-4]
+                try:
+                    shutil.copy2(bak_path, orig_path)
+                    os.remove(bak_path)
+                    restored_quests += 1
+                except Exception:
+                    pass
+
+    # Project Intelligence (Draconic Evolution) 직접 생성된 ko_KR XML 정리
+    pi_dir = os.path.join(modpack_dir, "config", "brandon3055", "ProjectIntelligence", "ModDocs")
+    if os.path.isdir(pi_dir):
+        for root, _, files_list in os.walk(pi_dir):
+            for fname in files_list:
+                if "ko_kr" in fname.lower() and fname.lower().endswith(".xml"):
+                    try:
+                        os.remove(os.path.join(root, fname))
+                        restored_quests += 1
+                    except Exception:
+                        pass
+
+    # 3. 생성된 한글 리소스팩 삭제 및 options.txt 등록 해제
+    mp_name = os.path.basename(modpack_dir.rstrip(os.sep))
+    rp_dir = os.path.join(modpack_dir, "resourcepacks")
+    pack_candidates = (
+        glob.glob(os.path.join(modpack_dir, f"{mp_name}[*].zip"))
+        + glob.glob(os.path.join(rp_dir, f"{mp_name}[*].zip"))
+        + glob.glob(os.path.join(rp_dir, "*[Korean].zip"))
+        + glob.glob(os.path.join(rp_dir, "*Korean*.zip"))
+        + glob.glob(os.path.join(rp_dir, "*한글*.zip"))
+        + [
+            os.path.join(modpack_dir, "QuestTranslatorPro_Pack.zip"),
+            os.path.join(rp_dir, "QuestTranslatorPro_Pack.zip"),
+        ]
+    )
+    removed_pack_names = set()
+    for p_path in set(pack_candidates):
+        if os.path.isfile(p_path):
+            try:
+                removed_pack_names.add(os.path.basename(p_path))
+                os.remove(p_path)
+                removed_packs += 1
+            except Exception:
+                pass
+
+    # options.txt에서 제거된 리소스팩 등록 해제
+    options_path = os.path.join(modpack_dir, "options.txt")
+    if os.path.isfile(options_path) and removed_pack_names:
+        try:
+            with open(options_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.read().splitlines()
+            new_lines = []
+            exclude_keys = set()
+            for pn in removed_pack_names:
+                exclude_keys.add(pn)
+                exclude_keys.add(f"file/{pn}")
+            for line in lines:
+                if line.startswith("resourcePacks:") or line.startswith("incompatibleResourcePacks:"):
+                    prefix, raw_val = line.split(":", 1)
+                    try:
+                        arr = json.loads(raw_val.strip())
+                        if isinstance(arr, list):
+                            arr = [x for x in arr if x not in exclude_keys]
+                            line = f"{prefix}:" + json.dumps(arr, ensure_ascii=False, separators=(",", ":"))
+                    except Exception:
+                        pass
+                new_lines.append(line)
+            with open(options_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write("\n".join(new_lines) + "\n")
+        except Exception:
+            pass
+
+    return restored_quests, restored_jars, removed_packs

@@ -577,7 +577,8 @@ class UIScreensMixin:
             for attr in (
                 "btn_single", "btn_zip", "btn_pick_instance_root", "btn_auto_detect_root",
                 "btn_rescan_modpacks", "btn_open_translate_options",
-                "btn_translate_selected_modpack", "btn_translate_all_guidebooks", "btn_edit_glossary",
+                "btn_translate_selected_modpack", "btn_translate_all_guidebooks",
+                "chk_auto_apply_rp", "btn_edit_glossary",
                 "btn_back_to_select", "btn_back_from_select", "btn_back_from_quick"
             ):
                 if hasattr(self, attr):
@@ -591,6 +592,9 @@ class UIScreensMixin:
 
             if hasattr(self, "btn_cancel"):
                 self.btn_cancel.configure(state=cancel_state)
+
+            if state and hasattr(self, "_schedule_feedback_poll"):
+                self._schedule_feedback_poll(1000)
         
         self.after(0, _toggle)
 

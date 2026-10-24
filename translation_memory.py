@@ -295,6 +295,68 @@ def find_few_shot_examples(query_texts, target_lang="한국어 (Korean)", max_ex
 _dirty_general = {}
 _dirty_items = {}
 _dirty_books = {}
+_session_hit_texts = set()
+_session_miss_texts = set()
+_session_start_time = None
+_session_api_calls = 0
+
+
+def reset_session_stats():
+    """번역 작업 시작 시 세션 통계(캐시 적중/미적중, API 호출량, 시작 시간)를 초기화합니다."""
+    global _session_start_time, _session_api_calls
+    with _lock:
+        _session_hit_texts.clear()
+        _session_miss_texts.clear()
+        _session_api_calls = 0
+        _session_start_time = time.time()
+
+
+def record_api_call(count=1):
+    """API 호출 횟수(RPD 추적)를 증가시킵니다."""
+    global _session_api_calls
+    with _lock:
+        _session_api_calls += count
+
+
+def _record_cache_lookup(text, is_hit):
+    if not text or not isinstance(text, str):
+        return
+    if is_hit:
+        if text not in _session_miss_texts:
+            _session_hit_texts.add(text)
+    else:
+        if text not in _session_hit_texts:
+            _session_miss_texts.add(text)
+
+
+def get_cache_stats_summary(target_lang="한국어 (Korean)"):
+    """현재 세션의 캐시 적용률, 번역 소요 시간, API 호출량(RPD) 요약 문자열을 반환합니다."""
+    hits = len(_session_hit_texts)
+    misses = len(_session_miss_texts)
+    total_queries = hits + misses
+    hit_rate = (hits / total_queries * 100.0) if total_queries > 0 else 100.0
+
+    elapsed_sec = (time.time() - _session_start_time) if _session_start_time else 0.0
+    if elapsed_sec >= 60:
+        elapsed_str = f"{int(elapsed_sec // 60)}분 {int(elapsed_sec % 60)}초"
+    else:
+        elapsed_str = f"{elapsed_sec:.1f}초"
+
+    api_calls = _session_api_calls
+    if api_calls > 0:
+        rpd_info = f"{api_calls:,}회 (Gemini 무료 티어 일일 1,500 RPD 중 {api_calls:,}회 소모)"
+    else:
+        rpd_info = "0회 (100% 캐시 및 로컬 단어 조립 처리로 API 소모 0회)"
+
+    lines = [
+        "==========================================",
+        "📊 [번역 통계 요약]",
+        f"  • 캐시 적용률: {hit_rate:.1f}% (전체 고유 문장 {total_queries:,}개 중 캐시 적용 {hits:,}개 / 신규 번역 {misses:,}개)",
+        f"  • 번역 소요 시간: {elapsed_str}",
+        f"  • API 호출량 (RPD): {rpd_info}",
+        "==========================================",
+    ]
+    return "\n".join(lines)
 
 def _store(cache, text, translated_text, target_lang_norm, force_override=False):
     target_lang_key = target_lang_norm
@@ -368,24 +430,29 @@ def get_cached_translation(text, target_lang="한국어 (Korean)"):
             _load_modpack_memory()
         result = _lookup_safe(_modpack_cache, text, target_lang_norm)
         if result is not None:
+            _record_cache_lookup(text, True)
             return result
 
     result = _lookup_safe(_global_cache, text, target_lang_norm)
     if result is not None:
+        _record_cache_lookup(text, True)
         return result
 
     result = _lookup_safe(_items_cache, text, target_lang_norm)
     if result is not None:
+        _record_cache_lookup(text, True)
         return result
 
     result = _lookup_safe(_books_cache, text, target_lang_norm)
     if result is not None:
+        _record_cache_lookup(text, True)
         return result
 
     # 💡 시스템 코드/명령어/단위/포맷터: 번역 불필요 대상은 원문 그대로 즉시 반환
     from translation_engines import is_code_or_id
     if is_code_or_id(text):
         return text
+    _record_cache_lookup(text, False)
     return None
 
 
@@ -412,17 +479,21 @@ def get_cached_item_translation(text, target_lang="한국어 (Korean)"):
     target_lang_norm = target_lang.replace(" ", "")
     result = _lookup_safe(_items_cache, text, target_lang_norm)
     if result is not None:
+        _record_cache_lookup(text, True)
         return result
     result = _lookup_safe(_global_cache, text, target_lang_norm)
     if result is not None:
+        _record_cache_lookup(text, True)
         return result
     result = _lookup_safe(_books_cache, text, target_lang_norm)
     if result is not None:
+        _record_cache_lookup(text, True)
         return result
 
     from translation_engines import is_code_or_id
     if is_code_or_id(text):
         return text
+    _record_cache_lookup(text, False)
     return None
 
 
@@ -490,17 +561,21 @@ def get_cached_book_translation(text, target_lang="한국어 (Korean)"):
     target_lang_norm = target_lang.replace(" ", "")
     result = _lookup_safe(_books_cache, text, target_lang_norm)
     if result is not None:
+        _record_cache_lookup(text, True)
         return result
     result = _lookup_safe(_global_cache, text, target_lang_norm)
     if result is not None:
+        _record_cache_lookup(text, True)
         return result
     result = _lookup_safe(_items_cache, text, target_lang_norm)
     if result is not None:
+        _record_cache_lookup(text, True)
         return result
 
     from translation_engines import is_code_or_id
     if is_code_or_id(text):
         return text
+    _record_cache_lookup(text, False)
     return None
 
 

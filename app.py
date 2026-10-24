@@ -10,8 +10,6 @@ UI 구성(_setup_ui)과 생명주기 메서드만 담고,
   translation_runner.py - 번역 실행 (단일/ZIP/모드팩)
 
 TODO (구현 예정):
-  - [ ] 피드백(Feedback) 기능 추가 (Discord Webhook 연동)
-  - [ ] 버그 리포트(Bug Report) 기능 추가 (실행 로그 파일 자동 첨부 및 API 키 마스킹 후 Discord 전송)
   - [ ] UI 성능 최적화 (CustomTkinter 병목 수술 및 장기적 PySide6/Qt6 전환 검토)
 """
 
@@ -180,6 +178,7 @@ if ctk is not None and TkinterDnD is not None:
             self._show_startup_loading()
             self.after(100, self._apply_responsive_layout)
             self.after(2000, self._start_background_update_check)
+            self._schedule_feedback_poll(3500)
 
         def _build_header(self):
             self.hero_frame = ctk.CTkFrame(self, fg_color="#121217", corner_radius=18, border_width=1, border_color="#23232b")
@@ -407,7 +406,7 @@ if ctk is not None and TkinterDnD is not None:
                           ).pack(side="right", fill="x", expand=True, padx=(6, 0))
 
             button_row2 = ctk.CTkFrame(panel, fg_color="transparent")
-            button_row2.pack(fill="x", padx=24, pady=(0, 20))
+            button_row2.pack(fill="x", padx=24, pady=(0, 10))
 
             ctk.CTkButton(button_row2, text="🔍 인게임 오역 수정기", height=40,
                           fg_color="#1d4ed8", hover_color="#2563eb",
@@ -424,6 +423,15 @@ if ctk is not None and TkinterDnD is not None:
                           font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                           command=open_bmac
                           ).pack(side="right", fill="x", expand=True, padx=(6, 0))
+
+            button_row3 = ctk.CTkFrame(panel, fg_color="transparent")
+            button_row3.pack(fill="x", padx=24, pady=(0, 20))
+
+            ctk.CTkButton(button_row3, text="💬 피드백 및 버그 제보", height=38,
+                          fg_color="#334155", hover_color="#475569", text_color="#f8fafc",
+                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                          command=self.open_feedback_dialog
+                          ).pack(fill="x", expand=True)
 
         def _build_select_screen(self):
             # 경로 설정 패널
@@ -721,12 +729,26 @@ if ctk is not None and TkinterDnD is not None:
                 command=self.run_selected_modpack)
             self.btn_translate_selected_modpack.pack(fill="x", padx=12, pady=(12, 4))
             
+            guidebook_row = ctk.CTkFrame(config_frame, fg_color="transparent")
+            guidebook_row.pack(fill="x", padx=12, pady=(0, 6))
+
             self.btn_translate_all_guidebooks = ctk.CTkButton(
-                config_frame, text="모드팩 전체 한글화 (가이드북 & 아이템 리소스팩 생성)",
+                guidebook_row, text="모드팩 전체 한글화 (가이드북 & 아이템 리소스팩 생성)",
                 font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                 height=36, fg_color="#10b981", hover_color="#059669",
                 command=self.run_all_modpack_translations)
-            self.btn_translate_all_guidebooks.pack(fill="x", padx=12, pady=(0, 6))
+            self.btn_translate_all_guidebooks.pack(side="left", fill="x", expand=True, padx=(0, 12))
+
+            self.auto_apply_rp_var = tk.BooleanVar(value=True)
+            self.chk_auto_apply_rp = ctk.CTkCheckBox(
+                guidebook_row, text="리소스팩 자동 적용",
+                variable=self.auto_apply_rp_var,
+                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                text_color="#e4e4e7",
+                fg_color="#10b981", hover_color="#059669",
+                checkbox_width=20, checkbox_height=20,
+                command=self.on_toggle_auto_apply_rp)
+            self.chk_auto_apply_rp.pack(side="right")
 
             self.btn_edit_glossary = ctk.CTkButton(
                 config_frame, text="📖 용어집 편집 (Glossary)",
@@ -836,12 +858,29 @@ if ctk is not None and TkinterDnD is not None:
                 
             self.app_state.translated_history = settings.get("translated_history", {})
             self.app_state.glossaries_by_lang = settings.get("glossaries_by_lang", {})
-            
+            if hasattr(self, "auto_apply_rp_var"):
+                self.auto_apply_rp_var.set(bool(settings.get("auto_apply_resourcepack", True)))
+
             # Migrate old single glossary format if present
             if "glossary" in settings and not self.app_state.glossaries_by_lang:
                 self.app_state.glossaries_by_lang["한국어 (Korean)"] = settings.get("glossary")
 
             self._sync_glossary_to_current_lang()
+
+        def on_toggle_auto_apply_rp(self):
+            self.save_user_settings()
+            is_on = bool(self.auto_apply_rp_var.get())
+            if is_on:
+                modpack_dir = getattr(self, "selected_modpack_path", None)
+                if modpack_dir and os.path.isdir(modpack_dir):
+                    import mod_jar_extractor
+                    ok, res_msg = mod_jar_extractor.apply_resource_pack_to_options(modpack_dir)
+                    if ok:
+                        self.log(f"✅ 리소스팩 자동 적용 켜짐: '{res_msg}' 리소스팩이 options.txt에 즉시 등록되었습니다!")
+                        return
+                self.log("✅ 리소스팩 자동 적용 켜짐: 전체 한글화 완료 시 options.txt에 리소스팩이 자동 등록됩니다.")
+            else:
+                self.log("ℹ️ 리소스팩 자동 적용 꺼짐: 전체 한글화 완료 후 수동 확인 창이 표시됩니다.")
 
         def _sync_glossary_to_current_lang(self):
             lang = self.target_lang_combo.get()
@@ -860,6 +899,7 @@ if ctk is not None and TkinterDnD is not None:
                     "target_lang": self.target_lang_combo.get(),
                     "engine_name": self.engine_combo.get(),
                     "plan_name": self.plan_combo.get() if hasattr(self, 'plan_combo') else "",
+                    "auto_apply_resourcepack": bool(self.auto_apply_rp_var.get()) if hasattr(self, "auto_apply_rp_var") else True,
                     "translated_history": self.app_state.translated_history,
                     "glossaries_by_lang": self.app_state.glossaries_by_lang
                 }
@@ -868,21 +908,163 @@ if ctk is not None and TkinterDnD is not None:
             except Exception as e:
                 logging.error(f"설정 저장 실패: {e}")
 
+        def open_feedback_dialog(self):
+            try:
+                from feedback_manager import FeedbackDialog
+                self.feedback_dialog = FeedbackDialog(self)
+                # 피드백 창이 열릴 때 즉시 3초 빠른 폴링 모드로 전환
+                self._schedule_feedback_poll(300)
+            except Exception as e:
+                self.show_messagebox("error", "오류", f"피드백 창을 열 수 없습니다:\n{e}")
+
+        def _is_feedback_dialog_open(self):
+            try:
+                return bool(
+                    hasattr(self, "feedback_dialog")
+                    and self.feedback_dialog
+                    and self.feedback_dialog.winfo_exists()
+                )
+            except Exception:
+                return False
+
+        def _schedule_feedback_poll(self, delay_ms):
+            # 폴링 타이머는 항상 1개만 유지 (기존 대기 타이머 취소 후 재예약 -> 루프 중복 증식 방지)
+            prev_id = getattr(self, "_feedback_poll_after_id", None)
+            if prev_id:
+                try:
+                    self.after_cancel(prev_id)
+                except Exception:
+                    pass
+            try:
+                self._feedback_poll_after_id = self.after(delay_ms, self._start_background_feedback_reply_check)
+            except Exception:
+                self._feedback_poll_after_id = None
+
+        def _start_background_feedback_reply_check(self):
+            self._feedback_poll_after_id = None
+            # 중복 실행 방지 (통신 중이면 완료 후 스스로 재예약됨)
+            if getattr(self, "_is_checking_feedback_replies", False):
+                return
+
+            # 1. 번역 작업 진행 중이면 폴링 중단 (자원 및 통신 절약, 5초 후 재검사)
+            if getattr(getattr(self, "app_state", None), "is_translating", False):
+                self._schedule_feedback_poll(5000)
+                return
+
+            # 2. 내게 미해결 제보가 아예 없으면 ➡️ 폴링 완전 중단 (호출 수 0회)
+            try:
+                import feedback_manager
+                if not feedback_manager.has_unresolved_tickets():
+                    return
+            except Exception:
+                return
+
+            self._is_checking_feedback_replies = True
+
+            def bg_checker():
+                try:
+                    import feedback_manager
+                    result = feedback_manager.check_developer_replies()
+                    new_replies = result.get("new_replies", []) if isinstance(result, dict) else result
+                    status_updates = result.get("status_updates", []) if isinstance(result, dict) else []
+                    deleted_ticket_ids = result.get("deleted_ticket_ids", []) if isinstance(result, dict) else []
+                    if new_replies or status_updates or deleted_ticket_ids:
+                        self.after(0, lambda: self._show_developer_replies_alert(new_replies, status_updates, deleted_ticket_ids))
+                except Exception as e:
+                    logging.debug(f"Feedback reply check error: {e}")
+                finally:
+                    self._is_checking_feedback_replies = False
+                    # 미해결 제보가 남아있는 경우: 피드백 창 열림 시 3초(3000ms), 닫힘 시 60초(60000ms) 주기 예약
+                    try:
+                        import feedback_manager
+                        if feedback_manager.has_unresolved_tickets():
+                            def _reschedule():
+                                next_delay = 3000 if self._is_feedback_dialog_open() else 60000
+                                self._schedule_feedback_poll(next_delay)
+                            self.after(0, _reschedule)
+                    except Exception:
+                        pass
+
+            threading.Thread(target=bg_checker, daemon=True).start()
+
+        def _show_developer_replies_alert(self, new_replies, status_updates=None, deleted_ticket_ids=None):
+            # 피드백 대화상자가 열려 있으면 화면 즉시 갱신 (삭제된 티켓 즉시 제거)
+            try:
+                if hasattr(self, "feedback_dialog") and self.feedback_dialog and self.feedback_dialog.winfo_exists():
+                    self.feedback_dialog._refresh_tickets_list()
+            except Exception:
+                pass
+
+            if deleted_ticket_ids:
+                for del_id in deleted_ticket_ids:
+                    self.log(f"🗑️ [제보 자동 정리] 디스코드에서 삭제된 제보({del_id})가 목록에서 제거되었습니다.")
+
+            if new_replies:
+                for r in new_replies:
+                    cat_name = "버그 제보" if r.get("category") == "bug" else "피드백"
+                    t_id = r.get("ticket_id", "")
+                    title = r.get("title", "")
+                    author = r.get("author", "개발자")
+                    reply = r.get("reply", "")
+
+                    msg = (
+                        f"보내주신 제보에 개발자 답변이 등록되었습니다!\n\n"
+                        f"🎫 제보 건: [{cat_name}] {t_id}\n"
+                        f"📌 제목: {title}\n\n"
+                        f"💬 개발자 ({author})님의 답변:\n"
+                        f"\"{reply}\"\n\n"
+                        f"소중한 제보와 의견에 감사드립니다."
+                    )
+                    self.show_messagebox("info", "🔔 개발자 답변 도착", msg)
+                    self.log(f"🔔 [개발자 답변 도착] 티켓 {t_id}: \"{reply}\" ({author})")
+
+            if status_updates:
+                for s in status_updates:
+                    cat_name = "버그 제보" if s.get("category") == "bug" else "피드백"
+                    t_id = s.get("ticket_id")
+                    title = s.get("title", "")
+                    st_label = s.get("status_label", "상태 변경")
+
+                    msg = (
+                        f"보내주신 제보의 상태가 업데이트되었습니다!\n\n"
+                        f"🎫 제보 건: [{cat_name}] {t_id}\n"
+                        f"📌 제목: {title}\n\n"
+                        f"🏷️ 현재 상태: {st_label}\n\n"
+                        f"소중한 제보에 감사드립니다."
+                    )
+                    self.show_messagebox("info", f"🔔 제보 상태: {st_label}", msg)
+                    self.log(f"🔔 [제보 상태 업데이트] 티켓 {t_id}: [{st_label}]")
+
         def on_close(self):
             try:
-                self.save_user_settings()
-                translation_memory.save_memory(flush_now=True)
-                translation_memory.flush_commit_queue(sync_wait=True)
                 if not self.do_backup_on_close():
                     return  # 사용자가 종료를 취소함
             except Exception:
                 pass
-            finally:
+
+            try:
+                self.save_user_settings()
+                # 창을 즉시 숨겨 윈도우 '(응답 없음)' 프리징 현상 원천 차단
+                self.withdraw()
+            except Exception:
+                pass
+
+            def _final_flush():
                 try:
-                    self.destroy()
+                    translation_memory.save_memory(flush_now=True)
+                    translation_memory.flush_commit_queue(sync_wait=True)
                 except Exception:
                     pass
-                os._exit(0)
+
+            flush_thread = threading.Thread(target=_final_flush, daemon=True)
+            flush_thread.start()
+            flush_thread.join(timeout=1.5)
+
+            try:
+                self.destroy()
+            except Exception:
+                pass
+            os._exit(0)
 
 else:
     class QuestTranslatorApp:

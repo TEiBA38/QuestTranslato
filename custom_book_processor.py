@@ -236,3 +236,127 @@ def assemble_pi_xml_books(xml_map, translation_dict):
             
         final_map[path] = new_content
     return final_map
+
+# ==========================================
+# GuideME MDX Guidebook Parser (.md)
+# ==========================================
+
+def extract_guideme_texts(guideme_map):
+    """
+    GuideME MDX 가이드북(.md) 파일들에서 YAML 메타데이터와 마크다운 본문 텍스트를 추출합니다.
+    JSX 커스텀 컴포넌트(<RecipeFor />, <GameScene> 등)와 마크다운 링크 주소는 번역 방지 마스킹을 수행합니다.
+    guideme_map: { jar_name: { zip_path: content_string } }
+    반환값: (unique_texts, parsed_map)
+    """
+    unique_texts = set()
+    parsed_map = {}
+    
+    for jar_name, zip_dict in guideme_map.items():
+        parsed_map[jar_name] = {}
+        for zip_path, content in zip_dict.items():
+            frontmatter = ''
+            body = content
+            has_fm = content.startswith('---')
+            if has_fm:
+                parts = content.split('---', 2)
+                if len(parts) >= 3:
+                    frontmatter = parts[1]
+                    body = parts[2]
+                    
+            # YAML Frontmatter에서 title 추출 (오직 title만 번역 대상)
+            title_match = re.search(r'title:\s*["\']?(.*?)["\']?\s*$', frontmatter, re.MULTILINE)
+            title = None
+            if title_match:
+                title = title_match.group(1).strip('"').strip("'")
+            if title and re.search(r'[a-zA-Z]', title):
+                unique_texts.add(title)
+                
+            tag_map = {}
+            tag_idx = 0
+            def mask_tag(match):
+                nonlocal tag_idx
+                token = f'__GMTAG_{tag_idx}__'
+                tag_map[token] = match.group(0)
+                tag_idx += 1
+                return token
+                
+            url_map = {}
+            url_idx = 0
+            def mask_url(match):
+                nonlocal url_idx
+                token = f'__GMURL_{url_idx}__'
+                url_map[token] = match.group(2)
+                url_idx += 1
+                return f'[{match.group(1)}]({token})'
+
+            # 1. 마크다운 링크의 목적지 URL/파일경로 마스킹: [텍스트](경로) -> [텍스트](__GMURL_x__)
+            masked_body = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', mask_url, body)
+            # 2. JSX 커스텀 태그 마스킹: <Tag attr="..." /> -> __GMTAG_x__
+            masked_body = re.sub(r'<[^>]+>', mask_tag, masked_body)
+            
+            raw_chunks = masked_body.split('\n\n')
+            parsed_chunks = []
+            
+            for c in raw_chunks:
+                c_clean = c.strip()
+                # 토큰을 제거했을 때 실제 번역할 영문 텍스트가 존재하는지 확인
+                pure_text = re.sub(r'__GMTAG_\d+__|__GMURL_\d+__', '', c_clean).strip()
+                if pure_text and re.search(r'[a-zA-Z]', pure_text):
+                    unique_texts.add(c_clean)
+                    parsed_chunks.append((c_clean, True, c))
+                else:
+                    parsed_chunks.append((c_clean, False, c))
+                    
+            parsed_map[jar_name][zip_path] = {
+                'frontmatter': frontmatter,
+                'title': title,
+                'has_fm': has_fm,
+                'chunks': parsed_chunks,
+                'tag_map': tag_map,
+                'url_map': url_map
+            }
+            
+    return list(unique_texts), parsed_map
+
+def assemble_guideme_books(parsed_map, translation_dict):
+    """
+    번역된 텍스트와 마스킹된 JSX 태그, 링크 주소를 원본 MDX 구조에 맞게 복원 및 재조립합니다.
+    parsed_map: { jar_name: { zip_path: meta_dict } }
+    translation_dict: { orig_text: trans_text }
+    반환값: final_map { jar_name: { zip_path: final_content } }
+    """
+    final_map = {}
+    for jar_name, zip_dict in parsed_map.items():
+        final_map[jar_name] = {}
+        for zip_path, meta in zip_dict.items():
+            fm = meta['frontmatter']
+            title = meta['title']
+            if title and title in translation_dict:
+                trans_title = translation_dict[title]
+                fm = re.sub(r'(title:\s*["\']?)(.*?)(["\']?\s*$)', rf'\g<1>{trans_title}\g<3>', fm, flags=re.MULTILINE)
+                
+            out_chunks = []
+            for clean, is_trans, orig in meta['chunks']:
+                if is_trans and clean in translation_dict:
+                    out_chunks.append(translation_dict[clean])
+                else:
+                    out_chunks.append(orig)
+                    
+            body = '\n\n'.join(out_chunks)
+            
+            # 마스킹된 링크 주소 복원
+            for token, url in meta['url_map'].items():
+                body = body.replace(token, url)
+                
+            # 마스킹된 JSX 태그 복원
+            for token, tag in meta['tag_map'].items():
+                body = body.replace(token, tag)
+                
+            if meta['has_fm']:
+                final_content = f'---{fm}---' + body
+            else:
+                final_content = body
+                
+            final_map[jar_name][zip_path] = final_content
+            
+    return final_map

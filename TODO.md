@@ -20,14 +20,6 @@
     - `translation_memory.py`: 번역 메모리 캐시 I/O, 무결성 검사 및 클라우드 동기화
     - `translation_core.py` / `file_processors.py`: 퀘스트 파일 파싱, 청크 분할 및 파이프라인 조립
 
-- [ ] **사용자 피드백(Feedback) 전송 기능 추가**
-  - 앱 상단 헤더(또는 메뉴)에 `💬 피드백 / 버그 제보` 버튼 및 모달 다이얼로그 추가
-  - 사용자 의견/건의사항 입력 후 **Discord Webhook**을 통해 지정된 디스코드 채널로 즉시 전송
-
-- [ ] **버그 리포트(Bug Report) & 로그 자동 첨부 기능 추가**
-  - 버그 제보 시 현재 실행 중인 앱의 로그 파일(`%APPDATA%/QuestTranslatorPro/logs/quest_translator_YYYYMMDD.log`) 및 화면 콘솔 로그(`log_box`) 자동 수집
-  - 앱 버전(`APP_VERSION`), 선택한 번역 엔진/모델, 대상 모드팩 이름 등 환경 정보 함께 패키징
-
 - [ ] **UI 성능 최적화 및 렉 개선**
   - **1단계 (즉시 체감 최적화 - CustomTkinter 병목 수술)**:
     - [ ] 모드팩 카드 스캔 및 썸네일 이미지 비동기/지연 로딩(Lazy Loading) 적용
@@ -41,6 +33,11 @@
 
 ## ✅ 최근 완료된 작업 (Completed)
 
+- [x] **사용자 피드백(Feedback) & 버그 리포트(Bug Report) 양방향 연동 시스템 (v1.6.0)**:
+  - 앱 상단 헤더에 `💬 피드백 / 버그 제보` 버튼 및 탭형 모달 다이얼로그 추가
+  - 버그 제보 시 API 키 자동 마스킹(`***REDACTED***`) 및 최근 실행 로그/시스템 사양 첨부 전송
+  - 디스코드 스레드 자동 생성 및 이모지 반응(`⭕`/`❌`/`✅`) 실시간 상태 동기화 & 개발자 답변 알림 팝업
+  - 스마트 폴링(창 열림 시 3초 / 닫힘 시 60초 / 미해결 제보 없을 시 0회) 및 삭제된 리포트 자동 정리
 - [x] **v1.5.5 배포 준비 및 배포 자동화**:
   - `README.md` 및 `README.txt` 가이드 전면 개편 (모드별 퀵 경로, 엔진별 API 발급, LM Studio 로컬 AI 3개 입력란 안내)
   - 구 버전(v1.5.3/v1.5.4) 업데이트 시 EXE 단독 교체되더라도 기동 시 `README.md`, `README.txt`, `dist/translation_modpack/` 자동 배포(`_ensure_bundled_resources`)

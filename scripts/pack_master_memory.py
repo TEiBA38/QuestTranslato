@@ -142,7 +142,10 @@ def main():
         # general 카테고리의 경우 로컬에 보관된 모든 모드팩 특화 퀘스트 캐시도 함께 전역 마스터로 병합
         if category == "general":
             import glob
-            mp_files = glob.glob(os.path.join(dist_dir, "translation_memory_modpack_*.json"))
+            mp_files = (
+                glob.glob(os.path.join(dist_dir, "translation_modpack", "translation_memory_modpack_*.json"))
+                + glob.glob(os.path.join(dist_dir, "translation_memory_modpack_*.json"))
+            )
             mp_count = 0
             for mp_path in mp_files:
                 if mp_path.endswith(".bak"):

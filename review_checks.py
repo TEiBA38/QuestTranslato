@@ -6,6 +6,7 @@ from file_processors import extract_snbt_targets
 from hqm_parser import HQMQuestConverter, filter_text
 from translation_engines import is_code_or_id
 from constants import has_hangul
+import translation_memory
 
 
 def _normalize_text(text):
@@ -144,51 +145,69 @@ def analyze_hqm_bytes(source_bytes, translated_bytes, max_samples=500):
     return summary
 
 
-def render_review_report(title, items):
+def render_review_report(title, items, stats_summary=None):
     total_all = 0
     changed_all = 0
     unchanged_all = 0
     suspect_all = 0
 
-    lines = [
-        title,
-        "=" * len(title),
-        "",
-    ]
-
+    item_lines = []
     for label, summary in items:
         total_all += summary["total"]
         changed_all += summary["changed"]
         unchanged_all += summary["unchanged"]
         suspect_all += summary["suspect_untranslated"]
 
-        lines.append(f"[{label}]")
-        lines.append(f"- total: {summary['total']}")
+        item_lines.append(f"[{label}]")
+        item_lines.append(f"- total: {summary['total']}")
         raw_total = summary.get("raw_total")
         sample_size = summary.get("sample_size")
         if raw_total is not None:
-            lines.append(f"- raw_total: {raw_total}")
+            item_lines.append(f"- raw_total: {raw_total}")
         if summary.get("sampled"):
-            lines.append(f"- sampled: true ({sample_size}/{raw_total})")
+            item_lines.append(f"- sampled: true ({sample_size}/{raw_total})")
         else:
-            lines.append("- sampled: false")
-        lines.append(f"- changed: {summary['changed']}")
-        lines.append(f"- unchanged: {summary['unchanged']}")
-        lines.append(f"- suspect_untranslated: {summary['suspect_untranslated']}")
+            item_lines.append("- sampled: false")
+        item_lines.append(f"- changed: {summary['changed']}")
+        item_lines.append(f"- unchanged: {summary['unchanged']}")
+        item_lines.append(f"- suspect_untranslated: {summary['suspect_untranslated']}")
 
         if summary["suspect_examples"]:
-            lines.append("- suspect_examples:")
+            item_lines.append("- suspect_examples:")
             for src, dst in summary["suspect_examples"]:
-                lines.append(f"  * source: {src}")
-                lines.append(f"    translated: {dst}")
+                item_lines.append(f"  * source: {src}")
+                item_lines.append(f"    translated: {dst}")
 
+        item_lines.append("")
+
+    lines = [
+        title,
+        "=" * max(len(title), 42),
+    ]
+
+    # 1. 번역 통계 요약(캐시 적용률, 번역 소요 시간, API RPD 사용량)을 맨 위에 출력
+    if stats_summary:
         lines.append("")
+        lines.append(stats_summary.strip())
+    else:
+        try:
+            summary = translation_memory.get_cache_stats_summary()
+            lines.append("")
+            lines.append(summary.strip())
+        except Exception:
+            pass
 
+    # 2. [overall] 결과도 맨 위에 출력!
+    lines.append("")
     lines.append("[overall]")
     lines.append(f"- total: {total_all}")
     lines.append(f"- changed: {changed_all}")
     lines.append(f"- unchanged: {unchanged_all}")
     lines.append(f"- suspect_untranslated: {suspect_all}")
+    lines.append("=" * max(len(title), 42))
     lines.append("")
+
+    # 3. 개별 파일별 세부 리포트
+    lines.extend(item_lines)
 
     return "\n".join(lines)

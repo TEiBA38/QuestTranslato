@@ -37,6 +37,7 @@ a = Analysis(
         'state_manager',
         'requests',
         'updater',
+        'feedback_manager',
     ],
     hookspath=[],
     hooksconfig={},
