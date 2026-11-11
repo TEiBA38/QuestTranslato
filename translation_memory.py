@@ -741,6 +741,7 @@ MASTER_FILES = {
 
 COMMIT_BATCH_THRESHOLD = 500   # 큐에 500문장 이상 모이면 즉시 자동 커밋
 COMMIT_DEBOUNCE_SECONDS = 12.0 # 번역 중 1~2초마다 쌓이는 변경분을 12초 단위로 묶어서 1회 커밋
+COMMIT_FILES_COMPACT_THRESHOLD = 100  # 누적 커밋 파일이 100개(약 50,000문장)에 도달하면 마스터 압축 및 정리 자동 실행
 SYNC_COOLDOWN_SECONDS = 180.0  # 짧은 시간 내 중복 Pull 방지 (3분 쿨타임)
 
 _commit_queue = {}  # (category, lang, src) -> tgt
@@ -750,6 +751,7 @@ _active_commit_thread = None
 _active_sync_thread = None
 _active_pack_thread = None
 _session_committed_count = 0
+_session_committed_chunks = 0
 _last_pull_complete = False
 _circuit_breaker_until = 0.0
 _consecutive_upload_errors = 0
@@ -947,7 +949,7 @@ def flush_commit_queue(sync_wait=False):
         _is_committing = True
 
     def _do_commit():
-        global _is_committing, _consecutive_upload_errors, _circuit_breaker_until, _session_committed_count
+        global _is_committing, _consecutive_upload_errors, _circuit_breaker_until, _session_committed_count, _session_committed_chunks
         # Cloudflare Worker 무료 플랜 CPU 제한(10ms) 및 타임아웃 방지를 위해 500개 단위로 안전 분할 전송
         chunk_size = 500
 
@@ -978,6 +980,7 @@ def flush_commit_queue(sync_wait=False):
                         if r.status_code in (200, 201):
                             committed_total += len(chunk)
                             _session_committed_count += len(chunk)
+                            _session_committed_chunks += 1
                             try:
                                 res_json = r.json()
                                 new_last_id = res_json.get("latest_id") or res_json.get("key")
@@ -986,6 +989,7 @@ def flush_commit_queue(sync_wait=False):
                                     # 다른 사람이 직전에 올린 커밋(C3)을 건너뛰지 않고 완벽히 병합할 수 있음!
                                     sync_state = _load_sync_state()
                                     sync_state["last_pushed_commit_id"] = str(new_last_id)
+                                    sync_state["uncompacted_chunks"] = sync_state.get("uncompacted_chunks", 0) + 1
                                     _save_sync_state(sync_state)
                             except Exception:
                                 pass
@@ -1013,6 +1017,19 @@ def flush_commit_queue(sync_wait=False):
                     if _consecutive_upload_errors >= 3:
                         _circuit_breaker_until = time.time() + 180
                     break
+
+                # 누적 커밋 파일이 임계치(100개 = 약 50,000문장)에 도달하면 백그라운드에서 마스터 압축 및 정리 실행
+                sync_state = _load_sync_state()
+                total_uncompacted = max(_session_committed_chunks, sync_state.get("uncompacted_chunks", 0))
+                if total_uncompacted >= COMMIT_FILES_COMPACT_THRESHOLD:
+                    logging.info(
+                        f"📦 [Auto-Compact] 누적 커밋 파일이 {total_uncompacted}개에 도달하여 "
+                        f"마스터 스냅샷 자동 압축 업로드 및 정리를 백그라운드에서 실행합니다."
+                    )
+                    _session_committed_chunks = 0
+                    sync_state["uncompacted_chunks"] = 0
+                    _save_sync_state(sync_state)
+                    upload_snapshots_to_cloudflare(force=True, purge_commits=True)
         finally:
             with _lock:
                 _is_committing = False
@@ -1054,7 +1071,7 @@ def upload_snapshots_to_cloudflare(force=False, purge_commits=True, min_entries=
         return
 
     def _async_pack():
-        global _session_committed_count
+        global _session_committed_count, _session_committed_chunks
         # 1. 혹시 남아있는 로컬 커밋 큐가 있다면 먼저 100% 전송 완료 보장
         try:
             flush_commit_queue(sync_wait=True)
@@ -1070,11 +1087,12 @@ def upload_snapshots_to_cloudflare(force=False, purge_commits=True, min_entries=
         sync_state = _load_sync_state()
         last_commit_id = str(sync_state.get("last_commit_id", "") or "").strip()
         last_compacted_id = str(sync_state.get("last_compacted_commit_id", "") or "").strip()
+        uncompacted = max(_session_committed_chunks, sync_state.get("uncompacted_chunks", 0))
 
         # 새로 병합할 커밋이 없고 이미 최신 상태까지 마스터 압축이 완료된 경우 불필요한 대용량 재업로드 생략
-        if not last_commit_id and _session_committed_count == 0:
+        if not last_commit_id and _session_committed_count == 0 and uncompacted == 0:
             return
-        if last_commit_id and last_commit_id == last_compacted_id and _session_committed_count == 0:
+        if last_commit_id and last_commit_id == last_compacted_id and _session_committed_count == 0 and uncompacted == 0:
             return
 
         all_succeeded = True
@@ -1139,8 +1157,10 @@ def upload_snapshots_to_cloudflare(force=False, purge_commits=True, min_entries=
                     logging.info(f"🧹 Cloudflare R2 병합 완료 커밋 {purged}개 자동 정리 완료 (기준: {last_commit_id})")
                     sync_state = _load_sync_state()
                     sync_state["last_compacted_commit_id"] = last_commit_id
+                    sync_state["uncompacted_chunks"] = 0
                     _save_sync_state(sync_state)
                     _session_committed_count = 0
+                    _session_committed_chunks = 0
             except Exception as pe:
                 logging.warning(f"커밋 자동 정리 요청 실패: {pe}")
 
@@ -1306,12 +1326,14 @@ def sync_from_cloudflare(force_wait=False, bypass_cooldown=False):
 
             if pulled_total > 0:
                 logging.info(f"🔄 [Cloudflare R2 Pull] 신규 커밋 {pulled_total:,}개 증분 병합 완료 (최신: {last_id})")
+                estimated_chunks = max(1, pulled_total // 500)
+                sync_state["uncompacted_chunks"] = sync_state.get("uncompacted_chunks", 0) + estimated_chunks
         except Exception as e:
             logging.debug(f"Cloudflare 증분 Pull 실패: {e}")
         return pulled_total > 0
 
     def _async_cloudflare_sync():
-        global _is_syncing, _last_sync_timestamp
+        global _is_syncing, _last_sync_timestamp, _session_committed_chunks
         try:
             _load_pending_commits_from_disk()
             sync_state = _load_sync_state()
@@ -1329,6 +1351,15 @@ def sync_from_cloudflare(force_wait=False, bypass_cooldown=False):
 
             _save_sync_state(sync_state)
             _last_sync_timestamp = time.time()
+
+            # 2.5단계: 누적 커밋 파일이 100개에 도달했을 경우 백그라운드 자동 마스터 압축 트리거
+            current_uncompacted = max(_session_committed_chunks, sync_state.get("uncompacted_chunks", 0))
+            if current_uncompacted >= COMMIT_FILES_COMPACT_THRESHOLD:
+                logging.info(f"📦 [Auto-Compact] 누적 커밋 파일이 {current_uncompacted}개에 도달하여 마스터 스냅샷 자동 압축을 시작합니다.")
+                _session_committed_chunks = 0
+                sync_state["uncompacted_chunks"] = 0
+                _save_sync_state(sync_state)
+                upload_snapshots_to_cloudflare(force=True, purge_commits=True)
 
             # 3단계: 단어사전(translation_memory_words.json) 무압축 원본 동기화
             try:
