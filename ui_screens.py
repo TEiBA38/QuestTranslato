@@ -133,11 +133,12 @@ class UIScreensMixin:
         if event is not None and getattr(event, "widget", None) is not self:
             return
         new_width = max(self.winfo_width(), 1)
-        if hasattr(self, '_last_resize_width') and abs(new_width - self._last_resize_width) < 10:
+        if hasattr(self, '_last_resize_width') and abs(new_width - self._last_resize_width) < 15:
             return
         if self._resize_job is not None:
             self.after_cancel(self._resize_job)
-        self._resize_job = self.after(150, self._apply_responsive_layout)
+        # Windows 창 최대화 애니메이션(약 200ms) 완료 후 단 한 번만 실행되도록 220ms 디바운스 적용
+        self._resize_job = self.after(220, self._apply_responsive_layout)
 
     def _apply_responsive_layout(self):
         width = max(self.winfo_width(), 1)
@@ -146,10 +147,25 @@ class UIScreensMixin:
         self._arrange_quick_buttons(width)
 
         card_columns = self._get_card_columns()
-        if card_columns != self._last_card_columns:
+        if card_columns != self._last_card_columns or getattr(self, "_needs_card_relayout", False):
             self._last_card_columns = card_columns
-            if self.modpack_entries:
-                self.render_modpack_cards(self.modpack_entries)
+            self._needs_card_relayout = False
+
+            # 모드팩 선택 화면이 활성화(화면에 표시) 상태일 때만 재배치 실행
+            is_select_screen_visible = False
+            try:
+                is_select_screen_visible = self.select_screen.winfo_ismapped()
+            except Exception:
+                pass
+
+            if is_select_screen_visible and self.modpack_entries:
+                # 🌟 초고속 재배치: 위젯 파괴/재생성 없이 grid 위치만 즉시 변경 (0ms 렌더링)
+                relayout_fn = getattr(self, "relayout_modpack_cards", None)
+                if not relayout_fn or not relayout_fn(card_columns):
+                    self.render_modpack_cards(self.modpack_entries)
+            else:
+                # 선택 화면이 보이지 않는 상태(홈 화면/번역 화면)라면 플래그만 세팅하고 리렌더링 스킵!
+                self._needs_card_relayout = True
 
     def _arrange_path_buttons(self, width):
         if not hasattr(self, "path_action_buttons"):

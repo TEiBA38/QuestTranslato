@@ -331,7 +331,27 @@ class ModpackMixin:
             self.translate_selected_label.configure(text="선택 모드팩: 없음")
             self.btn_go_translate.configure(state="disabled")
 
+    def relayout_modpack_cards(self, columns):
+        """기존 카드를 파괴하지 않고 grid 위치만 초고속 재배치 (0ms 리사이징)"""
+        candidates = getattr(self, "current_displayed_candidates", None) or self.modpack_entries
+        if not candidates or not hasattr(self, "modpack_cards_by_path") or not self.modpack_cards_by_path:
+            return False
+
+        max_cols = max(columns, 8)
+        for col in range(max_cols):
+            self.cards_scroller.grid_columnconfigure(col, weight=1 if col < columns else 0)
+
+        for idx, candidate in enumerate(candidates):
+            path = candidate[1]
+            card = self.modpack_cards_by_path.get(path)
+            if card and card.winfo_exists():
+                card.grid(row=idx // columns, column=idx % columns, sticky="nsew", padx=5, pady=5)
+            else:
+                return False
+        return True
+
     def render_modpack_cards(self, candidates):
+        self.current_displayed_candidates = list(candidates) if candidates else []
         # 1. [잔상 방지 패치] 스크롤러 내부 캔버스 배경색 강제 지정
         try:
             self.cards_scroller._parent_canvas.configure(bg="#12121a")
