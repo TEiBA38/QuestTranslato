@@ -216,7 +216,7 @@ def sync_words_from_cloudflare(force=False):
                 # 기존 로컬 파일이 있으면 .bak 백업 생성
                 if os.path.exists(filepath):
                     try:
-                        shutil.copy2(filepath, filepath + ".bak")
+                        from backup_utils import create_compressed_backup; create_compressed_backup(filepath)
                     except Exception:
                         pass
 
@@ -267,7 +267,7 @@ def save_words(force=False, sync_cloud=True):
             # 1. 기존 파일이 존재하면 .bak 백업 생성
             if os.path.exists(filepath):
                 try:
-                    shutil.copy2(filepath, bak_path)
+                    from backup_utils import create_compressed_backup; create_compressed_backup(filepath)
                 except Exception as bak_err:
                     logging.debug(f"단어사전 .bak 백업 생성 스킵: {bak_err}")
 

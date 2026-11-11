@@ -284,7 +284,7 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                 continue
 
             if file_path.lower().endswith('.snbt'):
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                with open(file_path, 'r', encoding='utf-8-sig', errors='ignore') as f:
                     content = f.read()
                 lines, targets = extract_snbt_targets(content)
                 if not targets:
@@ -334,13 +334,13 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                 _save_progress(out_dir, completed_set)
                 continue
             elif file_path.lower().endswith('.lang'):
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                with open(file_path, 'r', encoding='utf-8-sig', errors='ignore') as f:
                     lines = f.read().splitlines()
 
                 ko_dict = {}
                 if sibling_ko_path:
                     try:
-                        with open(sibling_ko_path, 'r', encoding='utf-8', errors='ignore') as kf:
+                        with open(sibling_ko_path, 'r', encoding='utf-8-sig', errors='ignore') as kf:
                             for kline in kf.read().splitlines():
                                 if '=' in kline and not kline.strip().startswith('#'):
                                     kp = kline.split('=', 1)
@@ -392,7 +392,7 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                 jobs.append({"kind": "lang", "target_path": target_path, "rel_path": rel_path,
                              "lines": lines, "targets": targets, "translated_map": {}})
             elif file_path.lower().endswith('.json'):
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                with open(file_path, 'r', encoding='utf-8-sig', errors='ignore') as f:
                     try:
                         data = json.load(f)
                     except json.JSONDecodeError:
@@ -403,7 +403,7 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
 
                 if sibling_ko_path and isinstance(data, dict):
                     try:
-                        with open(sibling_ko_path, 'r', encoding='utf-8', errors='ignore') as kf:
+                        with open(sibling_ko_path, 'r', encoding='utf-8-sig', errors='ignore') as kf:
                             ko_data = json.load(kf)
                         if isinstance(ko_data, dict):
                             for k_json, en_val in list(data.items()):
@@ -480,18 +480,18 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                     )
                     
                     if extracted_glossary:
-                        commented_glossary = {k: f"{v} # [Auto-Extracted]" for k, v in extracted_glossary.items()}
-                        added_keys = list(commented_glossary.keys())[:5]
-                        context.log(f"✨ 진화 완료! 새로 추가된 단어: {added_keys} 등 총 {len(commented_glossary)}개")
+                        clean_extracted = {k.strip(): v.split('#')[0].strip() for k, v in extracted_glossary.items() if k and v}
+                        added_keys = list(clean_extracted.keys())[:5]
+                        context.log(f"✨ 진화 완료! 새로 추가된 단어: {added_keys} 등 총 {len(clean_extracted)}개")
                         if isinstance(glossary, dict):
-                            glossary.update(commented_glossary)
+                            glossary.update(clean_extracted)
                         
                         if hasattr(context, 'app'):
                             app = context.app
-                            app.app_state.glossary.update(commented_glossary)
+                            app.app_state.glossary.update(clean_extracted)
                             if target_lang not in app.app_state.glossaries_by_lang:
                                 app.app_state.glossaries_by_lang[target_lang] = {}
-                            app.app_state.glossaries_by_lang[target_lang].update(commented_glossary)
+                            app.app_state.glossaries_by_lang[target_lang].update(clean_extracted)
                             if hasattr(app, "save_user_settings"):
                                 app.save_user_settings()
                 elif len(uncached_samples) > 0:
@@ -528,6 +528,12 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
 
         context.log("\n" + translation_memory.get_cache_stats_summary(target_lang))
 
+        # 사용자 응답 대기(모달 창) 직전에 남은 커밋 즉시 전송 및 마스터 스냅샷 통합 시작
+        try:
+            translation_memory.finalize_translation_session(modpack_path=modpack_path)
+        except Exception:
+            pass
+
         if modpack_path:
             context.log("\n🎉 모든 번역 완료! 저장 및 적용 방식을 선택해주세요.")
             apply_mode = context.ask_apply_mode()
@@ -555,17 +561,19 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                     os.remove(prog_in_out)
                 except Exception:
                     pass
-            # 덮어쓰기 전 원본 퀘스트/언어 파일 안전 백업(.bak) 생성 (최초 1회 보존)
+            # 덮어쓰기 전 원본 퀘스트/언어 파일 초고속 압축 백업(.bak.gz) 생성 (최초 1회 보존)
+            from backup_utils import create_compressed_backup
             for root_b, _, files_b in os.walk(out_dir):
                 for fb in files_b:
                     if fb == PROGRESS_FILE:
                         continue
                     rel_b = os.path.relpath(os.path.join(root_b, fb), out_dir)
                     orig_target = os.path.join(modpack_path, rel_b)
-                    bak_target = orig_target + ".bak"
-                    if os.path.isfile(orig_target) and not os.path.exists(bak_target):
+                    bak_target_gz = orig_target + ".bak.gz"
+                    bak_target_legacy = orig_target + ".bak"
+                    if os.path.isfile(orig_target) and not os.path.exists(bak_target_gz) and not os.path.exists(bak_target_legacy):
                         try:
-                            shutil.copy2(orig_target, bak_target)
+                            create_compressed_backup(orig_target, bak_target_gz)
                         except Exception:
                             pass
             shutil.copytree(out_dir, modpack_path, dirs_exist_ok=True)

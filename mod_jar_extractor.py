@@ -6,6 +6,10 @@ import re
 from io import BytesIO
 
 def _load_relaxed_json(json_string):
+    if isinstance(json_string, bytes):
+        json_string = json_string.decode('utf-8-sig', errors='ignore')
+    elif isinstance(json_string, str):
+        json_string = json_string.lstrip('\ufeff')
     """
     Minecraft 모드 JSON 파일들은 종종 주석(//, /* */)이나 후행 쉼표(trailing commas)를 포함합니다.
     이를 제거하고 파싱하여 JSONDecodeError를 방지합니다.
@@ -41,7 +45,7 @@ def _load_relaxed_json(json_string):
     json_string = re.sub(r',\s*([\]}])', r'\1', json_string)
     
     # 4. 모드 제작자가 문자열 내부에 탭(\t)/개행 등 제어문자를 넣거나 파일 끝에 쓰레기 데이터를 남긴 경우까지 안전 파싱
-    json_string_stripped = json_string.strip()
+    json_string_stripped = json_string.strip().lstrip('\ufeff')
     try:
         return json.loads(json_string_stripped, strict=False)
     except json.JSONDecodeError as e:
@@ -286,7 +290,7 @@ def find_custom_guidebooks_in_jars(mods_dir, log_callback=None):
                         sub = parts[1]
                         if sub in ('guides', 'ae2guide') or 'guidebook' in sub:
                             try:
-                                with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
+                                with open(fp, 'r', encoding='utf-8-sig', errors='ignore') as f:
                                     content = f.read()
                                 zip_path = f"assets/{rel}"
                                 if "KubeJS" not in found_books["guideme"]:
@@ -530,7 +534,7 @@ def extract_lang_files_from_jars(mods_dir, log_callback=None, include_ko_kr=Fals
                     if fn_lower in ('en_us.json', 'en_us.lang', 'en_us.json5'):
                         fp = os.path.join(lang_dir, fn)
                         try:
-                            with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
+                            with open(fp, 'r', encoding='utf-8-sig', errors='ignore') as f:
                                 content = f.read()
                             zip_path = f"assets/{ns}/lang/{fn}"
                             ext_langs[zip_path] = content
@@ -538,7 +542,7 @@ def extract_lang_files_from_jars(mods_dir, log_callback=None, include_ko_kr=Fals
                             ko_fn = fn_lower.replace('en_us', 'ko_kr')
                             ko_fp = os.path.join(lang_dir, ko_fn)
                             if os.path.isfile(ko_fp):
-                                with open(ko_fp, 'r', encoding='utf-8', errors='ignore') as f_ko:
+                                with open(ko_fp, 'r', encoding='utf-8-sig', errors='ignore') as f_ko:
                                     ext_ko_langs[zip_path] = (f"assets/{ns}/lang/{ko_fn}", f_ko.read())
                         except Exception as e:
                             logging.debug(f"Error reading external lang file {fp}: {e}")
@@ -1004,32 +1008,34 @@ def restore_modpack_backups(modpack_dir):
     if not modpack_dir or not os.path.isdir(modpack_dir):
         return 0, 0, 0
 
-    # 1. 모드 JAR 원본 백업(.jar.bak) 복원
+    from backup_utils import restore_backup
+
+    # 1. 모드 JAR 원본 백업(.jar.bak 및 .jar.bak.gz) 복원
     mods_dir = os.path.join(modpack_dir, "mods")
     if os.path.isdir(mods_dir):
         for fname in os.listdir(mods_dir):
-            if fname.lower().endswith(".jar.bak"):
+            fn_l = fname.lower()
+            if fn_l.endswith(".jar.bak") or fn_l.endswith(".jar.bak.gz"):
                 bak_path = os.path.join(mods_dir, fname)
-                orig_path = bak_path[:-4]
                 try:
-                    shutil.copy2(bak_path, orig_path)
-                    os.remove(bak_path)
-                    restored_jars += 1
+                    if restore_backup(bak_path):
+                        restored_jars += 1
                 except Exception:
                     pass
 
-    # 2. 퀘스트 및 설정/언어 파일 원본 백업(.bak) 복원
-    quest_bak_exts = (".snbt.bak", ".json.bak", ".hqm.bak", ".lang.bak", ".cfg.bak", ".txt.bak")
+    # 2. 퀘스트 및 설정/언어 파일 원본 백업(.bak 및 .bak.gz) 복원
+    quest_bak_exts = (
+        ".snbt.bak", ".json.bak", ".hqm.bak", ".lang.bak", ".cfg.bak", ".txt.bak",
+        ".snbt.bak.gz", ".json.bak.gz", ".hqm.bak.gz", ".lang.bak.gz", ".cfg.bak.gz", ".txt.bak.gz"
+    )
     for root, dirs, files_list in os.walk(modpack_dir):
         dirs[:] = [d for d in dirs if d.lower() not in SCAN_IGNORE_DIRS]
         for fname in files_list:
             if fname.lower().endswith(quest_bak_exts):
                 bak_path = os.path.join(root, fname)
-                orig_path = bak_path[:-4]
                 try:
-                    shutil.copy2(bak_path, orig_path)
-                    os.remove(bak_path)
-                    restored_quests += 1
+                    if restore_backup(bak_path):
+                        restored_quests += 1
                 except Exception:
                     pass
 

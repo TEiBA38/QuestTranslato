@@ -64,7 +64,7 @@ class ModpackMixin:
                         count += 1
                     if not quest_translated:
                         # 백업 파일(.bak)이 존재하거나 ko_kr 퀘스트 파일이 있는 경우
-                        if fn_lower.endswith(('.snbt.bak', '.hqm.bak', 'defaultquests.json.bak')) or fn_lower in ["ko_kr.json", "ko_kr.lang", "ko_kr.snbt"]:
+                        if fn_lower.endswith(('.snbt.bak', '.hqm.bak', 'defaultquests.json.bak', '.snbt.bak.gz', '.hqm.bak.gz', 'defaultquests.json.bak.gz')) or fn_lower in ["ko_kr.json", "ko_kr.lang", "ko_kr.snbt"]:
                             quest_translated = True
                         elif fn_lower.endswith(('.snbt', '.hqm', '.json', '.lang', '.cfg', '.txt')) and ('quest' in root.lower() or 'hqm' in root.lower() or fn_lower.endswith(('.snbt', '.hqm'))):
                             if sample_scanned < 100:

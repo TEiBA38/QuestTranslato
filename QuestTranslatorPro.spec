@@ -38,6 +38,8 @@ a = Analysis(
         'requests',
         'updater',
         'feedback_manager',
+        'backup_utils',
+        'translation_editor',
     ],
     hookspath=[],
     hooksconfig={},

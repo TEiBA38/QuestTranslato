@@ -354,13 +354,13 @@ class TranslationMixin:
                             sample_subset, engine_key, api_key, ai_model, target_lang, custom_url=None
                         )
                         if extracted_glossary:
-                            commented_glossary = {k: f"{v} # [Auto-Extracted]" for k, v in extracted_glossary.items()}
-                            added_keys = list(commented_glossary.keys())[:5]
-                            self.log(f"✨ 진화 완료! 새로 추가된 단어: {added_keys} 등 총 {len(commented_glossary)}개")
-                            self.app_state.glossary.update(commented_glossary)
+                            clean_extracted = {k.strip(): v.split('#')[0].strip() for k, v in extracted_glossary.items() if k and v}
+                            added_keys = list(clean_extracted.keys())[:5]
+                            self.log(f"✨ 진화 완료! 새로 추가된 단어: {added_keys} 등 총 {len(clean_extracted)}개")
+                            self.app_state.glossary.update(clean_extracted)
                             if target_lang not in self.app_state.glossaries_by_lang:
                                 self.app_state.glossaries_by_lang[target_lang] = {}
-                            self.app_state.glossaries_by_lang[target_lang].update(commented_glossary)
+                            self.app_state.glossaries_by_lang[target_lang].update(clean_extracted)
                             if hasattr(self, "save_user_settings"):
                                 self.save_user_settings()
                     elif len(uncached_for_glossary) > 0:
@@ -553,13 +553,13 @@ class TranslationMixin:
                                 sample_subset, engine_key, api_key, ai_model, target_lang, custom_url=None
                             )
                             if extracted_glossary:
-                                commented_glossary = {k: f"{v} # [Auto-Extracted]" for k, v in extracted_glossary.items()}
-                                added_keys = list(commented_glossary.keys())[:5]
-                                self.log(f"✨ 진화 완료! 새로 추가된 단어: {added_keys} 등 총 {len(commented_glossary)}개")
-                                self.app_state.glossary.update(commented_glossary)
+                                clean_extracted = {k.strip(): v.split('#')[0].strip() for k, v in extracted_glossary.items() if k and v}
+                                added_keys = list(clean_extracted.keys())[:5]
+                                self.log(f"✨ 진화 완료! 새로 추가된 단어: {added_keys} 등 총 {len(clean_extracted)}개")
+                                self.app_state.glossary.update(clean_extracted)
                                 if target_lang not in self.app_state.glossaries_by_lang:
                                     self.app_state.glossaries_by_lang[target_lang] = {}
-                                self.app_state.glossaries_by_lang[target_lang].update(commented_glossary)
+                                self.app_state.glossaries_by_lang[target_lang].update(clean_extracted)
                                 if hasattr(self, "save_user_settings"):
                                     self.save_user_settings()
                         elif len(uncached_patchouli) > 0:
@@ -881,13 +881,13 @@ class TranslationMixin:
             source_json_data = None
 
             if file_path.lower().endswith('.snbt'):
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                with open(file_path, 'r', encoding='utf-8-sig', errors='ignore') as f:
                     content = f.read()
                 source_content = content
                 translated_content = process_snbt_with_progress(
                     content, engine_key, api_key, is_paid, progress_cb, self.route_log, self.is_cancelled, reference_map=glossary_map, glossary=glossary_map, ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
             elif file_path.lower().endswith('.json'):
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                with open(file_path, 'r', encoding='utf-8-sig', errors='ignore') as f:
                     try:
                         json_data = json.load(f)
                     except json.JSONDecodeError as e:
@@ -907,6 +907,10 @@ class TranslationMixin:
 
             self.update_progress(1.0)
             self.log("\n" + translation_memory.get_cache_stats_summary(target_lang))
+            try:
+                translation_memory.finalize_translation_session()
+            except Exception:
+                pass
             import temp_session_logger
             if temp_session_logger.is_debug_mode():
                 save_dir = temp_session_logger.get_temp_dir()
@@ -960,6 +964,10 @@ class TranslationMixin:
             self.log(f"\n❌ 오류 발생: {str(e)}")
             self.show_messagebox("error", "오류", f"오류가 발생했습니다:\n{str(e)}")
         finally:
+            try:
+                translation_memory.finalize_translation_session()
+            except Exception:
+                pass
             self.toggle_buttons(True)
 
     # ====================================================================
@@ -1244,9 +1252,9 @@ class TranslationMixin:
             return
 
 
-        # 취소 시점까지 완료된 번역 메모리(캐시) 영구 저장
+        # 취소 시점까지 완료된 번역 메모리(캐시) 영구 저장 및 잔여 커밋 클라우드 전송
         try:
-            translation_memory.save_memory()
+            translation_memory.finalize_translation_session(modpack_path=getattr(self, 'selected_modpack_path', None))
         except Exception:
             pass
 
@@ -1471,6 +1479,10 @@ class TranslationMixin:
                 if not self.is_cancelled():
                     self.app.app_state.translated_history[modpack_path] = time.strftime("%Y-%m-%d %H:%M:%S")
                     self.app.save_user_settings()
+                    try:
+                        translation_memory.finalize_translation_session(modpack_path=modpack_path)
+                    except Exception as exc:
+                        logging.warning(f"번역 완료 클라우드 동기화 오류: {exc}")
                     if hasattr(self.app, "scan_modpacks_from_entry"):
                         self.app.after(0, lambda: self.app.scan_modpacks_from_entry(show_screen=False))
 
@@ -1488,6 +1500,10 @@ class TranslationMixin:
                 reference_map=reference_map, glossary=glossary, custom_url=custom_url
             )
         finally:
+            try:
+                translation_memory.finalize_translation_session(modpack_path=modpack_path)
+            except Exception:
+                pass
             self.app_state.is_translating = False
             self._translation_out_dir = None
             if toggle_ui:
@@ -1588,6 +1604,12 @@ class TranslationMixin:
 
                     self.log("\n" + translation_memory.get_cache_stats_summary(target_lang))
 
+                    # 완료 팝업 대기 전에 잔여 커밋 즉시 업로드 및 마스터 스냅샷 통합 시작
+                    try:
+                        translation_memory.finalize_translation_session(modpack_path=modpack_dir)
+                    except Exception:
+                        pass
+
                     msg = f"모드팩 전체 번역이 완료되었습니다!\n\n생성된 리소스팩: '{pack_filename}'"
                     if not custom_map.get("pi_xml"):
                         mods_dir = os.path.join(modpack_dir, "mods")
@@ -1639,6 +1661,10 @@ class TranslationMixin:
                     except Exception as rep_err:
                         self.log(f"⚠️ 결과 리포트 생성 스킵: {rep_err}")
             finally:
+                try:
+                    translation_memory.finalize_translation_session(modpack_path=modpack_dir)
+                except Exception:
+                    pass
                 self.app_state.is_translating = False
                 self.toggle_buttons(True)
                 self.update_progress(1.0)

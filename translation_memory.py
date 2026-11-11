@@ -29,6 +29,23 @@ def _get_cache_dir():
         base = os.path.join(repo_root, "dist")
     
     os.makedirs(base, exist_ok=True)
+
+    # 🧪 [테스트 모드]: 원본 캐시를 완벽 보호하기 위해 dist/temp/test_cache 격리 폴더 사용
+    try:
+        import temp_session_logger
+        if temp_session_logger.is_debug_mode():
+            test_cache_dir = os.path.join(base, "temp", "test_cache")
+            os.makedirs(test_cache_dir, exist_ok=True)
+            for fname in os.listdir(base):
+                src_path = os.path.join(base, fname)
+                if os.path.isfile(src_path) and fname.endswith(".json"):
+                    dst_path = os.path.join(test_cache_dir, fname)
+                    if not os.path.exists(dst_path):
+                        shutil.copy2(src_path, dst_path)
+            return test_cache_dir
+    except Exception:
+        pass
+
     return base
 
 CACHE_DIR = _get_cache_dir()
@@ -130,25 +147,46 @@ def is_valid_translation(src, tgt, target_lang="한국어 (Korean)"):
 
 
 def _read_and_clean_file(filepath):
-    """파일 로드 시 오염된 항목(원문==번역문) 자동 제거 및 언어 키 통합"""
+    """파일 로드 시 언어 키 표준화 및 고속 딕셔너리 구성 (정규식 오버헤드 최소화)"""
     if not filepath or not os.path.exists(filepath):
         return {}
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
+    except Exception as e:
+        # 파일 손상 시 압축 백업(.bak.gz) 또는 비압축 백업(.bak)에서 자동 안전 복구
+        logging.warning(f"메모리 파일 로드 실패 ({filepath}), 백업 파일 복원 시도: {e}")
+        try:
+            from backup_utils import read_backup_json
+            data = read_backup_json(filepath + ".bak.gz")
+            if data is None:
+                data = read_backup_json(filepath + ".bak")
+            if data is None:
+                return {}
+        except Exception:
+            return {}
+
+    try:
         cleaned = {}
+        clean_tag_pat = re.compile(r'\s*#\s*\[(?:Auto-Extracted|자동\s*추출됨)\]')
         for lang, translations in data.items():
             if not isinstance(translations, dict):
                 continue
             std_lang = "한국어 (Korean)" if ("Korean" in lang or "한국어" in lang) else lang
             if std_lang not in cleaned:
                 cleaned[std_lang] = {}
-            lang_norm = std_lang.replace(" ", "")
+            target_dict = cleaned[std_lang]
+            # 이미 검증/정제되어 디스크에 캐싱된 데이터이므로 무효 항목(None, 빈문자열, 원문==번역문)만 고속 필터링
             for src, tgt in translations.items():
-                tgt = sanitize_minecraft_formatting(src, tgt)
-                if is_valid_translation(src, tgt, std_lang):
-                    cleaned[std_lang][src] = tgt
-                    _index_template(src, tgt, lang_norm)
+                if not src or not tgt:
+                    continue
+                if isinstance(src, str) and "#" in src:
+                    src = clean_tag_pat.sub('', src).strip()
+                if isinstance(tgt, str) and "#" in tgt:
+                    tgt = clean_tag_pat.sub('', tgt).strip()
+                if not src or not tgt or src == tgt:
+                    continue
+                target_dict[src] = tgt
         return cleaned
     except Exception:
         return {}
@@ -359,6 +397,10 @@ def get_cache_stats_summary(target_lang="한국어 (Korean)"):
     return "\n".join(lines)
 
 def _store(cache, text, translated_text, target_lang_norm, force_override=False):
+    if isinstance(translated_text, str) and "#" in translated_text:
+        translated_text = re.sub(r'\s*#\s*\[(?:Auto-Extracted|자동\s*추출됨)\]', '', translated_text).strip()
+    if isinstance(text, str) and "#" in text:
+        text = re.sub(r'\s*#\s*\[(?:Auto-Extracted|자동\s*추출됨)\]', '', text).strip()
     target_lang_key = target_lang_norm
     for k in cache.keys():
         if k.replace(" ", "") == target_lang_norm:
@@ -606,7 +648,8 @@ def _safe_save_file(filepath, data):
 
         if os.path.exists(filepath):
             try:
-                shutil.copy2(filepath, filepath + ".bak")
+                from backup_utils import create_compressed_backup
+                create_compressed_backup(filepath)
             except Exception:
                 pass
 
@@ -703,6 +746,11 @@ SYNC_COOLDOWN_SECONDS = 180.0  # 짧은 시간 내 중복 Pull 방지 (3분 쿨�
 _commit_queue = {}  # (category, lang, src) -> tgt
 _commit_timer = None
 _is_committing = False
+_active_commit_thread = None
+_active_sync_thread = None
+_active_pack_thread = None
+_session_committed_count = 0
+_last_pull_complete = False
 _circuit_breaker_until = 0.0
 _consecutive_upload_errors = 0
 _last_sync_timestamp = 0.0
@@ -870,12 +918,23 @@ def flush_commit_queue(sync_wait=False):
     except Exception:
         pass
 
-    global _commit_timer, _is_committing
+    global _commit_timer, _is_committing, _active_commit_thread
 
     with _lock:
         if _commit_timer is not None:
             _commit_timer.cancel()
             _commit_timer = None
+        if _is_committing:
+            existing_thread = _active_commit_thread
+        else:
+            existing_thread = None
+
+    if existing_thread is not None:
+        if sync_wait and existing_thread.is_alive():
+            existing_thread.join(timeout=20.0)
+        return
+
+    with _lock:
         if not _commit_queue or _is_committing:
             return
         worker_url = get_worker_url()
@@ -885,110 +944,233 @@ def flush_commit_queue(sync_wait=False):
         safe, _ = is_cloud_upload_safe()
         if not safe:
             return
-
         _is_committing = True
-        snapshot_items = [
-            {"cat": cat, "lang": lang, "src": src, "tgt": tgt}
-            for (cat, lang, src), tgt in _commit_queue.items()
-        ]
-        _commit_queue.clear()
 
     def _do_commit():
-        global _is_committing, _consecutive_upload_errors, _circuit_breaker_until
+        global _is_committing, _consecutive_upload_errors, _circuit_breaker_until, _session_committed_count
         # Cloudflare Worker 무료 플랜 CPU 제한(10ms) 및 타임아웃 방지를 위해 500개 단위로 안전 분할 전송
         chunk_size = 500
-        committed_total = 0
-        failed_items = []
-
 
         try:
-            for idx in range(0, len(snapshot_items), chunk_size):
-                chunk = snapshot_items[idx:idx + chunk_size]
-                try:
-                    raw_bytes = json.dumps({"items": chunk}, ensure_ascii=False).encode("utf-8")
-                    gz_payload = gzip.compress(raw_bytes, compresslevel=6)
-                    headers = {
-                        "Content-Type": "application/json",
-                        "Content-Encoding": "gzip",
-                    }
-                    r = requests.post(f"{worker_url}/commit", headers=headers, data=gz_payload, timeout=30)
-                    if r.status_code in (200, 201):
-                        committed_total += len(chunk)
-                        try:
-                            res_json = r.json()
-                            new_last_id = res_json.get("latest_id") or res_json.get("key")
-                            if new_last_id:
-                                sync_state = _load_sync_state()
-                                sync_state["last_commit_id"] = str(new_last_id)
-                                _save_sync_state(sync_state)
-                        except Exception:
-                            pass
-                    else:
-                        failed_items.extend(chunk)
-                        logging.warning(f"⚠️ Cloudflare 커밋 청크 응답 오류 (HTTP {r.status_code}): {r.text[:150]}")
-                except Exception as chunk_err:
-                    failed_items.extend(chunk)
-                    logging.warning(f"⚠️ Cloudflare 커밋 전송 보류 (다음 주기에 재시도): {chunk_err}")
-
-            if not failed_items:
-                _consecutive_upload_errors = 0
-                _save_pending_commits_to_disk()
-                logging.info(f"✅ [Cloudflare Commit] 신규 번역 {committed_total:,}개 일괄 커밋 완료!")
-            else:
-                _consecutive_upload_errors += 1
+            while True:
                 with _lock:
-                    for item in failed_items:
-                        key = (item["cat"], item["lang"], item["src"])
-                        if key not in _commit_queue:
-                            _commit_queue[key] = item["tgt"]
-                _save_pending_commits_to_disk()
-                if committed_total > 0:
-                    logging.info(f"✅ [Cloudflare Commit] {committed_total:,}개 커밋 완료 (보류 {len(failed_items):,}개는 다음 주기에 재시도)")
-                if _consecutive_upload_errors >= 3:
-                    _circuit_breaker_until = time.time() + 180
+                    if not _commit_queue:
+                        break
+                    snapshot_items = [
+                        {"cat": cat, "lang": lang, "src": src, "tgt": tgt}
+                        for (cat, lang, src), tgt in _commit_queue.items()
+                    ]
+                    _commit_queue.clear()
+
+                committed_total = 0
+                failed_items = []
+
+                for idx in range(0, len(snapshot_items), chunk_size):
+                    chunk = snapshot_items[idx:idx + chunk_size]
+                    try:
+                        raw_bytes = json.dumps({"items": chunk}, ensure_ascii=False).encode("utf-8")
+                        gz_payload = gzip.compress(raw_bytes, compresslevel=6)
+                        headers = {
+                            "Content-Type": "application/json",
+                            "Content-Encoding": "gzip",
+                        }
+                        r = requests.post(f"{worker_url}/commit", headers=headers, data=gz_payload, timeout=30)
+                        if r.status_code in (200, 201):
+                            committed_total += len(chunk)
+                            _session_committed_count += len(chunk)
+                            try:
+                                res_json = r.json()
+                                new_last_id = res_json.get("latest_id") or res_json.get("key")
+                                if new_last_id:
+                                    # 주의: last_commit_id는 오직 /pull 증분 수신 시점에만 갱신해야
+                                    # 다른 사람이 직전에 올린 커밋(C3)을 건너뛰지 않고 완벽히 병합할 수 있음!
+                                    sync_state = _load_sync_state()
+                                    sync_state["last_pushed_commit_id"] = str(new_last_id)
+                                    _save_sync_state(sync_state)
+                            except Exception:
+                                pass
+                        else:
+                            failed_items.extend(chunk)
+                            logging.warning(f"⚠️ Cloudflare 커밋 청크 응답 오류 (HTTP {r.status_code}): {r.text[:150]}")
+                    except Exception as chunk_err:
+                        failed_items.extend(chunk)
+                        logging.warning(f"⚠️ Cloudflare 커밋 전송 보류 (다음 주기에 재시도): {chunk_err}")
+
+                if not failed_items:
+                    _consecutive_upload_errors = 0
+                    _save_pending_commits_to_disk()
+                    logging.info(f"✅ [Cloudflare Commit] 신규 번역 {committed_total:,}개 일괄 커밋 완료!")
+                else:
+                    _consecutive_upload_errors += 1
+                    with _lock:
+                        for item in failed_items:
+                            key = (item["cat"], item["lang"], item["src"])
+                            if key not in _commit_queue:
+                                _commit_queue[key] = item["tgt"]
+                    _save_pending_commits_to_disk()
+                    if committed_total > 0:
+                        logging.info(f"✅ [Cloudflare Commit] {committed_total:,}개 커밋 완료 (보류 {len(failed_items):,}개는 다음 주기에 재시도)")
+                    if _consecutive_upload_errors >= 3:
+                        _circuit_breaker_until = time.time() + 180
+                    break
         finally:
-            _is_committing = False
+            with _lock:
+                _is_committing = False
 
     t = threading.Thread(target=_do_commit, daemon=True)
+    _active_commit_thread = t
     t.start()
     if sync_wait:
-        t.join(timeout=15.0)
+        t.join(timeout=20.0)
 
 
-def upload_snapshots_to_cloudflare(force=False):
+def upload_snapshots_to_cloudflare(force=False, purge_commits=True, min_entries=5000, sync_wait=False):
     """
-    force=True 호출 시 현재 로컬 3대 마스터 캐시를 Gzip 압축하여 Cloudflare R2 스냅샷(/snapshot/:cat)으로 업로드합니다.
-    평상시(force=False)에는 매번 50MB 스냅샷을 재업로드하지 않고 가벼운 /commit 큐 방식만 사용합니다.
+    현재 로컬 3대 마스터 캐시를 Gzip 압축하여 Cloudflare R2 스냅샷(/snapshot/:cat)으로 업로드하고,
+    스냅샷에 포함된 과거 커밋 파일들을 Worker에서 일괄 삭제(Purge)하여 저장소를 압축 통합합니다.
+    (업로드 직전 최신 커밋을 먼저 전부 Pull하여 병합하므로 덮어쓰기 유실 0%)
     """
     if not force:
         return
+    try:
+        import temp_session_logger
+        if temp_session_logger.is_debug_mode():
+            return
+    except Exception:
+        pass
     worker_url = get_worker_url()
     if not worker_url:
         return
 
+    global _active_pack_thread
+    import urllib.parse
+
+    with _lock:
+        existing_pack = _active_pack_thread if (_active_pack_thread is not None and _active_pack_thread.is_alive()) else None
+
+    if existing_pack is not None:
+        if sync_wait:
+            existing_pack.join(timeout=30.0)
+        return
+
     def _async_pack():
+        global _session_committed_count
+        # 1. 혹시 남아있는 로컬 커밋 큐가 있다면 먼저 100% 전송 완료 보장
+        try:
+            flush_commit_queue(sync_wait=True)
+        except Exception:
+            pass
+
+        # 2. 압축 직전 R2의 모든 최신 커밋(내 커밋 + 다른 유저 커밋 C3, C4)을 끝까지 Pull하여 로컬에 합침 (사전 머지)
+        try:
+            sync_from_cloudflare(force_wait=True, bypass_cooldown=True)
+        except Exception:
+            pass
+
+        sync_state = _load_sync_state()
+        last_commit_id = str(sync_state.get("last_commit_id", "") or "").strip()
+        last_compacted_id = str(sync_state.get("last_compacted_commit_id", "") or "").strip()
+
+        # 새로 병합할 커밋이 없고 이미 최신 상태까지 마스터 압축이 완료된 경우 불필요한 대용량 재업로드 생략
+        if not last_commit_id and _session_committed_count == 0:
+            return
+        if last_commit_id and last_commit_id == last_compacted_id and _session_committed_count == 0:
+            return
+
+        all_succeeded = True
+        conflict_detected = False
+        server_newer_commit = ""
+
         for cat, (gz_name, cache) in MASTER_FILES.items():
             try:
                 with _lock:
                     data_copy = {k: v.copy() for k, v in cache.items() if isinstance(v, dict)}
-                if not data_copy:
+                total_items = sum(len(v) for v in data_copy.values())
+                # 최소 항목 수 검증 (빈 캐시/손상된 캐시로 마스터 덮어쓰기 원천 방지)
+                if total_items < min_entries:
+                    logging.warning(f"스냅샷 업로드 스킵: [{cat}] 항목 수({total_items})가 안전 기준({min_entries}) 미달")
+                    all_succeeded = False
                     continue
-                raw_json = json.dumps(data_copy, ensure_ascii=False, indent=2).encode("utf-8")
-                gz_bytes = gzip.compress(raw_json, compresslevel=9)
+
+                raw_json = json.dumps(data_copy, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                gz_bytes = gzip.compress(raw_json, compresslevel=6)
+
+                query_str = f"?commit_id={urllib.parse.quote(last_commit_id)}" if last_commit_id else ""
+
                 r = requests.put(
-                    f"{worker_url}/snapshot/{cat}",
+                    f"{worker_url}/snapshot/{cat}{query_str}",
                     headers={"Content-Type": "application/gzip"},
                     data=gz_bytes,
-                    timeout=60,
+                    timeout=90,
                 )
                 if r.status_code in (200, 201):
                     logging.info(f"✅ Cloudflare R2 스냅샷 업로드 성공 [{gz_name}] ({len(gz_bytes)/1024:.1f} KB)")
+                elif r.status_code == 409:
+                    conflict_detected = True
+                    all_succeeded = False
+                    try:
+                        res_j = r.json()
+                        server_newer_commit = str(res_j.get("server_last_commit", "") or "").strip()
+                    except Exception:
+                        pass
+                    logging.info(f"ℹ️ Cloudflare R2 스냅샷 동시성 방어 [{gz_name}]: 서버에 이미 더 최신 마스터가 존재하여 덮어쓰기가 안전하게 방지되었습니다.")
+                    break
                 else:
+                    all_succeeded = False
                     logging.warning(f"⚠️ Cloudflare R2 스냅샷 업로드 실패 [{gz_name}]: {r.status_code} {r.text}")
             except Exception as e:
+                all_succeeded = False
                 logging.warning(f"스냅샷 업로드 오류 ({cat}): {e}")
 
-    threading.Thread(target=_async_pack, daemon=True).start()
+        if conflict_detected and server_newer_commit:
+            sync_state = _load_sync_state()
+            sync_state["last_compacted_commit_id"] = server_newer_commit
+            _save_sync_state(sync_state)
+            return
+
+        # 3. 3대 마스터 스냅샷이 모두 정상 업로드되었고 모든 커밋이 로컬에 완벽히 병합된 경우에만 과거 커밋 일괄 정리(Purge)
+        if all_succeeded and purge_commits and last_commit_id and _last_pull_complete:
+            try:
+                purge_url = f"{worker_url}/commits/purge?until={urllib.parse.quote(last_commit_id)}"
+                pr = requests.post(purge_url, timeout=30)
+                if pr.status_code == 200:
+                    pj = pr.json() if pr.headers.get("content-type", "").startswith("application/json") else {}
+                    purged = pj.get("purged", 0)
+                    logging.info(f"🧹 Cloudflare R2 병합 완료 커밋 {purged}개 자동 정리 완료 (기준: {last_commit_id})")
+                    sync_state = _load_sync_state()
+                    sync_state["last_compacted_commit_id"] = last_commit_id
+                    _save_sync_state(sync_state)
+                    _session_committed_count = 0
+            except Exception as pe:
+                logging.warning(f"커밋 자동 정리 요청 실패: {pe}")
+
+    t = threading.Thread(target=_async_pack, daemon=True)
+    _active_pack_thread = t
+    t.start()
+    if sync_wait:
+        t.join(timeout=30.0)
+
+
+def finalize_translation_session(modpack_path=None, sync_wait=False):
+    """
+    번역 작업 종료(완료 또는 중단) 시 호출되는 통합 동기화 파이프라인:
+    1. 로컬 캐시(마스터 3종 + 개별 모드팩 캐시) 디스크 영구 저장
+    2. 대기열에 남은 모든 신규 번역(30개, 50개 등 수량 무관)을 Gzip 커밋으로 즉시 100% 클라우드 전송
+    3. 클라우드 최신 커밋(다른 사람 커밋 포함)을 로컬에 전부 당겨와서 합친 뒤(사전 머지),
+       마스터 스냅샷 압축 갱신 & 병합 완료된 이전 커밋 정리(Purge)
+    """
+    try:
+        import temp_session_logger
+        if temp_session_logger.is_debug_mode():
+            return
+    except Exception:
+        pass
+
+    # 1. 로컬 저장 및 남은 큐 즉시 커밋 전송 (자투리 수량에 상관없이 100% 즉시 전송)
+    save_memory(flush_now=True)
+
+    # 2. 마스터 스냅샷 갱신 및 누적 커밋 정리 (사전 머지 후 업로드)
+    upload_snapshots_to_cloudflare(force=True, purge_commits=True, sync_wait=sync_wait)
 
 
 def wait_for_cloud_sync(timeout=6.0):
@@ -998,22 +1180,34 @@ def wait_for_cloud_sync(timeout=6.0):
     return _cloud_sync_done.wait(timeout=timeout)
 
 
-def sync_from_cloudflare(force_wait=False):
+def sync_from_cloudflare(force_wait=False, bypass_cooldown=False):
     """
     Cloudflare R2 순수 스토리지 기반 Git-Pull 증분 동기화:
     1) 이미 최근 3분 이내에 동기화했다면 중복 네트워크 호출 없이 즉시 통과 (0 Byte 소모)
     2) 로컬 캐시가 비어 있거나 스냅샷 ETag가 변경된 경우에만 R2에서 master_*.json.gz 다운로드 (304 Not Modified 지원)
     3) 내 마지막 커밋 키(last_commit_id) 이후에 다른 유저들이 올린 신규 델타 커밋만 /pull 로 가볍게 병합
     """
-    global _is_syncing
+    global _is_syncing, _active_sync_thread
     worker_url = get_worker_url()
     if not worker_url:
         _cloud_sync_done.set()
         return
 
     now = time.time()
-    if _cloud_sync_done.is_set() and (now - _last_sync_timestamp < SYNC_COOLDOWN_SECONDS) and not force_wait:
+    if _cloud_sync_done.is_set() and (now - _last_sync_timestamp < SYNC_COOLDOWN_SECONDS) and not force_wait and not bypass_cooldown:
         return
+
+    with _lock:
+        if _is_syncing:
+            existing_sync = _active_sync_thread
+        else:
+            existing_sync = None
+
+    if existing_sync is not None:
+        if force_wait and existing_sync.is_alive():
+            existing_sync.join(timeout=20.0)
+        if not bypass_cooldown:
+            return
 
     with _lock:
         if _is_syncing:
@@ -1031,7 +1225,17 @@ def sync_from_cloudflare(force_wait=False):
             if has_local_data and saved_etag:
                 headers["If-None-Match"] = saved_etag
 
-            r = requests.get(f"{worker_url}/master/{category}", headers=headers, timeout=15)
+            r = requests.get(f"{worker_url}/master/{category}", headers=headers, timeout=25)
+            snap_commit = str(r.headers.get("X-Last-Commit-Id", "") or "").strip()
+            if snap_commit:
+                with _lock:
+                    cur_last = str(sync_state.get("last_commit_id", "") or "").strip()
+                    if not cur_last or snap_commit > cur_last:
+                        sync_state["last_commit_id"] = snap_commit
+                    cur_compacted = str(sync_state.get("last_compacted_commit_id", "") or "").strip()
+                    if not cur_compacted or snap_commit > cur_compacted:
+                        sync_state["last_compacted_commit_id"] = snap_commit
+
             if r.status_code == 304:
                 return False
             if r.status_code == 200 and r.content:
@@ -1059,15 +1263,17 @@ def sync_from_cloudflare(force_wait=False):
 
     def _pull_incremental_commits(sync_state):
         """마지막 커밋 키(last_commit_id) 이후에 추가된 신규 델타 커밋만 Pull (R2 Git Pull 방식)"""
+        global _last_pull_complete
         import urllib.parse
         last_id = str(sync_state.get("last_commit_id", "") or "").strip()
         if last_id.isdigit() and len(last_id) < 10:
             last_id = ""
         pulled_total = 0
+        _last_pull_complete = False
         try:
             while True:
                 encoded_since = urllib.parse.quote(last_id)
-                r = requests.get(f"{worker_url}/pull?since={encoded_since}&limit=20", timeout=12)
+                r = requests.get(f"{worker_url}/pull?since={encoded_since}&limit=30", timeout=15)
                 if r.status_code != 200:
                     break
                 data = r.json()
@@ -1095,6 +1301,7 @@ def sync_from_cloudflare(force_wait=False):
                     sync_state["last_commit_id"] = last_id
 
                 if not data.get("has_more"):
+                    _last_pull_complete = True
                     break
 
             if pulled_total > 0:
@@ -1138,350 +1345,32 @@ def sync_from_cloudflare(force_wait=False):
             if _commit_queue:
                 flush_commit_queue()
         finally:
-            _is_syncing = False
+            with _lock:
+                _is_syncing = False
             _cloud_sync_done.set()
 
-
     t = threading.Thread(target=_async_cloudflare_sync, daemon=True)
+    _active_sync_thread = t
     t.start()
     if force_wait:
-        t.join(timeout=8.0)
+        t.join(timeout=25.0)
 
 
-# ====================================================================
-# Memory Editor API (검색, 수정, 삭제)
-# ====================================================================
 
-def search_memory(query, category="all", target_lang="한국어 (Korean)", limit=100, search_field="all"):
-    """
-    모든 캐시(일반, 아이템, 책)에서 주어진 검색어(query)를 포함하는 원문/번역문을 찾습니다.
-    Args:
-        search_field (str): 'all' (원문+번역문 통합), 'src' (영어 원문만), 'tgt' (한글 번역문만)
-    반환 형태: [{"category": "items", "src": "...", "tgt": "..."}]
-    """
-    if not _global_loaded: load_memory()
-    target_lang_norm = target_lang.replace(" ", "")
-    results = []
-    
-    query_lower = query.lower()
-
-    def _search_in_cache(cache, cat_name):
-        for lang_key, entries in cache.items():
-            if lang_key.replace(" ", "") != target_lang_norm:
-                continue
-            for src, tgt in entries.items():
-                match = False
-                if search_field in ("all", "src") and query_lower in src.lower():
-                    match = True
-                elif search_field in ("all", "tgt") and query_lower in tgt.lower():
-                    match = True
-
-                if match:
-                    results.append({"category": cat_name, "src": src, "tgt": tgt})
-                    if len(results) >= limit:
-                        return True
-        return False
-
-    with _lock:
-        if category in ("all", "items"):
-            if _search_in_cache(_items_cache, "items"): return results
-        if category in ("all", "general"):
-            if _search_in_cache(_global_cache, "general"): return results
-        if category in ("all", "books"):
-            if _search_in_cache(_books_cache, "books"): return results
-            
-    return results
-
-def update_memory_entry(category, original_src, new_tgt, target_lang="한국어 (Korean)"):
-    """캐시 업데이트 후 로컬 저장 및 클라우드 커밋 큐에 반영합니다."""
-    target_lang_norm = target_lang.replace(" ", "")
-    cache_to_update = None
-    
-    if category == "items": cache_to_update = _items_cache
-    elif category == "general": cache_to_update = _global_cache
-    elif category == "books": cache_to_update = _books_cache
-    else: return False
-
-    with _lock:
-        _store(cache_to_update, original_src, new_tgt, target_lang_norm)
-        
-    save_memory(flush_now=True)
-    return True
-
-def delete_memory_entry(category, original_src, target_lang="한국어 (Korean)"):
-    """로컬 캐시에서 항목을 삭제합니다."""
-    target_lang_norm = target_lang.replace(" ", "")
-    cache_to_update = None
-    
-    if category == "items": cache_to_update = _items_cache
-    elif category == "general": cache_to_update = _global_cache
-    elif category == "books": cache_to_update = _books_cache
-    else: return False
-
-    with _lock:
-        deleted = False
-        for k in cache_to_update.keys():
-            if k.replace(" ", "") == target_lang_norm:
-                if original_src in cache_to_update[k]:
-                    del cache_to_update[k][original_src]
-                    deleted = True
-                break
-                
-    if deleted:
-        _save_local_caches_only()
-    return True
 
 
 # ====================================================================
-# 오역률 및 분탕 방지 검증 알고리즘 (Two-Pillar Validation)
+# Memory Editor API & 오역 감지 엔진 (translation_editor 모듈 위임 및 Re-export)
 # ====================================================================
 
-_CHOSUNG_LIST = ['ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ']
-_JUNGSUNG_LIST = ['ㅏ', 'ㅐ', 'ㅑ', 'ㅒ', 'ㅓ', 'ㅔ', 'ㅕ', 'ㅖ', 'ㅗ', 'ㅘ', 'ㅙ', 'ㅚ', 'ㅛ', 'ㅜ', 'ㅝ', 'ㅞ', 'ㅟ', 'ㅠ', 'ㅡ', 'ㅢ', 'ㅣ']
-_JONGSUNG_LIST = ['', 'ㄱ', 'ㄲ', 'ㄳ', 'ㄴ', 'ㄵ', 'ㄶ', 'ㄷ', 'ㄹ', 'ㄺ', 'ㄻ', 'ㄼ', 'ㄽ', 'ㄾ', 'ㄿ', 'ㅀ', 'ㅁ', 'ㅂ', 'ㅄ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ']
-
-def _decompose_korean(text):
-    """한글 음절을 초성, 중성(모음), 종성으로 분해합니다."""
-    syllables = []
-    for ch in text:
-        code = ord(ch)
-        if 0xAC00 <= code <= 0xD7A3:
-            s_idx = code - 0xAC00
-            cho = _CHOSUNG_LIST[s_idx // (21 * 28)]
-            jung = _JUNGSUNG_LIST[(s_idx % (21 * 28)) // 28]
-            jong = _JONGSUNG_LIST[s_idx % 28]
-            syllables.append((cho, jung, jong))
-    return syllables
-
-_ENG_KO_CONSONANTS = {
-    't': ['ㅌ', 'ㄸ', 'ㄷ'], 'n': ['ㄴ', 'ㅇ', 'ㅁ'], 'k': ['ㅋ', 'ㄲ', 'ㄱ'], 'c': ['ㅋ', 'ㄲ', 'ㄱ', 'ㅅ'],
-    'r': ['ㄹ'], 'l': ['ㄹ'], 's': ['ㅅ', 'ㅆ', 'ㅈ'], 'p': ['ㅍ', 'ㅃ', 'ㅂ'], 'b': ['ㅂ', 'ㅃ'],
-    'm': ['ㅁ'], 'd': ['ㄷ', 'ㄸ'], 'g': ['ㄱ', 'ㄲ'], 'f': ['ㅍ'], 'v': ['ㅂ', 'ㅍ'],
-    'z': ['ㅈ', 'ㅉ', 'ㅅ'], 'j': ['ㅈ', 'ㅉ'], 'h': ['ㅎ'], 'w': ['ㅇ', 'ㅂ'], 'y': ['ㅇ']
-}
-
-_ENG_KO_VOWELS = {
-    'i': ['ㅣ', 'ㅔ', 'ㅏ'],
-    'e': ['ㅔ', 'ㅓ', 'ㅐ', 'ㅣ'],
-    'a': ['ㅏ', 'ㅐ', 'ㅔ', 'ㅓ'],
-    'o': ['ㅗ', 'ㅓ', 'ㅏ', 'ㅜ'],
-    'u': ['ㅓ', 'ㅜ', 'ㅠ'],
-}
-
-def _compare_syllables_phonetic(ref_ko, cand_ko):
-    """두 한글 단어의 음절 단위 자음 및 모음 일치도를 교차 검증합니다."""
-    ref_s = _decompose_korean(ref_ko)
-    cand_s = _decompose_korean(cand_ko)
-    if not ref_s or not cand_s:
-        return 0.0, 0.0, 0.0
-
-    min_len = min(len(ref_s), len(cand_s))
-    max_len = max(len(ref_s), len(cand_s))
-
-    c_match = 0.0
-    v_match = 0.0
-    total_c = 0
-
-    for i in range(min_len):
-        r_cho, r_jung, r_jong = ref_s[i]
-        c_cho, c_jung, c_jong = cand_s[i]
-
-        # 1. 모음 일치
-        if r_jung == c_jung:
-            v_match += 1.0
-        elif (r_jung, c_jung) in [('ㅓ', 'ㅔ'), ('ㅔ', 'ㅐ'), ('ㅓ', 'ㅗ'), ('ㅗ', 'ㅜ'), ('ㅡ', 'ㅣ'), ('ㅣ', 'ㅔ')]:
-            v_match += 0.5
-
-        # 2. 초성 일치
-        total_c += 1
-        if r_cho == c_cho:
-            c_match += 1.0
-        elif (r_cho, c_cho) in [('ㅅ', 'ㅈ'), ('ㅌ', 'ㄷ'), ('ㅋ', 'ㄱ'), ('ㄹ', 'ㄴ'), ('ㅂ', 'ㅃ')]:
-            c_match += 0.7
-
-        # 3. 종성 일치
-        if r_jong or c_jong:
-            total_c += 1
-            if r_jong == c_jong:
-                c_match += 1.0
-            elif (r_jong, c_jong) in [('ㄴ', 'ㅇ'), ('ㅅ', 'ㄷ'), ('ㄱ', 'ㅋ')]:
-                c_match += 0.7
-
-    c_rate = c_match / (total_c + (max_len - min_len))
-    v_rate = v_match / max_len
-    # 자음 x 모음 상호곱: 모음이나 자음 중 하나가 0이면 발음 성립 불가!
-    combined_score = c_rate * v_rate
-    return c_rate, v_rate, combined_score
-
-_CORE_MINECRAFT_DICT = {
-    'tin': ['주석', '틴'], 'lead': ['납', '리드'], 'silver': ['은', '실버'], 'copper': ['구리', '코퍼'],
-    'iron': ['철', '아이언'], 'gold': ['금', '골드'], 'diamond': ['다이아몬드', '다이아'],
-    'emerald': ['에메랄드'], 'nether': ['네더', '지옥'], 'ender': ['엔더'],
-    'sword': ['검', '소드', '칼'], 'pickaxe': ['곡괭이'], 'axe': ['도끼'], 'shovel': ['삽'], 'hoe': ['괭이'],
-    'ingot': ['주괴', '인곳'], 'ore': ['광석'], 'dust': ['가루', '분말'], 'plate': ['판', '플레이트'],
-    'gear': ['톱니바퀴', '기어'], 'rod': ['막대', '로드'], 'block': ['블록'],
-    'construct': ['컨스트럭트', '구조물', '건설'], 'resonant': ['공진', '공명', '레조넌트', '공명하는'],
-    'tinkers': ['팅커스', '틴커즈', '팅커'], 'tinker': ['팅커', '땜장이'],
-    'conduit': ['도관', '콘듀잇'], 'capacitor': ['축전기', '커패시터'], 'pulverizer': ['분쇄기', '펄버라이저'],
-    'smelter': ['제련기', '용광로', '스멜터'],
-    'certus quartz': ['서투스 석영', '서투스 쿼츠'],
-    'charged certus quartz': ['충전된 서투스 석영', '충전된 서투스 쿼츠'],
-    'certus quartz dust': ['서투스 석영 가루', '서투스 쿼츠 가루'],
-    'create': ['크리에이트'],
-    'mekanism': ['메카니즘'],
-    'farmer\'s delight': ['파머스 딜라이트'],
-}
-
-def calculate_translation_error_rate(src_word, tgt_word, reference_hint=None, target_lang="한국어 (Korean)"):
-    """
-    원문(영어)과 번역문(한글) 간의 연관성 및 오역률(Error Rate, 0~100%)을 정밀 계산합니다.
-    Args:
-        src_word (str): 영어 원문 단어
-        tgt_word (str): 사용자가 입력/수정한 한글 번역문
-        reference_hint (str, optional): 기존 번역문 또는 찾을 단어 힌트
-    Returns:
-        tuple: (error_rate_pct, validity_pct, verdict_type, details_str)
-               - verdict_type: 'pass' (오역률 <= 35%), 'warning' (35% < 오역률 < 70%), 'block' (오역률 >= 70%)
-    """
-    if not src_word or not tgt_word:
-        return 100.0, 0.0, "block", "원문 또는 번역문이 비어있습니다."
-
-    src_clean = src_word.strip()
-    tgt_clean = tgt_word.strip()
-
-    # 영문 원문과 동일하게 유지해야 하는 코드/단위/ID인 경우 정상 처리
-    if src_clean == tgt_clean:
-        return 0.0, 100.0, "pass", "원문 유지(코드/식별자/단위)"
-
-    # 한글이 전혀 없는 경우
-    if not has_hangul(tgt_clean):
-        if re.match(r'^[\d\s\-_./%+:;]+$', tgt_clean):
-            return 0.0, 100.0, "pass", "숫자/기호 서식"
-        return 100.0, 0.0, "block", "한글 번역이 누락되었습니다."
-
-    # 1. 마인크래프트 기본 핵심 어휘 사전 대조 (사전 등록 단어는 오역률 0.0% 엄격 기준 적용)
-    src_lower = src_clean.lower()
-    if src_lower in _CORE_MINECRAFT_DICT:
-        accepted_list = _CORE_MINECRAFT_DICT[src_lower]
-        for accepted in accepted_list:
-            if accepted == tgt_clean:
-                return 0.0, 100.0, "pass", f"핵심 사전 공식 번역 일치 ('{tgt_clean}')"
-            if accepted in tgt_clean or tgt_clean in accepted:
-                return 0.0, 100.0, "pass", f"핵심 사전 복합어/파생어 일치 ('{accepted}')"
-        # 사전에 명확히 등록된 단어인데 사전 허용 목록에 없는 단어로 변경하려는 경우: 0% 기준 엄격 적용하여 원천 차단!
-        return 100.0, 0.0, "hard_block", f"공식 핵심 사전 등재 단어는 0% 표준어 외 변경 불가 (표준어: {', '.join(accepted_list)})"
-
-    target_lang_norm = target_lang.replace(" ", "")
-
-    # 2. 의미 사전 (Semantic Memory) 대조
-    cached_candidates = []
-    with _lock:
-        for cache in (_items_cache, _global_cache, _books_cache):
-            for lang_key, c_dict in cache.items():
-                if lang_key.replace(" ", "") == target_lang_norm:
-                    if src_clean in c_dict:
-                        cached_tgt = c_dict[src_clean]
-                        if cached_tgt == tgt_clean:
-                            return 0.0, 100.0, "pass", f"캐시 DB 사전 일치 ('{cached_tgt}')"
-                        if tgt_clean in cached_tgt or cached_tgt in tgt_clean:
-                            return 10.0, 90.0, "pass", f"캐시 DB 파생어 일치 ('{cached_tgt}')"
-                        cached_candidates.append(cached_tgt)
-
-    # 3. reference_hint, 핵심 사전 또는 캐시 내 기존 번역과 음절 단위 자음x모음 상호 교차 검증
-    best_cache_validity = 0.0
-    best_cache_c = 0.0
-    best_cache_v = 0.0
-
-    targets_to_compare = []
-    if src_lower in _CORE_MINECRAFT_DICT:
-        targets_to_compare.extend(_CORE_MINECRAFT_DICT[src_lower])
-    if reference_hint and has_hangul(reference_hint):
-        targets_to_compare.append(reference_hint.strip())
-    targets_to_compare.extend(cached_candidates)
-
-    vowel_distortion_detected = False
-    for ref in targets_to_compare:
-        c_rate, v_rate, score = _compare_syllables_phonetic(ref, tgt_clean)
-        if c_rate >= 0.7 and v_rate == 0.0:
-            vowel_distortion_detected = True
-        if score > best_cache_validity:
-            best_cache_validity = score
-            best_cache_c = c_rate
-            best_cache_v = v_rate
-
-    # 4. 직접 영-한 발음 분석 (기존 캐시가 전부 오역이더라도 올바른 새 번역을 100% 통과시키도록 항상 병행 검사)
-    cand_syllables = _decompose_korean(tgt_clean)
-    letters = re.findall(r'[a-z]', src_lower)
-    eng_cons = [c for c in letters if c not in ('a', 'e', 'i', 'o', 'u')]
-    eng_vowels = [c for c in letters if c in ('a', 'e', 'i', 'o', 'u')]
-
-    ko_cons = []
-    ko_vowels = []
-    for s in cand_syllables:
-        ko_cons.append(s[0])
-        if s[2]: ko_cons.append(s[2])
-        if s[1] != 'ㅡ': # ㅡ는 보조모음이므로 영문 모음 매칭 대상에서 제외
-            ko_vowels.append(s[1])
-
-    c_matches = 0.0
-    k_idx = 0
-    for ec in eng_cons:
-        poss = _ENG_KO_CONSONANTS.get(ec, [])
-        matched = False
-        for i in range(k_idx, len(ko_cons)):
-            if ko_cons[i] in poss:
-                c_matches += 1.0
-                k_idx = i + 1
-                matched = True
-                break
-        if not matched and ec == 'r':
-            c_matches += 0.8
-
-    effective_cons = max(1, len([c for c in eng_cons if c != 'r']))
-    direct_c = c_matches / max(effective_cons, len(ko_cons))
-
-    v_matches = 0.0
-    v_idx = 0
-    for ev in eng_vowels:
-        poss_v = _ENG_KO_VOWELS.get(ev, [])
-        for i in range(v_idx, len(ko_vowels)):
-            if ko_vowels[i] in poss_v:
-                v_matches += 1.0
-                v_idx = i + 1
-                break
-    direct_v = v_matches / max(1, max(len(eng_vowels), len(ko_vowels)))
-    direct_validity = direct_c * direct_v
-
-    if len(tgt_clean) == 1 and len(src_clean) >= 4:
-        direct_validity *= 0.1
-
-    # 기존 캐시 대조와 직접 영-한 발음 분석 중 더 타당한(높은) 점수 채택!
-    # 단, 기등록 단어에 대한 명백한 모음 왜곡 분탕(퉁크서, 탕쿠사 등)이 감지된 경우 direct_validity로 우회 불가!
-    if vowel_distortion_detected and best_cache_validity == 0.0:
-        final_validity = 0.0
-        final_c = best_cache_c
-        final_v = 0.0
-    elif direct_validity >= best_cache_validity:
-        final_validity = direct_validity
-        final_c = direct_c
-        final_v = direct_v
-    else:
-        final_validity = best_cache_validity
-        final_c = best_cache_c
-        final_v = best_cache_v
-
-    validity_pct = round(max(0.0, min(100.0, final_validity * 100.0)), 1)
-    error_rate_pct = round(100.0 - validity_pct, 1)
-
-    has_established = bool(src_lower in _CORE_MINECRAFT_DICT or cached_candidates)
-
-    if error_rate_pct <= 35.0:
-        return error_rate_pct, validity_pct, "pass", f"자음/모음 음운 정상 일치 (자음 {final_c*100:.0f}%, 모음 {final_v*100:.0f}%)"
-    elif error_rate_pct < 70.0:
-        return error_rate_pct, validity_pct, "warning", f"발음 유사도 다소 낮음 (자음 {final_c*100:.0f}%, 모음 {final_v*100:.0f}%)"
-    else:
-        if has_established:
-            return error_rate_pct, validity_pct, "hard_block", f"기존 데이터/표준어 왜곡 분탕 감지 (자음 {final_c*100:.0f}%, 모음 {final_v*100:.0f}%)"
-        else:
-            return error_rate_pct, validity_pct, "block", f"원문과 연관성 없는 왜곡 감지 (신규 미등록 단어)"
-
+from translation_editor import (
+    search_memory,
+    update_memory_entry,
+    delete_memory_entry,
+    _decompose_korean,
+    _compare_syllables_phonetic,
+    _CORE_MINECRAFT_DICT,
+    calculate_translation_error_rate,
+    dispatch_audit_report,
+    dispatch_batch_audit_report,
+)

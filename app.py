@@ -10,7 +10,8 @@ UI 구성(_setup_ui)과 생명주기 메서드만 담고,
   translation_runner.py - 번역 실행 (단일/ZIP/모드팩)
 
 TODO (구현 예정):
-  - [ ] UI 성능 최적화 (CustomTkinter 병목 수술 및 장기적 PySide6/Qt6 전환 검토)
+  - [x] 쌍방향 소통을 위한 버그 제보/피드백 답변 창에 유저 답변(Reply) 기능 추가 (feedback_manager.py & Worker)
+  - [ ] UI 성능 최적화 (CustomTkinter 병목 수술 및 장기적 PySide6/Qt6 전환 검토)    
 """
 
 import os
@@ -111,12 +112,19 @@ if ctk is not None and TkinterDnD is not None:
             os.makedirs(log_dir, exist_ok=True)
             log_file = os.path.join(log_dir, f"quest_translator_{datetime.datetime.now().strftime('%Y%m%d')}.log")
             
-            logging.basicConfig(
-                filename=log_file,
-                level=logging.INFO,
-                format='%(asctime)s - %(levelname)s - %(message)s',
-                encoding='utf-8'
-            )
+            try:
+                logging.basicConfig(
+                    filename=log_file,
+                    level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    encoding='utf-8'
+                )
+            except Exception:
+                # 다중 인스턴스 실행 시 Windows 파일 잠금(PermissionError) 방지 및 콘솔 스트림 로깅 대체
+                logging.basicConfig(
+                    level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s'
+                )
             logging.info("================ QuestTranslatorPro Started ================")
             try:
                 from translation_core import cleanup_old_temp_files
@@ -419,24 +427,37 @@ if ctk is not None and TkinterDnD is not None:
                           command=self.open_memory_editor
                           ).pack(side="left", fill="x", expand=True, padx=(0, 6))
 
-            def open_bmac():
-                import webbrowser
-                webbrowser.open("https://buymeacoffee.com/teiba")
-
-            ctk.CTkButton(button_row2, text="☕ 개발자에게 커피 사주기", height=40,
-                          fg_color="#f59e0b", hover_color="#d97706", text_color="#1e1e1e",
-                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
-                          command=open_bmac
-                          ).pack(side="right", fill="x", expand=True, padx=(6, 0))
+            self.feedback_btn = ctk.CTkButton(
+                button_row2,
+                text="💬 피드백 및 버그 제보",
+                height=40,
+                fg_color="#334155",
+                hover_color="#475569",
+                text_color="#f8fafc",
+                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                command=self.open_feedback_dialog
+            )
+            self.feedback_btn.pack(side="right", fill="x", expand=True, padx=(6, 0))
 
             button_row3 = ctk.CTkFrame(panel, fg_color="transparent")
             button_row3.pack(fill="x", padx=24, pady=(0, 20))
 
-            ctk.CTkButton(button_row3, text="💬 피드백 및 버그 제보", height=38,
-                          fg_color="#334155", hover_color="#475569", text_color="#f8fafc",
+            def open_bmac():
+                import webbrowser
+                webbrowser.open("https://linktr.ee/mc.QuestTranslator")
+
+            ctk.CTkButton(button_row3, text="☕ 개발자에게 커피 사주기", height=38,
+                          fg_color="#f59e0b", hover_color="#d97706", text_color="#1e1e1e",
                           font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
-                          command=self.open_feedback_dialog
+                          command=open_bmac
                           ).pack(fill="x", expand=True)
+
+            try:
+                import feedback_manager
+                if feedback_manager.has_unread_feedback():
+                    self._update_feedback_badge(True)
+            except Exception:
+                pass
 
         def _build_select_screen(self):
             # 경로 설정 패널
@@ -913,11 +934,11 @@ if ctk is not None and TkinterDnD is not None:
             except Exception as e:
                 logging.error(f"설정 저장 실패: {e}")
 
-        def open_feedback_dialog(self):
+        def open_feedback_dialog(self, default_tab="new"):
             try:
                 from feedback_manager import FeedbackDialog
-                self.feedback_dialog = FeedbackDialog(self)
-                # 피드백 창이 열릴 때 즉시 3초 빠른 폴링 모드로 전환
+                self.feedback_dialog = FeedbackDialog(self, default_tab=default_tab)
+                # 피드백 창이 열릴 때 즉시 빠른 폴링 모드로 전환
                 self._schedule_feedback_poll(300)
             except Exception as e:
                 self.show_messagebox("error", "오류", f"피드백 창을 열 수 없습니다:\n{e}")
@@ -931,6 +952,25 @@ if ctk is not None and TkinterDnD is not None:
                 )
             except Exception:
                 return False
+
+        def _update_feedback_badge(self, has_unread=False):
+            btn = getattr(self, "feedback_btn", None)
+            if not btn:
+                return
+            try:
+                if has_unread:
+                    btn.configure(
+                        text="💬 피드백 및 버그 제보  🔴",
+                        border_color="#ef4444",
+                        border_width=1.5
+                    )
+                else:
+                    btn.configure(
+                        text="💬 피드백 및 버그 제보",
+                        border_width=0
+                    )
+            except Exception:
+                pass
 
         def _schedule_feedback_poll(self, delay_ms):
             # 폴링 타이머는 항상 1개만 유지 (기존 대기 타이머 취소 후 재예약 -> 루프 중복 증식 방지)
@@ -979,12 +1019,12 @@ if ctk is not None and TkinterDnD is not None:
                     logging.debug(f"Feedback reply check error: {e}")
                 finally:
                     self._is_checking_feedback_replies = False
-                    # 미해결 제보가 남아있는 경우: 피드백 창 열림 시 3초(3000ms), 닫힘 시 60초(60000ms) 주기 예약
+                    # 미해결 제보가 남아있는 경우: 피드백 창 열림 시 5초(5000ms), 닫힘 시 15초(15000ms) 주기 예약
                     try:
                         import feedback_manager
                         if feedback_manager.has_unresolved_tickets():
                             def _reschedule():
-                                next_delay = 3000 if self._is_feedback_dialog_open() else 60000
+                                next_delay = 5000 if self._is_feedback_dialog_open() else 15000
                                 self._schedule_feedback_poll(next_delay)
                             self.after(0, _reschedule)
                     except Exception:
@@ -992,53 +1032,169 @@ if ctk is not None and TkinterDnD is not None:
 
             threading.Thread(target=bg_checker, daemon=True).start()
 
-        def _show_developer_replies_alert(self, new_replies, status_updates=None, deleted_ticket_ids=None):
-            # 피드백 대화상자가 열려 있으면 화면 즉시 갱신 (삭제된 티켓 즉시 제거)
+        def _dismiss_toast(self):
+            timer_id = getattr(self, "_toast_timer_id", None)
+            if timer_id:
+                try:
+                    self.after_cancel(timer_id)
+                except Exception:
+                    pass
+                self._toast_timer_id = None
+
+            toast = getattr(self, "_toast_frame", None)
+            if toast:
+                try:
+                    toast.destroy()
+                except Exception:
+                    pass
+                self._toast_frame = None
+
+        def _show_in_app_notification(self, title, message, ticket_id=None):
+            self._dismiss_toast()
+
+            # 시스템 알림음 재생 (Windows 시스템 기본 비프음)
             try:
-                if hasattr(self, "feedback_dialog") and self.feedback_dialog and self.feedback_dialog.winfo_exists():
-                    self.feedback_dialog._refresh_tickets_list()
+                import winsound
+                winsound.MessageBeep(winsound.MB_ICONASTERISK)
             except Exception:
                 pass
 
+            try:
+                # 메인 윈도우 좌측 상단 플로팅 토스트 UI 생성 (가독성을 위해 폭과 패딩 확장)
+                toast = ctk.CTkFrame(
+                    self,
+                    fg_color="#181824",
+                    border_color="#3b82f6",
+                    border_width=2,
+                    corner_radius=10,
+                    width=440
+                )
+                self._toast_frame = toast
+                toast.place(relx=0.0, rely=0.0, anchor="nw", x=24, y=24)
+                toast.lift()
+
+                # 토스트 상단 (아이콘/타이틀 & 닫기 버튼)
+                t_head = ctk.CTkFrame(toast, fg_color="transparent")
+                t_head.pack(fill="x", padx=14, pady=(12, 4))
+
+                ctk.CTkLabel(
+                    t_head,
+                    text=f"🔔 {title}",
+                    font=ctk.CTkFont(family=FONT_NAME, size=13, weight="bold"),
+                    text_color="#60a5fa"
+                ).pack(side="left")
+
+                close_btn = ctk.CTkButton(
+                    t_head,
+                    text="✕",
+                    width=24,
+                    height=24,
+                    fg_color="transparent",
+                    hover_color="#2a2a38",
+                    text_color="#94a3b8",
+                    font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+                    command=self._dismiss_toast
+                )
+                close_btn.pack(side="right")
+
+                # 본문 메시지
+                ctk.CTkLabel(
+                    toast,
+                    text=message,
+                    font=ctk.CTkFont(family=FONT_NAME, size=12),
+                    text_color="#e2e8f0",
+                    justify="left",
+                    wraplength=400,
+                    anchor="w"
+                ).pack(fill="x", padx=14, pady=(4, 10))
+
+                # 하단 확인 및 답장하기 버튼 바
+                b_bar = ctk.CTkFrame(toast, fg_color="transparent")
+                b_bar.pack(fill="x", padx=14, pady=(0, 12))
+
+                def _open_and_dismiss():
+                    self._dismiss_toast()
+                    self.open_feedback_dialog(default_tab="history")
+
+                action_btn = ctk.CTkButton(
+                    b_bar,
+                    text="내 제보에서 확인 및 답장하기 ↗",
+                    width=170,
+                    height=28,
+                    fg_color="#2563eb",
+                    hover_color="#1d4ed8",
+                    font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+                    command=_open_and_dismiss
+                )
+                action_btn.pack(side="right")
+
+                # 15초 후 자동 닫힘 (사용자가 충분히 읽을 수 있도록 연장)
+                self._toast_timer_id = self.after(15000, self._dismiss_toast)
+            except Exception as e:
+                logging.debug(f"Failed to display toast notification: {e}")
+
+        def _show_developer_replies_alert(self, new_replies, status_updates=None, deleted_ticket_ids=None):
+            # 피드백 대화상자가 이미 열려 있으면 화면 즉시 갱신
+            dialog_open = self._is_feedback_dialog_open()
+            if dialog_open:
+                try:
+                    self.feedback_dialog._refresh_tickets_list()
+                except Exception:
+                    pass
+
             if deleted_ticket_ids:
                 for del_id in deleted_ticket_ids:
-                    self.log(f"🗑️ [제보 자동 정리] 디스코드에서 삭제된 제보({del_id})가 목록에서 제거되었습니다.")
+                    self.log(f"🗑️ [제보 자동 정리] 삭제된 제보({del_id})가 목록에서 제거되었습니다.")
 
+            # 1. 사용자에게 메시지 전달 로그를 프로그램에 제대로 수신(1)
             if new_replies:
                 for r in new_replies:
-                    cat_name = "버그 제보" if r.get("category") == "bug" else "피드백"
                     t_id = r.get("ticket_id", "")
-                    title = r.get("title", "")
-                    author = r.get("author", "개발자")
                     reply = r.get("reply", "")
-
-                    msg = (
-                        f"보내주신 제보에 개발자 답변이 등록되었습니다!\n\n"
-                        f"🎫 제보 건: [{cat_name}] {t_id}\n"
-                        f"📌 제목: {title}\n\n"
-                        f"💬 개발자 ({author})님의 답변:\n"
-                        f"\"{reply}\"\n\n"
-                        f"소중한 제보와 의견에 감사드립니다."
-                    )
-                    self.show_messagebox("info", "🔔 개발자 답변 도착", msg)
-                    self.log(f"🔔 [개발자 답변 도착] 티켓 {t_id}: \"{reply}\" ({author})")
+                    self.log(f"📥 [개발자 메시지 수신(1)] 티켓 {t_id}: \"{reply}\"")
 
             if status_updates:
                 for s in status_updates:
-                    cat_name = "버그 제보" if s.get("category") == "bug" else "피드백"
-                    t_id = s.get("ticket_id")
-                    title = s.get("title", "")
+                    t_id = s.get("ticket_id", "")
                     st_label = s.get("status_label", "상태 변경")
+                    self.log(f"📥 [제보 상태 수신(1)] 티켓 {t_id}: [{st_label}]")
 
-                    msg = (
-                        f"보내주신 제보의 상태가 업데이트되었습니다!\n\n"
-                        f"🎫 제보 건: [{cat_name}] {t_id}\n"
-                        f"📌 제목: {title}\n\n"
-                        f"🏷️ 현재 상태: {st_label}\n\n"
-                        f"소중한 제보에 감사드립니다."
-                    )
-                    self.show_messagebox("info", f"🔔 제보 상태: {st_label}", msg)
-                    self.log(f"🔔 [제보 상태 업데이트] 티켓 {t_id}: [{st_label}]")
+            # 알림 사운드 및 토스트 알림 처리
+            if new_replies or status_updates:
+                try:
+                    import winsound
+                    winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                except Exception:
+                    pass
+
+                # 피드백 창이 닫혀 있을 때 메인 버튼에 빨간색 점(🔴) 배지 표시 및 플로팅 토스트 표시
+                if not dialog_open:
+                    self._update_feedback_badge(True)
+                    total_events = len(new_replies) + len(status_updates)
+                    if total_events == 1 and new_replies:
+                        r = new_replies[0]
+                        t_id = r.get("ticket_id", "")
+                        reply_txt = r.get("reply", "")
+                        disp_reply = (reply_txt[:60] + "...") if len(reply_txt) > 60 else reply_txt
+                        self._show_in_app_notification(
+                            title=f"개발자 답변 도착 (#{t_id})",
+                            message=f"개발자의 답변:\n\"{disp_reply}\"",
+                            ticket_id=t_id
+                        )
+                    elif total_events == 1 and status_updates:
+                        s = status_updates[0]
+                        t_id = s.get("ticket_id", "")
+                        st_label = s.get("status_label", "상태 변경")
+                        self._show_in_app_notification(
+                            title=f"제보 상태 업데이트 (#{t_id})",
+                            message=f"제보의 상태가 [{st_label}] 상태로 변경되었습니다.",
+                            ticket_id=t_id
+                        )
+                    else:
+                        self._show_in_app_notification(
+                            title="제보 알림 도착",
+                            message=f"새 답변 {len(new_replies)}건 및 상태 업데이트 {len(status_updates)}건이 도착했습니다."
+                        )
 
         def on_close(self):
             try:
@@ -1058,12 +1214,15 @@ if ctk is not None and TkinterDnD is not None:
                 try:
                     translation_memory.save_memory(flush_now=True)
                     translation_memory.flush_commit_queue(sync_wait=True)
+                    pack_t = getattr(translation_memory, "_active_pack_thread", None)
+                    if pack_t is not None and pack_t.is_alive():
+                        pack_t.join(timeout=20.0)
                 except Exception:
                     pass
 
             flush_thread = threading.Thread(target=_final_flush, daemon=True)
             flush_thread.start()
-            flush_thread.join(timeout=1.5)
+            flush_thread.join(timeout=22.0)
 
             try:
                 self.destroy()

@@ -47,9 +47,9 @@ def _mock_translate_batch(text_list):
 def _mock_extract_glossary():
     """Mock glossary extraction for testing."""
     return {
-        "creeper": "크리퍼 # [Auto-Extracted]",
-        "ender dragon": "엔더 드래곤 # [Auto-Extracted]",
-        "redstone": "레드스톤 # [Auto-Extracted]",
+        "creeper": "크리퍼",
+        "ender dragon": "엔더 드래곤",
+        "redstone": "레드스톤",
     }
 
 
