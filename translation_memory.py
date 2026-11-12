@@ -55,6 +55,7 @@ MEMORY_FILE = os.path.join(CACHE_DIR, "translation_memory.json")
 BACKUP_FILE = os.path.join(CACHE_DIR, "translation_memory.json.bak")
 ITEMS_MEMORY_FILE = os.path.join(CACHE_DIR, "translation_memory_items.json")
 BOOKS_MEMORY_FILE = os.path.join(CACHE_DIR, "translation_memory_books.json")
+KO_PACK_KEYS_FILE = os.path.join(CACHE_DIR, "ko_pack_keys.json")
 SYNC_STATE_FILE = os.path.join(CACHE_DIR, "cloud_sync_state.json")
 PENDING_COMMITS_FILE = os.path.join(CACHE_DIR, "pending_commits.json")
 CLOUD_CONFIG_FILE = os.path.join(CACHE_DIR, "cloud_config.json")
@@ -72,6 +73,13 @@ _global_cache = {}
 _modpack_cache = {}
 _items_cache = {}
 _books_cache = {}
+_ko_pack_keys = {
+    "general": set(),
+    "items": set(),
+    "books": set()
+}
+_ko_pack_keys_dirty = False
+_ko_pack_loaded = False
 _lock = threading.Lock()
 _global_loaded = False
 _modpack_loaded = False
@@ -396,7 +404,162 @@ def get_cache_stats_summary(target_lang="한국어 (Korean)"):
     ]
     return "\n".join(lines)
 
-def _store(cache, text, translated_text, target_lang_norm, force_override=False):
+def _load_ko_pack_keys():
+    """모드 내장 공식 한글패치(ko_pack) 불변 보호 키 목록 로드"""
+    global _ko_pack_loaded
+    if _ko_pack_loaded:
+        return
+    if os.path.exists(KO_PACK_KEYS_FILE):
+        try:
+            with open(KO_PACK_KEYS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    for cat in ("general", "items", "books"):
+                        val = data.get(cat)
+                        if isinstance(val, list):
+                            _ko_pack_keys[cat] = set(val)
+                        elif isinstance(val, dict):
+                            _ko_pack_keys[cat] = set(val.keys())
+        except Exception as e:
+            logging.debug(f"ko_pack_keys 로드 스킵: {e}")
+    _ko_pack_loaded = True
+
+
+def _save_ko_pack_keys(sync_cloud=True):
+    """모드 내장 공식 한글패치(ko_pack) 불변 보호 키 목록 안전 저장"""
+    global _ko_pack_keys_dirty
+    if not _ko_pack_keys_dirty:
+        return
+    try:
+        dump_data = {
+            cat: sorted(list(keys))
+            for cat, keys in _ko_pack_keys.items()
+        }
+        tmp_file = KO_PACK_KEYS_FILE + ".tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(dump_data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_file, KO_PACK_KEYS_FILE)
+        _ko_pack_keys_dirty = False
+        if sync_cloud:
+            upload_ko_pack_keys_to_cloudflare()
+    except Exception as e:
+        logging.error(f"ko_pack_keys 저장 실패: {e}")
+
+
+_ko_pack_keys_etag = ""
+_is_uploading_ko_pack_keys = False
+
+
+def upload_ko_pack_keys_to_cloudflare(sync_wait=False):
+    """
+    공식 한글패치 불변 보호 키 목록(dist/ko_pack_keys.json)을 Gzip 압축하여
+    Cloudflare R2(PUT /ko-pack-keys)에 안전하게 업로드합니다.
+    """
+    global _is_uploading_ko_pack_keys
+    if not os.path.exists(KO_PACK_KEYS_FILE):
+        return
+
+    try:
+        import temp_session_logger
+        if temp_session_logger.is_debug_mode():
+            return
+        worker_url = get_worker_url()
+        if not worker_url:
+            return
+        safe, _ = is_cloud_upload_safe()
+        if not safe:
+            return
+    except Exception:
+        return
+
+    with _lock:
+        if _is_uploading_ko_pack_keys:
+            return
+        _is_uploading_ko_pack_keys = True
+
+    def _do_upload():
+        global _is_uploading_ko_pack_keys, _ko_pack_keys_etag
+        try:
+            with open(KO_PACK_KEYS_FILE, "r", encoding="utf-8") as f:
+                content = f.read()
+            if len(content) < 15:
+                return
+            gz_bytes = gzip.compress(content.encode("utf-8"), compresslevel=6)
+            headers = {
+                "Content-Type": "application/json",
+                "Content-Encoding": "gzip",
+            }
+            r = requests.put(f"{worker_url}/ko-pack-keys", headers=headers, data=gz_bytes, timeout=25)
+            if r.status_code in (200, 201):
+                res_data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+                new_etag = res_data.get("etag", "")
+                if new_etag:
+                    _ko_pack_keys_etag = new_etag
+                logging.info(f"☁️ [Cloudflare R2] ko_pack_keys.json.gz 공식 보호 키 업로드 완료 ({len(gz_bytes)/1024:.1f} KB)")
+        except Exception as e:
+            logging.debug(f"Cloudflare ko-pack-keys 업로드 스킵: {e}")
+        finally:
+            _is_uploading_ko_pack_keys = False
+
+    t = threading.Thread(target=_do_upload, daemon=True)
+    t.start()
+    if sync_wait:
+        t.join(timeout=10.0)
+
+
+def sync_ko_pack_keys_from_cloudflare(force=False):
+    """
+    Cloudflare R2(GET /ko-pack-keys)에서 최신 공식 보호 키 목록을 Gzip으로 다운로드하여
+    로컬 ko_pack_keys.json 및 메모리 캐시와 병합(Union)합니다 (ETag 304 지원).
+    """
+    global _ko_pack_keys_etag
+    try:
+        worker_url = get_worker_url()
+        if not worker_url:
+            return False
+    except Exception:
+        return False
+
+    headers = {}
+    if _ko_pack_keys_etag and os.path.exists(KO_PACK_KEYS_FILE) and not force:
+        headers["If-None-Match"] = _ko_pack_keys_etag
+
+    try:
+        r = requests.get(f"{worker_url}/ko-pack-keys", headers=headers, timeout=15)
+        if r.status_code == 304:
+            return False
+        if r.status_code == 200 and r.content:
+            raw = r.content
+            if r.headers.get("content-encoding") == "gzip" or (len(raw) >= 2 and raw[:2] == b'\x1f\x8b'):
+                raw = gzip.decompress(raw)
+            data = json.loads(raw.decode("utf-8"))
+            if isinstance(data, dict):
+                _load_ko_pack_keys()
+                added_count = 0
+                with _lock:
+                    for cat in ("general", "items", "books"):
+                        remote_keys = data.get(cat, [])
+                        if isinstance(remote_keys, list):
+                            cur_set = _ko_pack_keys.setdefault(cat, set())
+                            b_len = len(cur_set)
+                            cur_set.update(remote_keys)
+                            added_count += len(cur_set) - b_len
+                    if added_count > 0:
+                        global _ko_pack_keys_dirty
+                        _ko_pack_keys_dirty = True
+                        _save_ko_pack_keys(sync_cloud=False)
+
+                new_etag = r.headers.get("ETag", "")
+                if new_etag:
+                    _ko_pack_keys_etag = new_etag
+                logging.info(f"☁️ [Cloudflare R2] ko_pack_keys 최신 공식 보호 키 동기화 완료 (+{added_count}개 갱신)")
+                return True
+    except Exception as e:
+        logging.debug(f"Cloudflare ko-pack-keys 동기화 스킵: {e}")
+    return False
+
+
+def _store(cache, text, translated_text, target_lang_norm, force_override=False, tier=None):
     if isinstance(translated_text, str) and "#" in translated_text:
         translated_text = re.sub(r'\s*#\s*\[(?:Auto-Extracted|자동\s*추출됨)\]', '', translated_text).strip()
     if isinstance(text, str) and "#" in text:
@@ -409,6 +572,37 @@ def _store(cache, text, translated_text, target_lang_norm, force_override=False)
     if target_lang_key not in cache:
         cache[target_lang_key] = {}
     prev_val = cache[target_lang_key].get(text)
+
+    # 🔒 [Tier 0: 바닐라 마인크래프트 공식 번역 절대 불변 보호]
+    # 바닐라 공식 번역은 게임 무결성을 위해 force_override 여부와 무관하게(오역수정기 포함) 절대로 수정/덮어쓰기 불가!
+    if prev_val is not None:
+        cat = "general"
+        if cache is _items_cache:
+            cat = "items"
+        elif cache is _books_cache:
+            cat = "books"
+
+        if is_vanilla_official_key(text, cat):
+            return
+
+    # 🔒 [Tier 1: 공식 한글패치 및 티어 역전 방지 보호]
+    if not force_override and prev_val is not None:
+        cat = "general"
+        if cache is _items_cache:
+            cat = "items"
+        elif cache is _books_cache:
+            cat = "books"
+
+        # 1) 공식 한글패치 및 사용자 수정(Tier 1) 불변 보호
+        if text in _ko_pack_keys.get(cat, set()) or (cat == "general" and text in _ko_pack_keys.get("items", set())):
+            return
+
+        # 2) 티어 보호: 신규 번역의 품질 티어가 기존 캐시의 티어보다 낮으면(숫자가 크면) 덮어쓰기 원천 차단
+        if tier is not None:
+            existing_tier, _, _ = get_translation_tier(text, cat)
+            if tier > existing_tier:
+                return
+
     cache[target_lang_key][text] = translated_text
     
     # 더티 캐시(새로 추가/변경된 데이터 또는 공식 한글패치 강제 덮어쓰기)에 저장하여 클라우드 DB까지 덮어쓰도록 보장
@@ -432,6 +626,7 @@ def _store(cache, text, translated_text, target_lang_norm, force_override=False)
 def load_memory():
     """로컬 메모리 로드 및 Cloudflare 최신 데이터 동기화"""
     global _global_loaded, _items_loaded, _books_loaded
+    _load_ko_pack_keys()
     with _lock:
         if not _global_loaded:
             loaded_g = _read_and_clean_file(MEMORY_FILE)
@@ -498,7 +693,7 @@ def get_cached_translation(text, target_lang="한국어 (Korean)"):
     return None
 
 
-def add_to_memory(text, translated_text, target_lang="한국어 (Korean)", force_override=False):
+def add_to_memory(text, translated_text, target_lang="한국어 (Korean)", force_override=False, tier=None):
     translated_text = sanitize_minecraft_formatting(text, translated_text)
     if not is_valid_translation(text, translated_text, target_lang):
         return
@@ -510,9 +705,9 @@ def add_to_memory(text, translated_text, target_lang="한국어 (Korean)", force
     with _lock:
         if _current_modpack_id:
             _load_modpack_memory()
-            _store(_modpack_cache, text, translated_text, target_lang_norm, force_override=force_override)
+            _store(_modpack_cache, text, translated_text, target_lang_norm, force_override=force_override, tier=tier)
         # 클라우드 동기화 및 전역 재사용을 위해 _global_cache에도 동시 보존
-        _store(_global_cache, text, translated_text, target_lang_norm, force_override=force_override)
+        _store(_global_cache, text, translated_text, target_lang_norm, force_override=force_override, tier=tier)
 
 
 def get_cached_item_translation(text, target_lang="한국어 (Korean)"):
@@ -539,16 +734,16 @@ def get_cached_item_translation(text, target_lang="한국어 (Korean)"):
     return None
 
 
-def add_item_to_memory(text, translated_text, target_lang="한국어 (Korean)", force_override=False):
+def add_item_to_memory(text, translated_text, target_lang="한국어 (Korean)", force_override=False, tier=None):
     if not is_valid_translation(text, translated_text, target_lang):
         return
     if not _items_loaded:
         load_memory()
     target_lang_norm = target_lang.replace(" ", "")
     with _lock:
-        _store(_items_cache, text, translated_text, target_lang_norm, force_override=force_override)
+        _store(_items_cache, text, translated_text, target_lang_norm, force_override=force_override, tier=tier)
         # 아이템/블록/기계 명사구가 퀘스트 본문/설명/가이드북에서도 1차 완전일치로 즉시 치환되도록 _global_cache에도 동시 보존
-        _store(_global_cache, text, translated_text, target_lang_norm, force_override=force_override)
+        _store(_global_cache, text, translated_text, target_lang_norm, force_override=force_override, tier=tier)
 
 
 
@@ -558,33 +753,43 @@ def add_official_ko_to_memory(text, translated_text, target_lang="한국어 (Kor
     모드 내장 공식 한글패치(ko_kr)에서 불러온 데이터를 기존 AI 번역 캐시보다 항상 최우선으로 덮어씁니다.
     이미 다른 캐시(_global_cache, _items_cache, _modpack_cache, _books_cache)에 이전 번역 데이터가 남아 있더라도
     모두 공식 한글패치 데이터로 일괄 덮어씌워 구버전 번역이 튀어나오는 현상을 원천 차단합니다.
+    또한, ko_pack_keys에 등록하여 차후 AI 번역이나 클라우드 풀에 의해 덮어씌워지지 않도록 불변 보호합니다.
     """
     if not is_valid_translation(text, translated_text, target_lang):
         return
     if not _global_loaded or not _items_loaded or not _books_loaded:
         load_memory()
 
+    _load_ko_pack_keys()
     target_lang_norm = target_lang.replace(" ", "")
     with _lock:
+        global _ko_pack_keys_dirty
+        if is_item:
+            _ko_pack_keys["items"].add(text)
+            _ko_pack_keys["general"].add(text)
+        else:
+            _ko_pack_keys["general"].add(text)
+        _ko_pack_keys_dirty = True
+
         if _current_modpack_id:
             _load_modpack_memory()
-            _store(_modpack_cache, text, translated_text, target_lang_norm)
+            _store(_modpack_cache, text, translated_text, target_lang_norm, force_override=True)
 
         if is_item:
-            _store(_items_cache, text, translated_text, target_lang_norm)
-            _store(_global_cache, text, translated_text, target_lang_norm)
+            _store(_items_cache, text, translated_text, target_lang_norm, force_override=True)
+            _store(_global_cache, text, translated_text, target_lang_norm, force_override=True)
         else:
-            _store(_global_cache, text, translated_text, target_lang_norm)
+            _store(_global_cache, text, translated_text, target_lang_norm, force_override=True)
             # 만약 _items_cache에 동일 원문의 기존 AI 번역이 이미 존재한다면 공식 한글패치로 함께 덮어쓰기
             for k in list(_items_cache.keys()):
                 if k.replace(" ", "") == target_lang_norm and text in _items_cache[k]:
-                    _store(_items_cache, text, translated_text, target_lang_norm)
+                    _store(_items_cache, text, translated_text, target_lang_norm, force_override=True)
                     break
 
         # 만약 _books_cache에 동일 원문의 기존 AI 번역이 이미 존재한다면 공식 한글패치로 함께 덮어쓰기
         for k in list(_books_cache.keys()):
             if k.replace(" ", "") == target_lang_norm and text in _books_cache[k]:
-                _store(_books_cache, text, translated_text, target_lang_norm)
+                _store(_books_cache, text, translated_text, target_lang_norm, force_override=True)
                 break
 
     # 공식 한글패치에서 발견된 단어/명사구는 translation_word 단어사전에도 최우선(is_official=True)으로 반영
@@ -594,6 +799,226 @@ def add_official_ko_to_memory(text, translated_text, target_lang="한국어 (Kor
             translation_word.learn_from_pair(text, translated_text, is_official=True)
         except Exception:
             pass
+
+
+def is_official_ko_key(text, category="general"):
+    """특정 텍스트가 모드 공식 한글패치(ko_pack)로 보호되고 있는지 확인"""
+    _load_ko_pack_keys()
+    if category == "all":
+        return any(text in s for s in _ko_pack_keys.values())
+    return text in _ko_pack_keys.get(category, set())
+
+
+def get_official_ko_keys_count():
+    """보호 중인 공식 한글패치 키 개수 반환"""
+    _load_ko_pack_keys()
+    return {
+        cat: len(keys) for cat, keys in _ko_pack_keys.items()
+    }
+
+
+# 바닐라 마인크래프트 공식 어휘 세트 (Tier 0: 절대 불변, 오역수정기로도 수정 불가)
+VANILLA_OFFICIAL_ITEMS_BASE = {
+    # Minerals & Items
+    "Stone", "Cobblestone", "Granite", "Diorite", "Andesite",
+    "Grass Block", "Dirt", "Coarse Dirt", "Podzol",
+    "Bedrock", "Sand", "Red Sand", "Gravel",
+    "Coal Ore", "Iron Ore", "Gold Ore", "Redstone Ore",
+    "Diamond Ore", "Lapis Lazuli Ore", "Emerald Ore", "Nether Quartz Ore",
+    "Deepslate", "Cobbled Deepslate", "Ancient Debris",
+    "Coal", "Charcoal", "Diamond", "Iron Ingot",
+    "Gold Ingot", "Copper Ingot", "Netherite Ingot",
+    "Netherite Scrap", "Stick", "Bowl", "String",
+    "Feather", "Gunpowder", "Wheat Seeds", "Wheat",
+    "Bread", "Flint", "Bucket", "Water Bucket",
+    "Lava Bucket", "Milk Bucket", "Compass", "Clock",
+    "Glowstone Dust", "Bone", "Sugar", "Rotten Flesh",
+    "Ender Pearl", "Blaze Rod", "Ghast Tear",
+    "Nether Wart", "Glass Bottle", "Spider Eye",
+    "Fermented Spider Eye", "Blaze Powder", "Magma Cream",
+    "Brewing Stand", "Cauldron", "Eye of Ender",
+    "Glistering Melon Slice", "Experience Bottle", "Fire Charge",
+    "Book and Quill", "Written Book", "Item Frame",
+    "Flower Pot", "Carrot", "Potato", "Baked Potato",
+    "Poisonous Potato", "Golden Carrot", "Skeleton Skull",
+    "Wither Skeleton Skull", "Zombie Head", "Creeper Head",
+    "Dragon Head", "Nether Star", "Pumpkin Pie",
+    "Enchanted Book", "Nether Brick", "Prismarine Shard",
+    "Prismarine Crystals", "Armor Stand", "Iron Nugget",
+    "Gold Nugget", "Raw Iron", "Raw Copper", "Raw Gold",
+    # Tools & Armor
+    "Wooden Sword", "Wooden Shovel", "Wooden Pickaxe", "Wooden Axe", "Wooden Hoe",
+    "Stone Sword", "Stone Shovel", "Stone Pickaxe", "Stone Axe", "Stone Hoe",
+    "Golden Sword", "Golden Shovel", "Golden Pickaxe", "Golden Axe", "Golden Hoe",
+    "Iron Sword", "Iron Shovel", "Iron Pickaxe", "Iron Axe", "Iron Hoe",
+    "Diamond Sword", "Diamond Shovel", "Diamond Pickaxe", "Diamond Axe", "Diamond Hoe",
+    "Netherite Sword", "Netherite Shovel", "Netherite Pickaxe", "Netherite Axe", "Netherite Hoe",
+    "Leather Cap", "Leather Tunic", "Leather Pants", "Leather Boots",
+    "Iron Helmet", "Iron Chestplate", "Iron Leggings", "Iron Boots",
+    "Diamond Helmet", "Diamond Chestplate", "Diamond Leggings", "Diamond Boots",
+    "Netherite Helmet", "Netherite Chestplate", "Netherite Leggings", "Netherite Boots",
+    "Shield", "Totem of Undying", "Elytra", "Bow", "Crossbow", "Trident", "Arrow",
+    # Blocks & Machines
+    "Crafting Table", "Furnace", "Blast Furnace", "Smoker",
+    "Chest", "Trapped Chest", "Ender Chest", "Barrel",
+    "Anvil", "Chipped Anvil", "Damaged Anvil",
+    "Smithing Table", "Fletching Table", "Cartography Table",
+    "Loom", "Stonecutter", "Grindstone", "Enchanting Table",
+    "Beacon", "Conduit", "Campfire", "Soul Campfire",
+    "Shulker Box", "Hopper", "Dropper", "Dispenser",
+    "Observer", "Piston", "Sticky Piston", "Redstone Lamp",
+    "Daylight Detector", "Tripwire Hook", "Lever",
+    "Oak Log", "Spruce Log", "Birch Log", "Jungle Log",
+    "Acacia Log", "Dark Oak Log", "Mangrove Log", "Cherry Log",
+    "Oak Planks", "Spruce Planks", "Birch Planks", "Jungle Planks",
+    "Acacia Planks", "Dark Oak Planks", "Mangrove Planks", "Cherry Planks",
+    "Glass", "Tinted Glass", "Torch", "Soul Torch", "Lantern", "Soul Lantern"
+}
+
+VANILLA_OFFICIAL_GENERAL_BASE = {
+    "Minecraft", "Options", "Video Settings", "Audio Settings",
+    "Singleplayer", "Multiplayer", "Game Menu",
+    "Achievements", "Advancements", "Statistics",
+    "Creeper", "Zombie", "Skeleton", "Spider",
+    "Cave Spider", "Enderman", "Witch", "Slime",
+    "Magma Cube", "Ghast", "Blaze", "Wither Skeleton",
+    "Ender Dragon", "Wither", "Warden", "Piglin",
+    "Piglin Brute", "Zombified Piglin", "Hoglin", "Zoglin",
+    "Villager", "Iron Golem", "Snow Golem", "Wolf",
+    "Cat", "Horse", "Donkey", "Mule", "Llama",
+    "Fox", "Panda", "Polar Bear", "Bee", "Bat",
+    "Parrot", "Dolphin", "Sea Turtle", "Glow Squid",
+    "Squid", "Strider", "Allay", "Frog", "Tadpole",
+    "Camel", "Sniffer", "Breeze",
+    # Effects
+    "Speed", "Slowness", "Haste", "Mining Fatigue",
+    "Strength", "Instant Health", "Instant Damage", "Jump Boost",
+    "Nausea", "Regeneration", "Resistance", "Fire Resistance",
+    "Water Breathing", "Invisibility", "Blindness", "Night Vision",
+    "Hunger", "Weakness", "Poison", "Wither", "Health Boost",
+    "Absorption", "Saturation", "Glowing", "Levitation",
+    "Luck", "Bad Luck", "Slow Falling", "Conduit Power",
+    "Dolphins Grace", "Bad Omen", "Hero of the Village", "Darkness"
+}
+
+
+def is_vanilla_official_key(text: str, category: str = "general") -> bool:
+    """바닐라 마인크래프트 공식 번역(Tier 0) 키인지 확인 (오역수정기로도 수정 절대 불가)"""
+    if not text:
+        return False
+    _load_cache_tiers()
+    if _cache_tiers_data:
+        t0 = _cache_tiers_data.get("tier_0_keys", {})
+        if category == "all":
+            if any(text in t0.get(c, []) for c in ("general", "items", "books")):
+                return True
+        elif text in t0.get(category, []) or text in t0.get("general", []):
+            return True
+
+    # 티어 파일이 없는 로컬 환경용 기본 바닐라 세트 검사
+    if category in ("items", "all") and text in VANILLA_OFFICIAL_ITEMS_BASE:
+        return True
+    if category in ("general", "all") and (text in VANILLA_OFFICIAL_GENERAL_BASE or text in VANILLA_OFFICIAL_ITEMS_BASE):
+        return True
+    return False
+
+
+TIERS_CACHE_FILE = os.path.join(CACHE_DIR, "cache_tiers.json")
+_cache_tiers_data = None
+_cache_tiers_loaded = False
+
+MODEL_TIER_MAPPING = {
+    # Tier 2: 고품질 AI
+    "claude-sonnet-5-5": 2,
+    "gpt-6.1-terra": 2,
+    "gemini-3.8-flash": 2,
+    "deepseek-v4-pro": 2,
+    # Tier 3: 중품질 / 표준 AI
+    "gpt-5-mini": 3,
+    "gpt-4.1": 3,
+    "gemini-3.6-flash": 3,
+    "claude-haiku-5-5": 3,
+    # Tier 4: 가성비 / 저품질 AI (기본값)
+    "gemini-3.5-flash-lite": 4,
+    "gemini-3.1-flash-lite": 4,
+    "gpt-6-luna": 4,
+    "deepseek-flash": 4,
+}
+
+
+def get_model_tier(model_name: str) -> int:
+    """
+    AI 모델명에 대응하는 번역 품질 티어(2~4)를 반환합니다.
+    - Tier 2 (고품질 AI): claude-sonnet-5-5, gpt-6.1-terra, gemini-3.8-flash, deepseek-v4-pro 등
+    - Tier 3 (중품질/표준 AI): gpt-5-mini, gpt-4.1, gemini-3.6-flash, claude-haiku-5-5 등
+    - Tier 4 (저품질/가성비 AI / 기본값): gemini-3.5-flash-lite, gpt-6-luna, deepseek-flash, Local AI 등
+    """
+    if not model_name:
+        return 4
+    m = model_name.lower().strip()
+    for name, tier in MODEL_TIER_MAPPING.items():
+        if name in m:
+            return tier
+    if any(k in m for k in ("sonnet", "terra", "3.8-flash", "v4-pro")):
+        return 2
+    if any(k in m for k in ("mini", "4.1", "3.6-flash", "haiku")):
+        return 3
+    return 4
+
+
+def _load_cache_tiers():
+    global _cache_tiers_data, _cache_tiers_loaded
+    if _cache_tiers_loaded:
+        return
+    if os.path.exists(TIERS_CACHE_FILE):
+        try:
+            with open(TIERS_CACHE_FILE, "r", encoding="utf-8") as f:
+                _cache_tiers_data = json.load(f)
+        except Exception:
+            _cache_tiers_data = None
+    _cache_tiers_loaded = True
+
+
+def get_translation_tier(text: str, category: str = "general") -> tuple:
+    """
+    특정 텍스트의 캐시 티어를 반환합니다.
+    Returns: (tier_level: int, source_desc: str, model_name: str)
+      - Tier 0: (0, "바닐라 공식 번역 (수정 불가)", "vanilla")
+      - Tier 1: (1, "모드 공식 한글패치/사용자 수정", "official_ko_pack")
+      - Tier 2: (2, "고품질 AI 번역", "high_ai")
+      - Tier 3: (3, "중품질 AI 번역", "mid_ai")
+      - Tier 4: (4, "가성비 AI 번역 (미등록/기본값)", "gemini-3.5-flash-lite")
+    
+    ※ 다른 로컬 환경이라 cache_tiers.json 파일이 없거나 티어 정보가 누락된 경우:
+      - 바닐라 공식 번역은 무조건 Tier 0 (수정 불가) 반환
+      - 모드 공식 한글패치(ko_pack) 등록 키라면 Tier 1 유지
+      - 그 외 모든 캐시 항목은 안전하게 최하위인 Tier 4(가성비 AI gemini-3.5-flash-lite)로 취급합니다.
+    """
+    # 🔒 Tier 0 판정: 바닐라 마인크래프트 공식 번역 (절대 불변)
+    if is_vanilla_official_key(text, category):
+        return 0, "바닐라 공식 번역 (수정 불가)", "vanilla"
+
+    _load_cache_tiers()
+    if _cache_tiers_data:
+        t0 = _cache_tiers_data.get("tier_0_keys", {})
+        if text in t0.get(category, []) or text in t0.get("general", []):
+            return 0, "바닐라 공식 번역 (수정 불가)", "vanilla"
+        t1 = _cache_tiers_data.get("tier_1_keys", {})
+        if text in t1.get(category, []) or text in t1.get("general", []):
+            return 1, "모드 공식 한글패치", "official_ko_pack"
+        t2 = _cache_tiers_data.get("tier_2_keys", {})
+        if text in t2.get(category, []) or text in t2.get("general", []):
+            return 2, "고품질 AI 번역", "high_ai"
+        t3 = _cache_tiers_data.get("tier_3_keys", {})
+        if text in t3.get(category, []) or text in t3.get("general", []):
+            return 3, "중품질 AI 번역", "mid_ai"
+
+    # 로컬에 cache_tiers.json 파일이 없거나 파일 내에 미등록된 키:
+    if is_official_ko_key(text, category):
+        return 1, "공식 한글패치", "official_ko_pack"
+
+    # 티어 데이터가 없는 캐시 데이터는 무조건 4티어(gemini-3.5-flash-lite)로 안전하게 취급
+    return 4, "가성비 AI 번역 (미등록 기본값)", "gemini-3.5-flash-lite"
 
 
 
@@ -621,16 +1046,16 @@ def get_cached_book_translation(text, target_lang="한국어 (Korean)"):
     return None
 
 
-def add_book_to_memory(text, translated_text, target_lang="한국어 (Korean)", force_override=False):
+def add_book_to_memory(text, translated_text, target_lang="한국어 (Korean)", force_override=False, tier=None):
     if not is_valid_translation(text, translated_text, target_lang):
         return
     if not _books_loaded:
         load_memory()
     target_lang_norm = target_lang.replace(" ", "")
     with _lock:
-        _store(_books_cache, text, translated_text, target_lang_norm, force_override=force_override)
+        _store(_books_cache, text, translated_text, target_lang_norm, force_override=force_override, tier=tier)
         # 가이드북 텍스트가 퀘스트 본문/설명에서도 1차 완전일치로 즉시 치환되도록 _global_cache에도 동시 보존
-        _store(_global_cache, text, translated_text, target_lang_norm, force_override=force_override)
+        _store(_global_cache, text, translated_text, target_lang_norm, force_override=force_override, tier=tier)
 
 
 
@@ -686,6 +1111,8 @@ def _save_local_caches_only():
         if merged_books is not None:
             _books_cache.clear()
             _books_cache.update(merged_books)
+
+        _save_ko_pack_keys()
 
 
 def save_memory(flush_now=False):
@@ -1192,6 +1619,14 @@ def finalize_translation_session(modpack_path=None, sync_wait=False):
     # 2. 마스터 스냅샷 갱신 및 누적 커밋 정리 (사전 머지 후 업로드)
     upload_snapshots_to_cloudflare(force=True, purge_commits=True, sync_wait=sync_wait)
 
+    # 3. 공식 한글패치 보호 키(ko_pack_keys) 및 단어사전(words) 클라우드 업로드
+    upload_ko_pack_keys_to_cloudflare(sync_wait=sync_wait)
+    try:
+        import translation_word
+        translation_word.upload_words_to_cloudflare(sync_wait=sync_wait)
+    except Exception:
+        pass
+
 
 def wait_for_cloud_sync(timeout=6.0):
     """클라우드 동기화(Pull)가 완료될 때까지 대기"""
@@ -1309,6 +1744,11 @@ def sync_from_cloudflare(force_wait=False, bypass_cooldown=False):
                             tgt = row.get("tgt")
                             if not is_valid_translation(src, tgt, lang):
                                 continue
+
+                            # 🔒 [공식 한글패치 보호]: 클라우드 커밋이 로컬 공식 번역(ko_pack)을 덮어쓰지 못하도록 방어
+                            if src in _ko_pack_keys.get(cat, set()) or src in _ko_pack_keys.get("items", set()):
+                                continue
+
                             target_cache = _global_cache if cat == "general" else (_items_cache if cat == "items" else _books_cache)
                             if lang not in target_cache:
                                 target_cache[lang] = {}
@@ -1368,6 +1808,12 @@ def sync_from_cloudflare(force_wait=False, bypass_cooldown=False):
             except Exception:
                 pass
 
+            # 3.5단계: 공식 한글패치 보호 키(ko_pack_keys.json) 압축 동기화
+            try:
+                sync_ko_pack_keys_from_cloudflare()
+            except Exception:
+                pass
+
             # 4단계: 변경사항이 있었을 때만 로컬 파일 업데이트
             if changed_master or changed_pull:
                 _save_local_caches_only()
@@ -1406,4 +1852,5 @@ from translation_editor import (
     calculate_translation_error_rate,
     dispatch_audit_report,
     dispatch_batch_audit_report,
+    retranslate_texts,
 )

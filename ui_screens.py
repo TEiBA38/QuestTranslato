@@ -20,7 +20,15 @@ except Exception:
     ttk = None
 
 from translation_engines import ENGINES
-from constants import FONT_NAME, MODELS_GEMINI_FREE, MODELS_GEMINI_PAID, MODELS_OPENAI
+from constants import (
+    FONT_NAME,
+    MODELS_GEMINI_FREE,
+    MODELS_GEMINI_PAID,
+    MODELS_OPENAI,
+    MODELS_CLAUDE,
+    MODELS_DEEPSEEK,
+    normalize_model_name,
+)
 
 
 class UIScreensMixin:
@@ -419,32 +427,27 @@ class UIScreensMixin:
             choice = self.plan_combo.get()
         engine = self.engine_combo.get()
         if "Gemini" in engine:
+            current_raw = normalize_model_name(self.model_combo.get())
             if "무료" in choice:
                 self.model_combo.configure(values=MODELS_GEMINI_FREE)
-                if self.model_combo.get() not in MODELS_GEMINI_FREE:
-                    self.model_combo.set(MODELS_GEMINI_FREE[0])
+                matched = next((m for m in MODELS_GEMINI_FREE if normalize_model_name(m) == current_raw), None)
+                self.model_combo.set(matched or MODELS_GEMINI_FREE[0])
             else:
                 self.model_combo.configure(values=MODELS_GEMINI_PAID)
-                if self.model_combo.get() not in MODELS_GEMINI_PAID:
-                    self.model_combo.set(MODELS_GEMINI_PAID[0])
+                matched = next((m for m in MODELS_GEMINI_PAID if normalize_model_name(m) == current_raw), None)
+                self.model_combo.set(matched or MODELS_GEMINI_PAID[0])
 
     def on_engine_change(self, choice):
         if "Custom API" in choice or "Local AI" in choice:
             self.standard_api_frame.pack_forget()
             self.local_api_frame.pack(fill="x", before=self.btn_translate_selected_modpack)
-            self.log("💡 커스텀 호환 API 주소와 모델명(필요시 API 키 포함)을 입력해주세요.")
+            self.log("💡 커스텀 호환 API 주소와 모델명(필요시 API 키 포함)을 입력해주세요. '🔍 모델 감지' 버튼으로 실행 중인 모델을 자동 검색할 수 있습니다.")
             return
 
         self.local_api_frame.pack_forget()
         self.standard_api_frame.pack(fill="x", before=self.btn_translate_selected_modpack)
 
-        if choice == "Google Translate":
-            self.api_entry.configure(state="disabled")
-            self.show_btn.configure(state="disabled")
-            self.plan_combo.configure(state="disabled")
-            self.model_combo.configure(state="disabled")
-            self.log("💡 Google Translate는 API 키 없이 무료 사용 가능합니다.")
-        elif "테스트 모드" in choice or "Mock" in choice:
+        if "테스트 모드" in choice or "Mock" in choice:
             self.api_entry.configure(state="disabled")
             self.show_btn.configure(state="disabled")
             self.plan_combo.configure(state="disabled")
@@ -453,26 +456,39 @@ class UIScreensMixin:
         else:
             self.api_entry.configure(state="normal")
             self.show_btn.configure(state="normal")
+            gemini_plans = [
+                "무료 계정 (안전대기 / 10 RPM 속도제한)",
+                "유료 계정 (초고속·고품질 번역 / 제한없음)",
+            ]
+            current_raw = normalize_model_name(self.model_combo.get())
             if "Gemini" in choice:
-                self.plan_combo.configure(state="normal")
-                if self.plan_combo.get() not in ["유료 API (기본)", "무료 API (분당 제한)"]:
-                    self.plan_combo.set("유료 API (기본)")
+                self.plan_combo.configure(state="normal", values=gemini_plans)
+                if self.plan_combo.get() not in gemini_plans:
+                    self.plan_combo.set(gemini_plans[0])
                 self.model_combo.configure(state="normal")
                 self.on_plan_change(self.plan_combo.get())
-                self.log("💡 Gemini API 키를 입력하고 계정 상태(유료/무료)를 지정해주세요.")
+                self.log("💡 Google AI (Gemini) API 키를 입력하고 계정 상태(무료/유료)를 선택해주세요.")
             elif "OpenAI" in choice:
-                self.plan_combo.set("- (해당 없음)")
+                self.plan_combo.set("유료 전용 (선불 크레딧 충전 필수)")
                 self.plan_combo.configure(state="disabled")
                 self.model_combo.configure(state="normal", values=MODELS_OPENAI)
-                if self.model_combo.get() not in MODELS_OPENAI:
-                    self.model_combo.set(MODELS_OPENAI[0])
-                self.log("💡 OpenAI API 키를 입력해주세요. 요금제는 계정 설정에 따릅니다.")
-            else:
-                self.plan_combo.set("- (해당 없음)")
+                matched = next((m for m in MODELS_OPENAI if normalize_model_name(m) == current_raw), None)
+                self.model_combo.set(matched or MODELS_OPENAI[0])
+                self.log("💡 OpenAI (ChatGPT) API 키와 모델을 선택해주세요. (선불 충전 계정 필요)")
+            elif "Claude" in choice:
+                self.plan_combo.set("유료 전용 (선불 크레딧 충전 필수)")
                 self.plan_combo.configure(state="disabled")
-                self.model_combo.set("- (해당 없음)")
-                self.model_combo.configure(state="disabled")
-                self.log("💡 DeepL API 키를 입력해주세요.")
+                self.model_combo.configure(state="normal", values=MODELS_CLAUDE)
+                matched = next((m for m in MODELS_CLAUDE if normalize_model_name(m) == current_raw), None)
+                self.model_combo.set(matched or MODELS_CLAUDE[0])
+                self.log("💡 Anthropic (Claude) API 키와 모델을 선택해주세요. (선불 충전 계정 필요)")
+            elif "DeepSeek" in choice:
+                self.plan_combo.set("유료 전용 (선불 크레딧 충전 필수)")
+                self.plan_combo.configure(state="disabled")
+                self.model_combo.configure(state="normal", values=MODELS_DEEPSEEK)
+                matched = next((m for m in MODELS_DEEPSEEK if normalize_model_name(m) == current_raw), None)
+                self.model_combo.set(matched or MODELS_DEEPSEEK[0])
+                self.log("💡 DeepSeek (딥시크) API 키와 모델을 선택해주세요. (선불 충전 계정 필요)")
 
     def on_target_lang_change(self, choice):
         if hasattr(self, "_sync_glossary_to_current_lang"):
@@ -630,12 +646,15 @@ class UIScreensMixin:
 
         api_key = self.api_entry.get().strip()
 
-        if engine_key != "google" and not api_key:
+        if not api_key:
             messagebox.showwarning("경고", f"{engine_name} 사용을 위해 API 키를 입력해주세요.")
             return None, None, False, None, None, None
 
-        is_paid = "유료" in self.plan_combo.get()
-        ai_model = self.model_combo.get()
+        if engine_key == "gemini_batch":
+            is_paid = "유료" in self.plan_combo.get()
+        else:
+            is_paid = True
+        ai_model = normalize_model_name(self.model_combo.get())
         target_lang = self.target_lang_combo.get()
         return engine_key, api_key, is_paid, ai_model, target_lang, None
 
@@ -848,6 +867,14 @@ class UIScreensMixin:
         )
         lbl_selected_count.pack(side="left")
 
+        btn_ai_retranslate = ctk.CTkButton(
+            toolbar, text="🤖 선택 항목 AI 재번역", width=155, height=26,
+            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+            fg_color="#7c3aed", hover_color="#6d28d9",
+            command=lambda: do_ai_retranslate()
+        )
+        btn_ai_retranslate.pack(side="left", padx=(12, 0))
+
         # 우측: 모드 스위치 버튼 2개
         mode_box = ctk.CTkFrame(toolbar, fg_color="#18181d", corner_radius=8, border_width=1, border_color="#2a2a33")
         mode_box.pack(side="right")
@@ -955,16 +982,29 @@ class UIScreensMixin:
                 iid = str(i)
                 if select_all:
                     checked_iids.add(iid)
-                tree.item(iid, values=(chk_char, f"[{item['category']}]", item["src"], item["tgt"]))
+                cat_display = f"[{item['category']}]" + (" 🔒바닐라" if item.get("is_vanilla") else (" 🔒공식" if item.get("is_official") else ""))
+                tree.item(iid, values=(chk_char, cat_display, item["src"], item["tgt"]))
             update_selected_count()
 
         def on_item_click(item):
             selected_item["category"] = item["category"]
             selected_item["src"] = item["src"]
             selected_item["tgt"] = item["tgt"]
-            lbl_original.configure(text=item["src"])
-            entry_translated.delete(0, 'end')
-            entry_translated.insert(0, item["tgt"])
+            selected_item["is_vanilla"] = item.get("is_vanilla", False)
+
+            if item.get("is_vanilla"):
+                lbl_original.configure(text=f"{item['src']}  🔒 [바닐라 마인크래프트 공식 번역 - 수정 불가]")
+                entry_translated.configure(state="normal")
+                entry_translated.delete(0, 'end')
+                entry_translated.insert(0, item["tgt"])
+                entry_translated.configure(state="disabled")
+                btn_save.configure(state="disabled", fg_color="#3f3f46", text="🔒 바닐라 공식 (수정 불가)")
+            else:
+                lbl_original.configure(text=item["src"])
+                entry_translated.configure(state="normal")
+                entry_translated.delete(0, 'end')
+                entry_translated.insert(0, item["tgt"])
+                btn_save.configure(state="normal", fg_color="#15803d", text="💾 저장 및 즉시 적용")
 
         def toggle_check(iid):
             if not iid:
@@ -978,7 +1018,8 @@ class UIScreensMixin:
                     checked_iids.add(iid)
                     chk_char = "☑"
                 item = current_items[idx]
-                tree.item(iid, values=(chk_char, f"[{item['category']}]", item["src"], item["tgt"]))
+                cat_display = f"[{item['category']}]" + (" 🔒바닐라" if item.get("is_vanilla") else (" 🔒공식" if item.get("is_official") else ""))
+                tree.item(iid, values=(chk_char, cat_display, item["src"], item["tgt"]))
                 update_selected_count()
 
         def on_tree_click(event):
@@ -1248,7 +1289,8 @@ class UIScreensMixin:
 
             for i, r in enumerate(results):
                 iid = str(i)
-                tree.insert("", "end", iid=iid, values=("☐", f"[{r['category']}]", r["src"], r["tgt"]))
+                cat_display = f"[{r['category']}]" + (" 🔒바닐라" if r.get("is_vanilla") else (" 🔒공식" if r.get("is_official") else ""))
+                tree.insert("", "end", iid=iid, values=("☐", cat_display, r["src"], r["tgt"]))
             update_selected_count()
 
         entry_search.bind("<Return>", do_search)
@@ -1257,12 +1299,19 @@ class UIScreensMixin:
             if not selected_item["src"]:
                 self.show_messagebox("warning", "안내", "수정할 항목을 아래 목록에서 먼저 선택해 주세요.")
                 return
+            src_val = selected_item["src"]
+            if selected_item.get("is_vanilla") or translation_memory.is_vanilla_official_key(src_val, selected_item["category"]):
+                self.show_messagebox(
+                    "warning", "수정 불가",
+                    "바닐라 마인크래프트 공식 명칭은 게임 시스템 무결성을 위해 오역 수정기로 수정할 수 없습니다."
+                )
+                return
+
             new_val = entry_translated.get().strip()
             if not new_val:
                 self.show_messagebox("warning", "경고", "번역문을 입력해 주세요.")
                 return
             old_val = selected_item["tgt"]
-            src_val = selected_item["src"]
 
             # 오역률 산출 (단순 수치 참고용)
             err_rate, val_rate, verdict, det = translation_memory.calculate_translation_error_rate(
@@ -1312,6 +1361,29 @@ class UIScreensMixin:
             repl_term = "" if is_deletion else raw_repl.strip()
             repl_label = "[단어 삭제]" if is_deletion else f"'{repl_term}'"
 
+            # Tier 0 바닐라 마인크래프트 공식 항목 사전 필터링 (절대 불변)
+            selected_items = [current_items[i] for i in selected_indices]
+            valid_selected_items = []
+            vanilla_skipped_count = 0
+            for item in selected_items:
+                if item.get("is_vanilla") or translation_memory.is_vanilla_official_key(item["src"], item["category"]):
+                    vanilla_skipped_count += 1
+                else:
+                    valid_selected_items.append(item)
+
+            if vanilla_skipped_count > 0:
+                self.log(
+                    f"🔒 [공식 번역 보호] 선택 항목 중 바닐라 마인크래프트 공식 명칭 {vanilla_skipped_count}개는 "
+                    f"절대 불변 항목이므로 치환 대상에서 안전하게 자동 제외되었습니다."
+                )
+
+            if not valid_selected_items:
+                self.show_messagebox(
+                    "warning", "치환 불가",
+                    "선택된 모든 항목이 바닐라 마인크래프트 공식 명칭이므로 치환할 수 없습니다."
+                )
+                return
+
             # 오역률 산출
             target_basis = query_var.get().strip() or find_term or "단어"
             err_rate, val_rate, verdict, det = translation_memory.calculate_translation_error_rate(
@@ -1321,7 +1393,8 @@ class UIScreensMixin:
             # 통일된 일괄 치환/삭제 확인 팝업창
             confirm_msg = (
                 f"정말 이렇게 수정하시겠습니까?\n\n"
-                f"• 선택된 항목: 총 {len(selected_indices)}개\n"
+                f"• 선택된 항목: 총 {len(valid_selected_items)}개"
+                + (f" (바닐라 공식 {vanilla_skipped_count}개 제외)" if vanilla_skipped_count > 0 else "") + "\n"
                 f"• 찾은 단어: '{find_term}'\n"
                 f"• 바뀐 번역: {repl_label}\n\n"
                 f"(오역률 감지: {err_rate:.1f}%)"
@@ -1330,11 +1403,10 @@ class UIScreensMixin:
                 return
 
             updated_count = 0
-            selected_items = [current_items[i] for i in selected_indices]
             find_terms = [t.strip() for t in re.split(r'[,|/]', find_term) if t.strip()] if find_term else []
             batch_changes = []
 
-            for item in selected_items:
+            for item in valid_selected_items:
                 old_tgt = item["tgt"]
                 new_tgt = old_tgt
                 if find_terms:
@@ -1362,7 +1434,7 @@ class UIScreensMixin:
                             translation_memory._items_cache if item["category"] == "items" else
                             (translation_memory._books_cache if item["category"] == "books" else translation_memory._global_cache)
                         )
-                        translation_memory._store(cache_dict, item["src"], new_tgt, "한국어(Korean)")
+                        translation_memory._store(cache_dict, item["src"], new_tgt, "한국어(Korean)", force_override=True)
                     updated_count += 1
 
             if updated_count > 0:
@@ -1381,12 +1453,205 @@ class UIScreensMixin:
             self.show_messagebox("info", "완료", f"총 {updated_count}개 항목이 {repl_label}(으)로 일괄 수정되었습니다.")
             do_search()
 
-            q_term = query_var.get().strip()
-            if q_term and repl_term:
-                register_glossary_rule(q_term, repl_term)
+        def do_ai_retranslate():
+            selected_indices = sorted([int(iid) for iid in checked_iids if iid.isdigit() and int(iid) < len(current_items)])
+            if not selected_indices:
+                self.show_messagebox("warning", "경고", "AI로 재번역할 항목을 하나 이상 선택(체크)해주세요.")
+                return
 
-            self.show_messagebox("info", "완료", f"총 {updated_count}개 항목이 '{repl_term}'(으)로 일괄 수정되었습니다.")
-            do_search()
+            selected_items = [current_items[i] for i in selected_indices]
+
+            # 1. Tier 0 바닐라 마인크래프트 공식 항목 사전 제외 (절대 불변)
+            valid_items = []
+            vanilla_skipped_count = 0
+            for item in selected_items:
+                if item.get("is_vanilla") or translation_memory.is_vanilla_official_key(item["src"], item["category"]):
+                    vanilla_skipped_count += 1
+                else:
+                    valid_items.append(item)
+
+            if vanilla_skipped_count > 0:
+                self.log(
+                    f"🔒 [공식 번역 보호] 선택 항목 중 바닐라 마인크래프트 공식 명칭 {vanilla_skipped_count}개는 "
+                    f"절대 불변 항목이므로 AI 재번역 대상에서 자동 제외되었습니다."
+                )
+
+            if not valid_items:
+                self.show_messagebox(
+                    "warning", "재번역 불가",
+                    "선택된 모든 항목이 바닐라 마인크래프트 공식 명칭이므로 재번역할 수 없습니다."
+                )
+                return
+
+            # 2. 메인 화면 번역 설정 및 API 키 검증 (그대로 가져오기)
+            engine_key, api_key, is_paid, ai_model, target_lang, custom_url = self.validate_inputs()
+            if not engine_key:
+                return
+
+            # 3. 사용자 시작 확인
+            model_display = ai_model or engine_key
+            target_tier = translation_memory.get_model_tier(ai_model)
+            confirm_msg = (
+                f"선택한 {len(valid_items)}개 항목을 AI로 재번역하시겠습니까?\n\n"
+                f"• 적용 모델: {model_display}\n"
+                f"• 대상 언어: {target_lang}\n"
+                + (f"• 바닐라 공식 {vanilla_skipped_count}개 자동 제외됨\n" if vanilla_skipped_count > 0 else "") +
+                f"\n(완료 후 한 줄 비교 로그를 검토하고 적용 여부(O/X)를 결정할 수 있습니다.)"
+            )
+            if not messagebox.askyesno("AI 재번역 시작", confirm_msg, parent=editor):
+                return
+
+            # 4. 프로그레스/대기 팝업 표시
+            prog_win = ctk.CTkToplevel(editor)
+            prog_win.title("🤖 AI 재번역 진행 중...")
+            prog_win.geometry("380x140")
+            prog_win.resizable(False, False)
+            prog_win.grab_set()
+
+            ctk.CTkLabel(
+                prog_win, text=f"🤖 {len(valid_items)}개 항목 AI 재번역 중...",
+                font=ctk.CTkFont(family=FONT_NAME, size=13, weight="bold"),
+                text_color="#38bdf8"
+            ).pack(pady=(20, 6))
+
+            ctk.CTkLabel(
+                prog_win, text=f"모델: {model_display} | 잠시만 기다려주세요...",
+                font=ctk.CTkFont(family=FONT_NAME, size=11),
+                text_color="#94a3b8"
+            ).pack(pady=(0, 10))
+
+            prog_bar = ctk.CTkProgressBar(prog_win, width=300, mode="indeterminate")
+            prog_bar.pack(pady=(0, 15))
+            prog_bar.start()
+
+            # 5. 백그라운드 스레드에서 API 호출
+            def _run():
+                texts_to_trans = [it["src"] for it in valid_items]
+                active_glossary = getattr(self.app_state, 'glossary', None) if hasattr(self, 'app_state') else None
+                try:
+                    results = translation_editor.retranslate_texts(
+                        texts_to_trans, engine_key, api_key, is_paid=is_paid,
+                        ai_model=ai_model, target_lang=target_lang,
+                        custom_url=custom_url, glossary=active_glossary
+                    )
+                except Exception as e:
+                    self.after(0, lambda: _on_error(str(e)))
+                    return
+
+                self.after(0, lambda: _on_finish(results))
+
+            def _on_error(err_msg):
+                if prog_win.winfo_exists():
+                    prog_win.destroy()
+                self.show_messagebox("error", "오류", f"AI 재번역 중 오류가 발생했습니다:\n{err_msg}")
+
+            def _on_finish(results):
+                if prog_win.winfo_exists():
+                    prog_win.destroy()
+                open_review_dialog(valid_items, results, model_display, target_tier)
+
+            threading.Thread(target=_run, daemon=True).start()
+
+        def open_review_dialog(items, new_translations, model_name, m_tier):
+            review_win = ctk.CTkToplevel(editor)
+            review_win.title("🤖 AI 재번역 결과 검토 & 적용 (O/X)")
+            review_win.geometry("980x640")
+            review_win.minsize(820, 500)
+            review_win.grab_set()
+
+            # 상단 헤더
+            top_frame = ctk.CTkFrame(review_win, fg_color="transparent")
+            top_frame.pack(fill="x", padx=16, pady=(16, 8))
+
+            ctk.CTkLabel(
+                top_frame, text=f"✨ {len(items)}개 항목 AI 재번역 완료",
+                font=ctk.CTkFont(family=FONT_NAME, size=15, weight="bold"),
+                text_color="#38bdf8"
+            ).pack(anchor="w")
+
+            changed_count = sum(1 for it, nt in zip(items, new_translations) if nt != it["tgt"])
+            ctk.CTkLabel(
+                top_frame,
+                text=f"• 적용 모델: {model_name} | 변경 감지: {changed_count}개 (동일: {len(items) - changed_count}개)\n"
+                     f"• 아래 한 줄 비교 로그를 검토한 후 [✅ 적용하기 (O)] 또는 [❌ 취소 (X)]를 선택하세요.",
+                font=ctk.CTkFont(family=FONT_NAME, size=11),
+                justify="left", text_color="#cbd5e1"
+            ).pack(anchor="w", pady=(4, 0))
+
+            # 중앙: 원문, 기존 번역, AI 재번역이 모두 한 줄에 들어가는 텍스트 박스
+            box_frame = ctk.CTkFrame(review_win, fg_color="#121216", corner_radius=8, border_width=1, border_color="#2b2b36")
+            box_frame.pack(fill="both", expand=True, padx=16, pady=8)
+
+            txt_box = ctk.CTkTextbox(
+                box_frame,
+                font=ctk.CTkFont(family="Consolas" if os.name == 'nt' else FONT_NAME, size=11),
+                fg_color="transparent", text_color="#f1f5f9", wrap="none"
+            )
+            txt_box.pack(fill="both", expand=True, padx=8, pady=8)
+
+            # 한 줄 로그 채우기 (원문, 기존 번역, AI 재번역 모두 한 줄에 표시)
+            for idx, (item, new_t) in enumerate(zip(items, new_translations), 1):
+                clean_src = item['src'].replace('\n', ' ').strip()
+                clean_old = item['tgt'].replace('\n', ' ').strip()
+                clean_new = new_t.replace('\n', ' ').strip()
+                line = f"[{idx:02d}] 원문: {clean_src} ｜ 기존 번역: {clean_old} ➡️ AI 재번역: {clean_new}\n"
+                txt_box.insert("end", line)
+
+            txt_box.configure(state="disabled")
+
+            # 하단 액션 버튼 바
+            btn_row = ctk.CTkFrame(review_win, fg_color="transparent")
+            btn_row.pack(fill="x", padx=16, pady=(8, 16))
+
+            def on_apply():
+                batch_changes = []
+                for item, new_t in zip(items, new_translations):
+                    old_t = item["tgt"]
+                    if new_t != old_t:
+                        batch_changes.append({
+                            "category": item["category"], "src": item["src"],
+                            "old_tgt": old_t, "new_tgt": new_t
+                        })
+                        item["tgt"] = new_t
+                        with translation_memory._lock:
+                            cache_dict = (
+                                translation_memory._items_cache if item["category"] == "items" else
+                                (translation_memory._books_cache if item["category"] == "books" else translation_memory._global_cache)
+                            )
+                            translation_memory._store(
+                                cache_dict, item["src"], new_t, "한국어(Korean)",
+                                force_override=True, tier=m_tier
+                            )
+
+                if batch_changes:
+                    translation_memory.save_memory(flush_now=True)
+                    apply_batch_hotpatch(batch_changes)
+                    translation_memory.dispatch_batch_audit_report(
+                        batch_changes,
+                        details=f"AI 재번역 ({model_name}) 적용 ({len(batch_changes)}건)"
+                    )
+                    self.show_messagebox("info", "적용 완료", f"총 {len(batch_changes)}개 항목의 AI 재번역이 성공적으로 적용되었습니다!")
+                else:
+                    self.show_messagebox("info", "안내", "기존 번역과 달라진 항목이 없어 적용되지 않았습니다.")
+
+                review_win.destroy()
+                do_search()
+
+            btn_apply = ctk.CTkButton(
+                btn_row, text="✅ 적용하기 (O)", width=160, height=34,
+                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                fg_color="#15803d", hover_color="#166534",
+                command=on_apply
+            )
+            btn_apply.pack(side="right", padx=(8, 0))
+
+            btn_cancel = ctk.CTkButton(
+                btn_row, text="❌ 취소 (X)", width=120, height=34,
+                font=ctk.CTkFont(family=FONT_NAME, size=12),
+                fg_color="#334155", hover_color="#475569",
+                command=review_win.destroy
+            )
+            btn_cancel.pack(side="right")
 
         # ================================================================
         # 새 번역 데이터 추가 다이얼로그
@@ -1469,3 +1734,179 @@ class UIScreensMixin:
                 btn_box, text="취소", fg_color="#3f3f46", hover_color="#52525b",
                 command=dlg.destroy
             ).pack(side="right")
+
+    def open_ai_model_info_modal(self):
+        """AI 모델별 무료/유료 구분, 회사별 스펙, 파일 100개당 예상 비용 및 RPD 가이드 모달"""
+        info_win = ctk.CTkToplevel(self)
+        info_win.title("ℹ️ AI 모델 정보 (무료 vs 유료 · 회사별 요금 · 파일 100개당 예상 비용)")
+        info_win.geometry("820x720")
+        info_win.minsize(700, 540)
+        info_win.transient(self)
+        info_win.grab_set()
+
+        info_win.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - 820) // 2
+        y = self.winfo_y() + (self.winfo_height() - 720) // 2
+        info_win.geometry(f"+{x}+{y}")
+
+        # 상단 핵심 안내 배너
+        banner_frame = ctk.CTkFrame(
+            info_win, fg_color="#1e293b", border_color="#38bdf8", border_width=2, corner_radius=10
+        )
+        banner_frame.pack(fill="x", padx=16, pady=(14, 8))
+
+        ctk.CTkLabel(
+            banner_frame,
+            text=(
+                "💡 [핵심 요약: 무료 vs 유료 API]\n"
+                "• 카드 등록이나 선결제 없이 쓸 수 있는 진정한 무료 AI API는 사실상 Google Gemini뿐입니다!\n"
+                "• OpenAI(GPT), DeepSeek, Claude는 모두 최소 $2~$5 이상의 선불 크레딧 충전(유료 결제)이 필수입니다.\n"
+                "• 아래 '파일 100개당 예상 비용'은 캐시 적중을 제외한 순수 신규 번역(약 5만~20만 토큰 소모) 기준 추정치입니다."
+            ),
+            font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+            text_color="#e0f2fe", justify="left"
+        ).pack(padx=14, pady=10, anchor="w")
+
+        scroll = ctk.CTkScrollableFrame(info_win, fg_color="#0f0f14", corner_radius=10)
+        scroll.pack(fill="both", expand=True, padx=16, pady=6)
+
+        def create_accordion(parent, title_str, body_str, default_open=False, active_color="#1d4ed8"):
+            box_wrapper = ctk.CTkFrame(parent, fg_color="#18181b", border_color="#27272a", border_width=1, corner_radius=8)
+            box_wrapper.pack(fill="x", padx=8, pady=4)
+
+            content_frame = ctk.CTkFrame(box_wrapper, fg_color="#111115", corner_radius=6)
+            lbl_body = ctk.CTkLabel(
+                content_frame, text=body_str,
+                font=ctk.CTkFont(family=FONT_NAME, size=12),
+                text_color="#d4d4d8", justify="left", wraplength=720
+            )
+            lbl_body.pack(padx=14, pady=12, anchor="w")
+
+            state = {"open": False}
+            btn = ctk.CTkButton(
+                box_wrapper, text=f"▶  {title_str}",
+                font=ctk.CTkFont(family=FONT_NAME, size=13, weight="bold"),
+                fg_color="#27272a", hover_color="#3f3f46", text_color="#f4f4f5",
+                anchor="w", height=36, corner_radius=6
+            )
+
+            def _toggle():
+                if state["open"]:
+                    cf_hide = content_frame
+                    cf_hide.pack_forget()
+                    btn.configure(text=f"▶  {title_str}", fg_color="#27272a")
+                    state["open"] = False
+                else:
+                    content_frame.pack(fill="x", padx=8, pady=(0, 8))
+                    btn.configure(text=f"▼  {title_str}", fg_color=active_color)
+                    state["open"] = True
+
+            btn.configure(command=_toggle)
+            btn.pack(fill="x", padx=6, pady=5)
+            if default_open:
+                _toggle()
+
+        # ====================================================================
+        # [대분류 1] 무료 AI API
+        # ====================================================================
+        ctk.CTkLabel(
+            scroll, text="🆓 1. 무료 AI API (선결제/카드 등록 불필요 — Google Gemini 독점)",
+            font=ctk.CTkFont(family=FONT_NAME, size=14, weight="bold"),
+            text_color="#4ade80"
+        ).pack(anchor="w", padx=10, pady=(10, 4))
+
+        free_gemini_body = (
+            "• Google AI Studio에서 API 키만 발급받으면 결제 수단 등록 없이 즉시 무료로 작동합니다.\n"
+            "• 무료 할당량(RPD)은 'API 키' 단위가 아닌 'Google Cloud 프로젝트' 단위로 적용되며 매일 태평양 자정(한국 오후 4~5시)에 초기화됩니다.\n\n"
+            "  1) gemini-3.5-flash-lite (★무료 대량 번역 1순위 추천 / 기본값)\n"
+            "     - 일일 무료 한도: 500 ~ 1,500 RPD | 분당 10~15 RPM | 분당 250,000 TPM\n"
+            "     - 예상 비용: 0원 (완전 무료) | 대형 모드팩도 하루 안에 거뜬히 번역 가능한 주력 모델\n\n"
+            "  2) gemini-3.1-flash-lite\n"
+            "     - 일일 무료 한도: 500 ~ 1,500 RPD | 분당 15 RPM | 분당 250,000 TPM\n"
+            "     - 예상 비용: 0원 | 3.5-flash-lite 할당량 소진 시 스위칭하기 좋은 백업 모델\n\n"
+            "  3) gemini-3.8-flash (⚠️ 무료 사용 시 주의)\n"
+            "     - 일일 무료 한도: 하루 딱 20 RPD / 분당 5 RPM 제한!\n"
+            "     - 예상 비용: 0원 | 성능은 최상급이나 무료 계정은 하루 20회 호출 후 즉시 차단되므로 소량 번역에만 사용하세요."
+        )
+        create_accordion(scroll, "🟢 Google AI (Gemini) 무료 티어 (모델별 일일 RPD 한도)", free_gemini_body, default_open=True, active_color="#15803d")
+
+        # ====================================================================
+        # [대분류 2] 유료 AI API (회사별 구분 & 파일 100개당 예상 비용)
+        # ====================================================================
+        ctk.CTkLabel(
+            scroll, text="💳 2. 유료 AI API (선불 충전/결제 등록 필수 — 회사별 요금 & 파일 100개당 예상 비용)",
+            font=ctk.CTkFont(family=FONT_NAME, size=14, weight="bold"),
+            text_color="#38bdf8"
+        ).pack(anchor="w", padx=10, pady=(14, 4))
+
+        paid_companies = [
+            (
+                "🏢 [Google AI (Gemini) 유료] (결제 카드 연동 후 사용한 만큼 후불 결제)",
+                "• 결제 수단 연동 즉시 무료 RPD 제한이 해제되어 초고속·고품질 배치 번역(1,000+ RPM)이 가능합니다.\n\n"
+                "  • gemini-3.1-flash-lite : 입력 $0.20 / 출력 $1.50 (1M 토큰당)\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.08 ~ $0.35 (약 110원 ~ 490원)\n\n"
+                "  • gemini-3.5-flash-lite : 입력 $0.30 / 출력 $2.50 (1M 토큰당)\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.14 ~ $0.55 (약 200원 ~ 770원)\n\n"
+                "  • gemini-3.6-flash : 입력 ~$0.50 / 출력 ~$3.00 (1M 토큰당)\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.18 ~ $0.68 (약 250원 ~ 950원)\n\n"
+                "  • gemini-3.8-flash (★유료 주력 워크호스) : 입력 $0.75 / 출력 $3.75 (1M 토큰당)\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.22 ~ $0.90 (약 300원 ~ 1,250원)\n\n"
+                "  • gemini-4-argon (★유료 전용 최상위 플래그십) : 입력 $2.00 / 출력 $10.00 (1M 토큰당)\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.60 ~ $2.40 (약 840원 ~ 3,300원)"
+            ),
+            (
+                "🏢 [OpenAI (ChatGPT)] (최소 $5 선불 크레딧 충전 필수)",
+                "• OpenAI는 $0 미결제 상태에서는 3 RPM 제한으로 번역이 불가능하며, 최소 $5 선불 충전(Tier 1: 500 RPM)이 필수입니다.\n\n"
+                "  • gpt-6-luna (👑유료 가성비 전체 1위 / 기본값) : 입력 $0.10 (캐시 $0.01) / 출력 $0.50\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.03 ~ $0.12 (약 40원 ~ 170원) — 가장 저렴하고 빠른 최신 모델!\n\n"
+                "  • gpt-4o-mini (구버전 호환용) : 입력 $0.15 / 출력 $0.60\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.04 ~ $0.15 (약 50원 ~ 210원)\n\n"
+                "  • gpt-4.1-mini : 입력 $0.40 / 출력 $1.60\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.10 ~ $0.40 (약 140원 ~ 560원)\n\n"
+                "  • gpt-5-mini : 입력 $0.25 / 출력 $2.00\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.10 ~ $0.45 (약 140원 ~ 630원)\n\n"
+                "  • gpt-6.1-terra (중급 밸런스) : 입력 $1.00 / 출력 $5.00\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.30 ~ $1.20 (약 420원 ~ 1,700원)\n\n"
+                "  • gpt-4.1 : 입력 $2.00 / 출력 $8.00\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.50 ~ $2.00 (약 700원 ~ 2,800원)\n\n"
+                "  • gpt-5 : 입력 $1.25 / 출력 $10.00\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.55 ~ $2.20 (약 770원 ~ 3,100원)\n\n"
+                "  • gpt-6.1-sol (★고성능 정밀 번역) : 입력 $2.00 / 출력 $10.00\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.60 ~ $2.40 (약 840원 ~ 3,300원)\n\n"
+                "  • gpt-6-astra (최상위 초고가 플래그십) : 입력 $10.00 / 출력 $50.00\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $3.00 ~ $12.00 (약 4,200원 ~ 16,800원)"
+            ),
+            (
+                "🏢 [Anthropic (Claude)] (최소 $5 선불 크레딧 충전 필수)",
+                "• 번역 엔진에서 'Anthropic (Claude)' 선택 후 공식 API 키만 입력하면 바로 작동합니다.\n"
+                "• 한국어 어투와 판타지/스토리 문맥이 가장 매끄러운 모델군입니다.\n\n"
+                "  • claude-haiku-5-5 (👑한국어 자연스러움 가성비 1위 / 기본값) : 입력 $0.10 (캐시 $0.01) / 출력 $0.50\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.03 ~ $0.12 (약 40원 ~ 170원)\n\n"
+                "  • claude-sonnet-5-5 (★고품질 번역의 정석) : 입력 $2.00 (캐시 $0.10) / 출력 $10.00\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.60 ~ $2.40 (약 840원 ~ 3,300원)\n\n"
+                "  • claude-opus-5-5 : 입력 $4.00 / 출력 $20.00\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $1.20 ~ $4.80 (약 1,700원 ~ 6,700원)\n\n"
+                "  • claude-fable-5-2 : 입력 $10.00 / 출력 $50.00\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $3.00 ~ $12.00 (약 4,200원 ~ 16,800원)"
+            ),
+            (
+                "🏢 [DeepSeek (딥시크)] (최소 $2 선불 크레딧 충전 필수)",
+                "• 번역 엔진에서 'DeepSeek (딥시크)' 선택 후 API 키만 입력하면 바로 작동합니다.\n"
+                "• 비피크 시간대(한국 시간 오후 7시 ~ 익일 오전 10시 및 주말)에는 자동으로 50% 반값 할인이 적용됩니다!\n\n"
+                "  • deepseek-flash (V4.1, 👑초저가 가성비 추천 / 기본값) : 입력 $0.15 (캐시 $0.003) / 출력 $0.60\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.02 ~ $0.15 (약 30원 ~ 200원, 비피크 할인 시 약 15원 ~ 100원!)\n\n"
+                "  • deepseek-v4-pro (고성능 추론 모델) : 입력 $0.66 / 출력 $1.98\n"
+                "    👉 감지된 파일 100개당 예상 비용: 약 $0.13 ~ $0.50 (약 180원 ~ 700원)"
+            ),
+        ]
+
+        for comp_title, comp_body in paid_companies:
+            create_accordion(scroll, comp_title, comp_body, default_open=False, active_color="#1d4ed8")
+
+        btn_close = ctk.CTkButton(
+            info_win, text="닫기", width=120, height=34,
+            font=ctk.CTkFont(family=FONT_NAME, size=13, weight="bold"),
+            fg_color="#3f3f46", hover_color="#52525b",
+            command=info_win.destroy
+        )
+        btn_close.pack(pady=(6, 14))

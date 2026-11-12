@@ -185,6 +185,7 @@ class TranslationMixin:
                 self.toggle_buttons(True)
                 self.update_progress(1.0)
                 self.set_status("대기 중")
+                self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
                 
         threading.Thread(target=run_instance_translation, daemon=True).start()
 
@@ -1483,8 +1484,8 @@ class TranslationMixin:
                         translation_memory.finalize_translation_session(modpack_path=modpack_path)
                     except Exception as exc:
                         logging.warning(f"번역 완료 클라우드 동기화 오류: {exc}")
-                    if hasattr(self.app, "scan_modpacks_from_entry"):
-                        self.app.after(0, lambda: self.app.scan_modpacks_from_entry(show_screen=False))
+                    # 퀘스트 번역 완료 후 모드팩 선택 화면으로 전환되거나 선택이 초기화되지 않고 현재 번역 화면을 그대로 유지
+                    self.app.after(0, lambda: getattr(self.app, "show_translate_screen")(force=True))
 
         context = AppTranslationContext(self)
         try:
@@ -1669,5 +1670,6 @@ class TranslationMixin:
                 self.toggle_buttons(True)
                 self.update_progress(1.0)
                 self.set_status("대기 중")
+                self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
 
         threading.Thread(target=run_translation_task, daemon=True).start()

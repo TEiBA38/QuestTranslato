@@ -107,7 +107,7 @@ def apply_builtin_quest_style_translation(text):
     return text
 
 
-def _translate_wrapper(text, api_key, translate_fn, reference_map=None, target_lang="한국어 (Korean)", is_item=False, is_book=False):
+def _translate_wrapper(text, api_key, translate_fn, reference_map=None, target_lang="한국어 (Korean)", is_item=False, is_book=False, ai_model=None):
     if not text or not str(text).strip():
         return text
     if MOCK_MODE:
@@ -145,12 +145,13 @@ def _translate_wrapper(text, api_key, translate_fn, reference_map=None, target_l
     final_res = translation_memory._restore_formatting(translated, prefix, suffix)
 
     if not MOCK_MODE:
+        m_tier = translation_memory.get_model_tier(ai_model)
         if is_item:
-            translation_memory.add_item_to_memory(clean_text, translated, target_lang)
+            translation_memory.add_item_to_memory(clean_text, translated, target_lang, tier=m_tier)
         elif is_book:
-            translation_memory.add_book_to_memory(clean_text, translated, target_lang)
+            translation_memory.add_book_to_memory(clean_text, translated, target_lang, tier=m_tier)
         else:
-            translation_memory.add_to_memory(clean_text, translated, target_lang)
+            translation_memory.add_to_memory(clean_text, translated, target_lang, tier=m_tier)
 
     return final_res
 
@@ -256,7 +257,7 @@ def translate_openai(text, api_key, reference_map=None, glossary=None, ai_model=
     def do_translate(t, key):
         translation_memory.record_api_call(1)
         url = "https://api.openai.com/v1/chat/completions"
-        model = ai_model if ai_model else "gpt-4o-mini"
+        model = ai_model if ai_model else "gpt-6-luna"
         target_prompt = LANG_CODES.get(target_lang, ("KO", "ko", "natural Korean"))[2]
         system_prompt = (
             f"You are a professional Minecraft quest translator. Translate the given text from English to {target_prompt}.\n"
@@ -299,7 +300,7 @@ def translate_openai(text, api_key, reference_map=None, glossary=None, ai_model=
         elif res.status_code == 200:
             return res.json()["choices"][0]["message"]["content"].strip()
         return t
-    return _translate_wrapper(text, api_key, do_translate, reference_map, target_lang, is_item, is_book)
+    return _translate_wrapper(text, api_key, do_translate, reference_map, target_lang, is_item, is_book, ai_model=ai_model)
 
 
 def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
@@ -598,8 +599,25 @@ def translate_local_ai(text_list, base_url, model_name, api_key=None, log_callba
             log_callback("⚠️ [보안 차단] 클라우드 메타데이터 IP(169.254.x.x)는 SSRF 방지를 위해 사용할 수 없습니다.")
         return [item if item is not None else text for item, text in zip(resolved, text_list)]
 
-    if not url.endswith("/chat/completions"):
-        url += "/chat/completions"
+    is_anthropic = "anthropic.com" in url
+    if is_anthropic:
+        if not url.endswith("/messages"):
+            url += "/messages"
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": api_key or "",
+            "anthropic-version": "2023-06-01",
+        }
+        payload = {
+            "model": model_name,
+            "max_tokens": 4096,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": f"Input JSON: {input_json}"}],
+            "temperature": 0.1,
+        }
+    else:
+        if not url.endswith("/chat/completions"):
+            url += "/chat/completions"
 
     try:
         if cancel_checker and cancel_checker():
@@ -609,7 +627,10 @@ def translate_local_ai(text_list, base_url, model_name, api_key=None, log_callba
         response = requests.post(url, headers=headers, json=payload, timeout=300)
         response.raise_for_status()
         data = response.json()
-        raw_text = data['choices'][0]['message']['content'].strip()
+        if is_anthropic:
+            raw_text = data["content"][0]["text"].strip()
+        else:
+            raw_text = data['choices'][0]['message']['content'].strip()
         
         match = re.search(r'\[.*\]', raw_text, re.DOTALL)
         if match:
@@ -630,23 +651,105 @@ def translate_local_ai(text_list, base_url, model_name, api_key=None, log_callba
             return merged
             
         if log_callback:
-            log_callback("⚠️ [응답 파싱 실패] 로컬 AI 응답이 올바른 JSON 형식이 아니어 원문으로 대체됩니다.")
+            log_callback("⚠️ [응답 파싱 실패] AI 응답이 올바른 JSON 형식이 아니어 원문으로 대체됩니다.")
         return [item if item is not None else text for item, text in zip(resolved, text_list)]
 
     except Exception as e:
         if log_callback:
-            log_callback(f"⚠️ [통신/파싱 에러] 로컬 AI 호출 실패: {str(e)}")
+            log_callback(f"⚠️ [통신/파싱 에러] AI 호출 실패: {str(e)}")
         return [item if item is not None else text for item, text in zip(resolved, text_list)]
 
 
 ENGINES = {
-    "Gemini Lite (배치 번역)": "gemini_batch",
-    "Custom API (OpenAI 호환, Local AI 등)": "local_ai",
-    "DeepL": "deepl",
-    "Google Translate": "google",
-    "OpenAI": "openai",
+    "Google AI (Gemini)": "gemini_batch",
+    "OpenAI (ChatGPT)": "openai",
+    "Anthropic (Claude)": "claude",
+    "DeepSeek (딥시크)": "deepseek",
+    "Custom API (Local AI 등)": "local_ai",
     "🧪 테스트 모드 (Mock - API 미호출)": "mock",
 }
+
+
+def get_available_engines():
+    """샌드박스 디버그 모드 여부에 따라 UI에 노출할 번역 엔진 목록을 반환합니다.
+    디버그 모드가 켜져 있을 때만 '🧪 테스트 모드 (Mock)'를 노출합니다."""
+    try:
+        import temp_session_logger
+        debug_on = temp_session_logger.is_debug_mode()
+    except Exception:
+        debug_on = False
+
+    engines = {
+        "Google AI (Gemini)": "gemini_batch",
+        "OpenAI (ChatGPT)": "openai",
+        "Anthropic (Claude)": "claude",
+        "DeepSeek (딥시크)": "deepseek",
+        "Custom API (Local AI 등)": "local_ai",
+    }
+    if debug_on:
+        engines["🧪 테스트 모드 (Mock - API 미호출)"] = "mock"
+    return engines
+
+
+def fetch_local_ai_models(base_url: str, api_key: str = None, timeout: float = 3.0) -> list:
+    """로컬 LLM (LM Studio, Ollama, vLLM, Jan 등) 또는 OpenAI 호환 서버에서 모델 목록을 자동으로 감지합니다."""
+    if not base_url:
+        return []
+    url = base_url.strip().rstrip("/")
+    if "169.254." in url:
+        return []
+
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    # 시도할 엔드포인트 후보군
+    candidate_urls = []
+    if url.endswith("/v1"):
+        candidate_urls.append(f"{url}/models")
+        root_url = url[:-3].rstrip("/")
+        candidate_urls.append(f"{root_url}/api/tags")
+    else:
+        candidate_urls.append(f"{url}/v1/models")
+        candidate_urls.append(f"{url}/models")
+        candidate_urls.append(f"{url}/api/tags")
+
+    found_models = []
+    for cand_url in candidate_urls:
+        try:
+            resp = requests.get(cand_url, headers=headers, timeout=timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                # 1. OpenAI 호환 포맷: {"data": [{"id": "..."}, ...]}
+                if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+                    for item in data["data"]:
+                        if isinstance(item, dict) and "id" in item:
+                            found_models.append(str(item["id"]))
+                # 2. Ollama 네이티브 포맷: {"models": [{"name": "..."}, ...]}
+                elif isinstance(data, dict) and "models" in data and isinstance(data["models"], list):
+                    for item in data["models"]:
+                        if isinstance(item, dict) and "name" in item:
+                            found_models.append(str(item["name"]))
+                elif isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, str):
+                            found_models.append(item)
+                        elif isinstance(item, dict) and "id" in item:
+                            found_models.append(str(item["id"]))
+
+                if found_models:
+                    # 중복 제거 및 정렬
+                    seen = set()
+                    unique_models = []
+                    for m in found_models:
+                        if m not in seen:
+                            seen.add(m)
+                            unique_models.append(m)
+                    return unique_models
+        except Exception:
+            continue
+
+    return []
 
 
 def auto_extract_glossary(text_samples, engine_key, api_key, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):
@@ -697,15 +800,34 @@ def auto_extract_glossary(text_samples, engine_key, api_key, ai_model=None, targ
                 else:
                     raise call_err
             raw_text = res.text.strip() if res.text else ""
-        elif engine_key in ("openai", "local_ai"):
-            url = custom_url.strip().rstrip("/") if engine_key == "local_ai" and custom_url else "https://api.openai.com"
+        elif engine_key == "claude":
+            model_name = ai_model if ai_model else "claude-haiku-5-5"
+            headers = {
+                "Content-Type": "application/json",
+                "x-api-key": api_key or "",
+                "anthropic-version": "2023-06-01",
+            }
+            payload = {"model": model_name, "max_tokens": 2048, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}
+            translation_memory.record_api_call(1)
+            res = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload, timeout=30)
+            res.raise_for_status()
+            raw_text = res.json()["content"][0]["text"].strip()
+        elif engine_key in ("openai", "deepseek", "local_ai"):
+            if engine_key == "local_ai" and custom_url:
+                url = custom_url.strip().rstrip("/")
+            elif engine_key == "deepseek":
+                url = "https://api.deepseek.com/v1"
+            else:
+                url = "https://api.openai.com/v1"
             if "169.254." in url:
                 import logging
                 logging.warning("SSRF blocked: 169.254.x.x is not allowed.")
                 return {}
-            url = url + "/v1/chat/completions" if engine_key == "openai" else url + "/chat/completions"
+            if not url.endswith("/chat/completions"):
+                url += "/chat/completions"
             
-            model_name = ai_model if ai_model else ("gpt-4o-mini" if engine_key == "openai" else "llama")
+            default_m = "gpt-6-luna" if engine_key == "openai" else ("deepseek-flash" if engine_key == "deepseek" else "llama")
+            model_name = ai_model if ai_model else default_m
             headers = {"Content-Type": "application/json"}
             if api_key: headers["Authorization"] = f"Bearer {api_key}"
             payload = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}

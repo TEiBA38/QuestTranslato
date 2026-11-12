@@ -1,5 +1,5 @@
 FONT_NAME = "Malgun Gothic"
-APP_VERSION = "v1.7.0"
+APP_VERSION = "v1.7.1"
 TARGET_EXTENSIONS = ('.snbt', '.json', '.lang', '.hqm')
 SCAN_IGNORE_DIRS = {
     '.git', '.venv', '__pycache__',
@@ -161,26 +161,49 @@ DEFAULT_GLOSSARY = {
 }
 
 MODELS_GEMINI_FREE = [
-    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash-lite (가성비 추천)",
+    "gemini-3.8-flash (고품질 추천)",
     "gemini-3.1-flash-lite",
 ]
 
 MODELS_GEMINI_PAID = [
+    "gemini-3.8-flash (고품질 추천)",
+    "gemini-3.5-flash-lite (가성비 추천)",
     "gemini-3.6-flash",
-    "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite-preview-02-05",
+    "gemini-4-argon",
 ]
 
 MODELS_OPENAI = [
+    "gpt-6-luna (가성비 추천)",
+    "gpt-6.1-terra (고품질 추천)",
+    "gpt-5-mini",
+    "gpt-4.1-mini",
+    "gpt-6.1-sol",
+    "gpt-5",
+    "gpt-4.1",
+    "gpt-6-astra",
     "gpt-4o-mini",
-    "gpt-4o",
-    "gpt-4-turbo",
-    "gpt-3.5-turbo",
 ]
+
+MODELS_CLAUDE = [
+    "claude-haiku-5-5 (가성비 추천)",
+    "claude-sonnet-5-5 (고품질 추천)",
+    "claude-opus-5-5",
+    "claude-fable-5-2",
+]
+
+MODELS_DEEPSEEK = [
+    "deepseek-flash (가성비 추천)",
+    "deepseek-v4-pro (고품질 추천)",
+]
+
+
+def normalize_model_name(model_name: str) -> str:
+    """'(가성비 추천)' 등의 UI 라벨이 붙은 모델명에서 실제 API 호출용 모델 ID만 추출합니다."""
+    if not model_name:
+        return ""
+    return str(model_name).split()[0].strip()
 
 SUPPORTED_LANGUAGES = [
     "한국어 (Korean)",

@@ -39,12 +39,20 @@ except Exception:
     DND_FILES = ()
     TkinterDnD = None
 
-from translation_engines import ENGINES
+from translation_engines import ENGINES, get_available_engines, fetch_local_ai_models
 from ui_screens import UIScreensMixin
 from modpack_manager import ModpackMixin
 from translation_runner import TranslationMixin
 from state_manager import AppState
-from constants import FONT_NAME, DEFAULT_GLOSSARY, MODELS_GEMINI_FREE, MODELS_GEMINI_PAID, MODELS_OPENAI, SUPPORTED_LANGUAGES
+from constants import (
+    FONT_NAME,
+    DEFAULT_GLOSSARY,
+    MODELS_GEMINI_FREE,
+    MODELS_GEMINI_PAID,
+    MODELS_OPENAI,
+    SUPPORTED_LANGUAGES,
+    normalize_model_name,
+)
 if ctk is not None:
     ctk.set_appearance_mode("Dark")
     ctk.set_default_color_theme("blue")
@@ -639,41 +647,53 @@ if ctk is not None and TkinterDnD is not None:
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                          text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
 
-            self.engine_combo = ctk.CTkComboBox(config_frame, values=list(ENGINES.keys()),
+            available_engines = get_available_engines()
+            self.engine_combo = ctk.CTkComboBox(config_frame, values=list(available_engines.keys()),
                                                 font=ctk.CTkFont(family=FONT_NAME, size=12),
                                                 command=self.on_engine_change,
                                                 fg_color="#27272a", button_color="#b45309", button_hover_color="#d97706")
             self.engine_combo.pack(fill="x", padx=12, pady=(0, 8))
-            self.engine_combo.set("Gemini Lite (배치 번역)")
+            self.engine_combo.set("Google AI (Gemini)")
 
             # --- Standard API Frame ---
             self.standard_api_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
             self.standard_api_frame.pack(fill="x")
 
-            ctk.CTkLabel(self.standard_api_frame, text="Gemini 계정 상태",
+            ctk.CTkLabel(self.standard_api_frame, text="Gemini 계정 상태 (무료/유료)",
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                          text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
 
             self.plan_combo = ctk.CTkComboBox(self.standard_api_frame,
-                                              values=["유료 계정 (Pay-as-you-go / 초고속 / 제한없음)",
-                                                      "무료 계정 (안전대기 / 10 RPM 속도제한)"],
+                                              values=["무료 계정 (안전대기 / 10 RPM 속도제한)",
+                                                      "유료 계정 (초고속·고품질 번역 / 제한없음)"],
                                               font=ctk.CTkFont(family=FONT_NAME, size=12),
                                               command=self.on_plan_change,
                                               fg_color="#27272a", button_color="#b45309", button_hover_color="#d97706")
             self.plan_combo.pack(fill="x", padx=12, pady=(0, 8))
-            self.plan_combo.set("유료 계정 (Pay-as-you-go / 초고속 / 제한없음)")
+            self.plan_combo.set("무료 계정 (안전대기 / 10 RPM 속도제한)")
 
-            self.model_label = ctk.CTkLabel(self.standard_api_frame, text="AI 모델 선택",
+            model_header_row = ctk.CTkFrame(self.standard_api_frame, fg_color="transparent")
+            model_header_row.pack(fill="x", padx=12, pady=(2, 2))
+
+            self.model_label = ctk.CTkLabel(model_header_row, text="AI 모델 선택",
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                          text_color="#cbd5e1")
-            self.model_label.pack(anchor="w", padx=12, pady=(2, 2))
+            self.model_label.pack(side="left")
+
+            self.btn_ai_info = ctk.CTkButton(
+                model_header_row, text="ℹ️ AI 모델 정보", width=105, height=22,
+                font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+                fg_color="#2563eb", hover_color="#1d4ed8", text_color="#ffffff",
+                corner_radius=6, command=self.open_ai_model_info_modal
+            )
+            self.btn_ai_info.pack(side="right")
 
             self.model_combo = ctk.CTkComboBox(self.standard_api_frame,
-                                              values=MODELS_GEMINI_PAID,
+                                              values=MODELS_GEMINI_FREE,
                                               font=ctk.CTkFont(family=FONT_NAME, size=12),
                                               fg_color="#27272a", button_color="#b45309", button_hover_color="#d97706")
             self.model_combo.pack(fill="x", padx=12, pady=(0, 8))
-            self.model_combo.set(MODELS_GEMINI_PAID[0])
+            self.model_combo.set(MODELS_GEMINI_FREE[0])
 
             ctk.CTkLabel(self.standard_api_frame, text="API 키",
                          font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
@@ -712,19 +732,39 @@ if ctk is not None and TkinterDnD is not None:
             self.local_url_entry.pack(fill="x", padx=12, pady=(0, 6))
             self.local_url_entry.bind("<FocusOut>", lambda _e: self.save_user_settings())
 
-            # 2. 모델 이름 (필수)
-            ctk.CTkLabel(self.local_api_frame, text="모델 이름 (필수)",
-                         font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
-                         text_color="#cbd5e1").pack(anchor="w", padx=12, pady=(2, 2))
+            # 2. 모델 이름 (직접 입력 또는 감지)
+            local_model_header_row = ctk.CTkFrame(self.local_api_frame, fg_color="transparent")
+            local_model_header_row.pack(fill="x", padx=12, pady=(2, 2))
 
-            self.local_model_entry = ctk.CTkEntry(
-                self.local_api_frame,
-                placeholder_text="예: llama3.1, qwen2.5:14b, deepseek-chat (LM Studio/Ollama에 로드된 모델명)",
-                font=ctk.CTkFont(family=FONT_NAME, size=12),
-                fg_color="#111113", border_color="#52525b"
+            ctk.CTkLabel(local_model_header_row, text="모델 이름 (직접 입력 또는 감지)",
+                         font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                         text_color="#cbd5e1").pack(side="left")
+
+            ctk.CTkButton(
+                local_model_header_row, text="ℹ️ AI 모델 정보", width=105, height=22,
+                font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+                fg_color="#2563eb", hover_color="#1d4ed8", text_color="#ffffff",
+                corner_radius=6, command=self.open_ai_model_info_modal
+            ).pack(side="right")
+
+            self.btn_detect_local = ctk.CTkButton(
+                local_model_header_row, text="🔍 모델 감지", width=95, height=22,
+                font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+                fg_color="#0d9488", hover_color="#0f766e", text_color="#ffffff",
+                corner_radius=6, command=self.on_detect_local_models
             )
-            self.local_model_entry.pack(fill="x", padx=12, pady=(0, 6))
-            self.local_model_entry.bind("<FocusOut>", lambda _e: self.save_user_settings())
+            self.btn_detect_local.pack(side="right", padx=(0, 6))
+
+            self.local_model_combo = ctk.CTkComboBox(
+                self.local_api_frame,
+                values=["llama3.1", "qwen2.5:14b", "deepseek-flash"],
+                font=ctk.CTkFont(family=FONT_NAME, size=12),
+                fg_color="#111113", border_color="#52525b", button_color="#0d9488", button_hover_color="#0f766e"
+            )
+            self.local_model_combo.pack(fill="x", padx=12, pady=(0, 6))
+            self.local_model_combo.set("llama3.1")
+            self.local_model_combo.bind("<FocusOut>", lambda _e: self.save_user_settings())
+            self.local_model_entry = self.local_model_combo  # 호환성 유지 (.get() 지원)
 
             # 3. API 키 (선택사항)
             ctk.CTkLabel(self.local_api_frame, text="API 키 (선택사항, 로컬 AI는 비워두세요)",
@@ -857,30 +897,56 @@ if ctk is not None and TkinterDnD is not None:
             
             saved_local_model = settings.get("local_model", "")
             if saved_local_model:
-                self.local_model_entry.delete(0, "end")
-                self.local_model_entry.insert(0, saved_local_model)
+                if hasattr(self.local_model_entry, "set"):
+                    self.local_model_entry.set(saved_local_model)
+                else:
+                    self.local_model_entry.delete(0, "end")
+                    self.local_model_entry.insert(0, saved_local_model)
             
-            saved_model = settings.get("ai_model", "")
-            if saved_model:
-                self.model_combo.set(saved_model)
-                
             saved_lang = settings.get("target_lang", "")
             if saved_lang:
                 self.target_lang_combo.set(saved_lang)
 
             saved_engine = settings.get("engine_name", "")
-            if saved_engine:
+            engine_migration = {
+                "Gemini Lite (배치 번역)": "Google AI (Gemini)",
+                "OpenAI": "OpenAI (ChatGPT)",
+                "Custom API (OpenAI 호환, Local AI 등)": "Custom API (Local AI 등)",
+                "DeepL": "Google AI (Gemini)",
+                "Google Translate": "Google AI (Gemini)",
+            }
+            saved_engine = engine_migration.get(saved_engine, saved_engine)
+            available_engines = get_available_engines()
+            if saved_engine and saved_engine in available_engines:
                 self.engine_combo.set(saved_engine)
-                # trigger UI update
                 if hasattr(self, "on_engine_change"):
                     self.on_engine_change(saved_engine)
+            elif saved_engine == "🧪 테스트 모드 (Mock - API 미호출)" and saved_engine not in available_engines:
+                self.engine_combo.set("Google AI (Gemini)")
+                if hasattr(self, "on_engine_change"):
+                    self.on_engine_change("Google AI (Gemini)")
 
             saved_plan = settings.get("plan_name", "")
-            if saved_plan:
-                if "Gemini" in saved_engine:
-                    self.plan_combo.set(saved_plan)
-                    if hasattr(self, "on_plan_change"):
-                        self.on_plan_change(saved_plan)
+            if saved_plan and "Gemini" in (saved_engine or self.engine_combo.get()):
+                if "유료" in saved_plan:
+                    saved_plan = "유료 계정 (초고속·고품질 번역 / 제한없음)"
+                elif "무료" in saved_plan:
+                    saved_plan = "무료 계정 (안전대기 / 10 RPM 속도제한)"
+                self.plan_combo.set(saved_plan)
+                if hasattr(self, "on_plan_change"):
+                    self.on_plan_change(saved_plan)
+
+            saved_model = settings.get("ai_model", "")
+            if saved_model == "gemini-3.5-flash":
+                saved_model = "gemini-3.5-flash-lite"
+            if saved_model:
+                raw_saved = normalize_model_name(saved_model)
+                current_vals = self.model_combo.cget("values")
+                matched = next((v for v in current_vals if normalize_model_name(v) == raw_saved), None)
+                if matched:
+                    self.model_combo.set(matched)
+                elif saved_model in current_vals:
+                    self.model_combo.set(saved_model)
                 
             self.app_state.translated_history = settings.get("translated_history", {})
             self.app_state.glossaries_by_lang = settings.get("glossaries_by_lang", {})
@@ -892,6 +958,35 @@ if ctk is not None and TkinterDnD is not None:
                 self.app_state.glossaries_by_lang["한국어 (Korean)"] = settings.get("glossary")
 
             self._sync_glossary_to_current_lang()
+
+        def on_detect_local_models(self):
+            base_url = self.local_url_entry.get().strip()
+            if not base_url:
+                base_url = "http://localhost:1234/v1"
+                self.local_url_entry.delete(0, "end")
+                self.local_url_entry.insert(0, base_url)
+            api_key = self.local_api_key_entry.get().strip() or None
+
+            self.log(f"🔍 로컬 AI 서버({base_url})에서 실행 중인 모델을 감지하는 중...")
+            self.btn_detect_local.configure(state="disabled", text="⏳ 감지 중...")
+
+            def _detect_task():
+                models = fetch_local_ai_models(base_url, api_key)
+                def _update_ui():
+                    try:
+                        self.btn_detect_local.configure(state="normal", text="🔍 모델 감지")
+                        if models:
+                            self.local_model_combo.configure(values=models)
+                            self.local_model_combo.set(models[0])
+                            self.save_user_settings()
+                            self.log(f"✅ 로컬 AI 서버에서 {len(models)}개 모델을 감지했습니다: {', '.join(models)}")
+                        else:
+                            self.log(f"⚠️ 로컬 AI 서버({base_url})에서 모델을 감지하지 못했습니다. 서버가 실행 중인지 확인하거나 모델명을 직접 입력해주세요.")
+                    except Exception as e:
+                        logging.error(f"Local AI model detect UI update failed: {e}")
+                self.after(0, _update_ui)
+
+            threading.Thread(target=_detect_task, daemon=True).start()
 
         def on_toggle_auto_apply_rp(self):
             self.save_user_settings()

@@ -169,10 +169,15 @@ def main():
         all_langs = set(list(existing_data.keys()) + list(commit_data.keys()) + list(local_data.keys()))
         for lang in all_langs:
             merged_data[lang] = {}
+            # 1. 기존 R2 마스터 (검증된 고품질 마스터 데이터 우선 보존)
             if lang in existing_data and isinstance(existing_data[lang], dict):
                 merged_data[lang].update(existing_data[lang])
+            # 2. 로컬 캐시 (신규 번역만 추가 - 기존 마스터에 이미 있는 번역은 머신 번역으로 덮어쓰지 않음)
             if lang in local_data and isinstance(local_data[lang], dict):
-                merged_data[lang].update(local_data[lang])
+                for k, v in local_data[lang].items():
+                    if k not in merged_data[lang]:
+                        merged_data[lang][k] = v
+            # 3. Cloudflare 증분 커밋 데이터 (사용자의 명시적 번역 수정 내역 반영)
             if lang in commit_data and isinstance(commit_data[lang], dict):
                 merged_data[lang].update(commit_data[lang])
 

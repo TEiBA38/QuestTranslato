@@ -399,6 +399,59 @@
         }
 
         // ----------------------------------------------------------------------
+        // 6-2. GET /ko-pack-keys -> R2에서 ko_pack_keys.json.gz (공식 보호 키) 다운로드
+        // ----------------------------------------------------------------------
+        if (request.method === "GET" && path === "/ko-pack-keys") {
+          const key = "ko_pack_keys.json.gz";
+          const object = await env.R2_BUCKET.get(key);
+          if (!object) {
+            return new Response("Not Found", { status: 404, headers: corsHeaders });
+          }
+
+          const clientEtag = request.headers.get("If-None-Match");
+          if (clientEtag && clientEtag === object.httpEtag) {
+            return new Response(null, {
+              status: 304,
+              headers: { ...corsHeaders, "ETag": object.httpEtag },
+            });
+          }
+
+          return new Response(object.body, {
+            status: 200,
+            headers: {
+              ...corsHeaders,
+              "Content-Type": "application/json",
+              "Content-Encoding": "gzip",
+              "ETag": object.httpEtag,
+              "Cache-Control": "public, max-age=300",
+            },
+          });
+        }
+
+        // ----------------------------------------------------------------------
+        // 6-3. PUT /ko-pack-keys -> ko_pack_keys.json.gz R2에 압축 업로드
+        // ----------------------------------------------------------------------
+        if (request.method === "PUT" && path === "/ko-pack-keys") {
+          const key = "ko_pack_keys.json.gz";
+          const bodyBuffer = await request.arrayBuffer();
+          if (!bodyBuffer || bodyBuffer.byteLength < 10) {
+            return new Response("Empty ko-pack-keys data rejected", { status: 400, headers: corsHeaders });
+          }
+
+          const uploaded = await env.R2_BUCKET.put(key, bodyBuffer, {
+            httpMetadata: { contentType: "application/json", contentEncoding: "gzip" },
+          });
+
+          return new Response(
+            JSON.stringify({ ok: true, key, etag: uploaded.httpEtag, size: bodyBuffer.byteLength }),
+            {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            }
+          );
+        }
+
+        // ----------------------------------------------------------------------
         // 7. POST /feedback/report -> 피드백/버그 제보 디스코드 웹훅 전송 및 스레드/반응 자동 생성
         // ----------------------------------------------------------------------
         if (request.method === "POST" && path === "/feedback/report") {
@@ -1154,7 +1207,7 @@ async function handleAuditReport(request, env, corsHeaders) {
       description: descText,
       fields: [
         { name: "📌 영어 원문 (src)", value: `\`${auditRecord.src}\``, inline: false },
-        { name: "⬅️ 이전 번역 (old)", value: `\`${auditRecord.old_tgt || "(없음)"}\``, inline: true },
+        { name: "⬅️ 이전 번역 (old)", value: `\`${auditRecord.old_tgt || (auditRecord.category && auditRecord.category.includes("일괄 치환") ? "일괄 치환" : "(없음)")}\``, inline: true },
         { name: "➡️ 수정 번역 (new)", value: `\`${auditRecord.new_tgt}\``, inline: true },
         { name: "📊 오역률 / 판정", value: `\`${auditRecord.error_rate.toFixed(1)}%\` (${auditRecord.verdict.toUpperCase()})`, inline: true },
         { name: "🏷️ 카테고리", value: `\`${auditRecord.category}\`${isTest ? " (🧪 테스트)" : ""}`, inline: true },

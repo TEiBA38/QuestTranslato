@@ -61,7 +61,9 @@ def search_memory(query, category="all", target_lang="한국어 (Korean)", limit
                         match = True
 
                 if match:
-                    results.append({"category": cat_name, "src": src, "tgt": tgt})
+                    is_vanilla = translation_memory.is_vanilla_official_key(src, cat_name)
+                    is_off = translation_memory.is_official_ko_key(src, cat_name) or is_vanilla
+                    results.append({"category": cat_name, "src": src, "tgt": tgt, "is_official": is_off, "is_vanilla": is_vanilla})
                     if len(results) >= limit:
                         return True
         return False
@@ -83,6 +85,10 @@ def search_memory(query, category="all", target_lang="한국어 (Korean)", limit
 def update_memory_entry(category, original_src, new_tgt, target_lang="한국어 (Korean)"):
     """캐시 업데이트 후 로컬 저장 및 클라우드 커밋 큐에 반영합니다."""
     import translation_memory
+    if translation_memory.is_vanilla_official_key(original_src, category):
+        logging.warning(f"🔒 [Tier 0 절대 불변] '{original_src}' 항목은 바닐라 마인크래프트 공식 번역이므로 수정할 수 없습니다.")
+        return False
+
     target_lang_norm = target_lang.replace(" ", "")
     cache_to_update = None
 
@@ -96,7 +102,7 @@ def update_memory_entry(category, original_src, new_tgt, target_lang="한국어 
         return False
 
     with translation_memory._lock:
-        translation_memory._store(cache_to_update, original_src, new_tgt, target_lang_norm)
+        translation_memory._store(cache_to_update, original_src, new_tgt, target_lang_norm, force_override=True)
 
     # CACHE_DIR가 테스트 모드일 때는 자동으로 dist/temp/test_cache 로 격리되어 저장됨
     translation_memory.save_memory(flush_now=True)
@@ -106,6 +112,9 @@ def update_memory_entry(category, original_src, new_tgt, target_lang="한국어 
 def delete_memory_entry(category, original_src, target_lang="한국어 (Korean)"):
     """로컬 캐시에서 항목을 삭제합니다."""
     import translation_memory
+    if translation_memory.is_vanilla_official_key(original_src, category):
+        logging.warning(f"🔒 [Tier 0 절대 불변] '{original_src}' 항목은 바닐라 마인크래프트 공식 번역이므로 삭제할 수 없습니다.")
+        return False
     target_lang_norm = target_lang.replace(" ", "")
     cache_to_update = None
 
@@ -875,8 +884,8 @@ def dispatch_batch_audit_report(batch_changes, error_rate=0.0, validity=0.0, ver
             payload = {
                 "category": f"일괄 치환 ({len(batch_changes)}건)",
                 "src": f"일괄 치환 {len(batch_changes)}개 항목",
-                "old_tgt": batch_changes[0]["old_tgt"] if batch_changes else "",
-                "new_tgt": batch_changes[0]["new_tgt"] if batch_changes else "",
+                "old_tgt": "일괄 치환",
+                "new_tgt": f"총 {len(batch_changes)}개 항목 변경",
                 "error_rate": float(error_rate),
                 "validity": float(validity),
                 "verdict": str(verdict),
@@ -944,118 +953,52 @@ def dispatch_batch_audit_report(batch_changes, error_rate=0.0, validity=0.0, ver
     threading.Thread(target=_send_and_listen, daemon=True).start()
 
 
-def get_ai_translation_candidates(src_text, current_tgt="", api_key=None, engine=None, glossary=None, ai_model=None):
+def retranslate_texts(texts, engine_key, api_key, is_paid=False, ai_model=None, target_lang="한국어 (Korean)", custom_url=None, glossary=None, log_callback=None):
     """
-    원문에 대해 누락/오역 없는 3가지 고품질 번역 후보를 생성합니다.
-    온라인 AI(Gemini/OpenAI)가 가능할 경우 실시간 생성하며, 실패하거나 키가 없을 경우 로컬 사전/용어집 기반으로 똑똑한 후보를 제안합니다.
-    반환: [{"type": "표준/공식", "text": "철 주괴"}, {"type": "간결/자연", "text": "철괴"}, {"type": "음차/대안", "text": "아이언 잉곳"}]
+    오역 수정기에서 선택된 텍스트 목록을 메인 화면에 설정된 엔진 및 모델로 일괄 재번역합니다.
     """
-    if not src_text or not str(src_text).strip():
+    import translation_engines
+    from file_processors import sanitize_minecraft_formatting
+
+    if not texts:
         return []
 
-    candidates = []
+    # Mock mode
+    if getattr(translation_engines, "MOCK_MODE", False) or engine_key == "mock":
+        return [f"[AI 재번역] {t}" for t in texts]
 
-    # 1. 온라인 AI API 호출 시도 (Gemini 또는 OpenAI)
-    if api_key:
-        try:
-            import json
-            import urllib.request
+    # 엔진별 재번역 호출
+    if engine_key == "local_ai":
+        raw_res = translation_engines.translate_local_ai(
+            texts, custom_url, ai_model, api_key=api_key,
+            glossary=glossary, target_lang=target_lang, log_callback=log_callback
+        )
+    elif engine_key == "deepseek":
+        raw_res = translation_engines.translate_local_ai(
+            texts, "https://api.deepseek.com/v1", ai_model or "deepseek-flash", api_key=api_key,
+            glossary=glossary, target_lang=target_lang, log_callback=log_callback
+        )
+    elif engine_key == "claude":
+        raw_res = translation_engines.translate_local_ai(
+            texts, "https://api.anthropic.com/v1", ai_model or "claude-haiku-5-5", api_key=api_key,
+            glossary=glossary, target_lang=target_lang, log_callback=log_callback
+        )
+    elif engine_key == "deepl":
+        raw_res = [translation_engines.translate_deepl(t, api_key, is_pro=is_paid, target_lang=target_lang) for t in texts]
+    elif engine_key == "openai":
+        raw_res = [translation_engines.translate_openai(t, api_key, glossary=glossary, ai_model=ai_model, target_lang=target_lang) for t in texts]
+    elif engine_key == "google":
+        raw_res = [translation_engines.translate_google(t, api_key, target_lang=target_lang) for t in texts]
+    else:
+        raw_res = translation_engines.translate_gemini_batch(
+            texts, api_key, is_paid=is_paid, glossary=glossary,
+            ai_model=ai_model, target_lang=target_lang, log_callback=log_callback
+        )
 
-            clean_src = str(src_text).strip()
-            prompt = (
-                f"You are a professional Minecraft translator.\n"
-                f"Generate exactly 3 natural, accurate Korean translation candidates for this Minecraft text:\n"
-                f"Source: \"{clean_src}\"\n"
-                f"Current translation (may have errors, missing words, or extra garbage): \"{current_tgt}\"\n"
-                f"Output strictly valid JSON with key 'candidates' as array of 3 strings: "
-                f"{{\"candidates\": [\"Candidate 1 (Official Minecraft Style / Full translation)\", \"Candidate 2 (Concise / Natural gamer style)\", \"Candidate 3 (Transliterated / Alternative style)\"]}}"
-            )
+    cleaned_res = []
+    for orig, res in zip(texts, raw_res):
+        if res is None:
+            res = orig
+        cleaned_res.append(sanitize_minecraft_formatting(orig, str(res).strip()))
 
-            # OpenAI
-            if engine and "openai" in str(engine).lower():
-                url = "https://api.openai.com/v1/chat/completions"
-                headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-                payload = {
-                    "model": ai_model or "gpt-4o-mini",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.3,
-                    "response_format": {"type": "json_object"}
-                }
-                req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    resp_data = json.loads(resp.read().decode('utf-8'))
-                    content = resp_data["choices"][0]["message"]["content"]
-                    parsed = json.loads(content)
-                    raw_cands = parsed.get("candidates", [])
-                    types = ["표준/공식", "간결형", "음차/대안"]
-                    for idx, c in enumerate(raw_cands[:3]):
-                        if c and str(c).strip():
-                            candidates.append({"type": types[idx] if idx < len(types) else "추천", "text": str(c).strip()})
-            else:
-                # Gemini
-                model_name = ai_model or "gemini-1.5-flash"
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-                headers = {"Content-Type": "application/json"}
-                payload = {
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.3, "responseMimeType": "application/json"}
-                }
-                req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    resp_data = json.loads(resp.read().decode('utf-8'))
-                    content = resp_data["candidates"][0]["content"]["parts"][0]["text"]
-                    parsed = json.loads(content)
-                    raw_cands = parsed.get("candidates", [])
-                    types = ["표준/공식", "간결형", "음차/대안"]
-                    for idx, c in enumerate(raw_cands[:3]):
-                        if c and str(c).strip():
-                            candidates.append({"type": types[idx] if idx < len(types) else "추천", "text": str(c).strip()})
-        except Exception as e:
-            logging.debug(f"AI 후보 생성 API 호출 실패: {e}")
-
-    # 2. 로컬 룰베이스 폴백 (API 실패 또는 미설정 시)
-    if not candidates:
-        from constants import DEFAULT_GLOSSARY
-        clean_s = str(src_text).strip()
-
-        merged_glossary = dict(DEFAULT_GLOSSARY)
-        if glossary and isinstance(glossary, dict):
-            merged_glossary.update(glossary)
-
-        direct_match = merged_glossary.get(clean_s)
-        if direct_match and direct_match != current_tgt:
-            candidates.append({"type": "용어집", "text": direct_match})
-
-        try:
-            import translation_word
-            if translation_word and translation_word._proper_nouns:
-                p_match = translation_word._proper_nouns.get(clean_s.lower())
-                if p_match and p_match != current_tgt:
-                    candidates.append({"type": "고유명사", "text": p_match})
-        except Exception:
-            pass
-
-        # 단어 분할 번역 조합
-        words = clean_s.split()
-        if len(words) > 1:
-            trans_words = [merged_glossary.get(w, merged_glossary.get(w.capitalize(), w)) for w in words]
-            comb_text = " ".join(trans_words)
-            if comb_text != clean_s and comb_text != current_tgt:
-                candidates.append({"type": "조합형", "text": comb_text})
-
-        # 기호 및 마크다운 오염 제거형
-        if current_tgt:
-            clean_tgt = re.sub(r'[\*\"\'\[\]§&][0-9a-fk-orA-FK-OR]?', '', current_tgt).strip()
-            if clean_tgt and clean_tgt != current_tgt:
-                candidates.append({"type": "기호제거", "text": clean_tgt})
-
-    # 중복 제거
-    unique_candidates = []
-    seen = {current_tgt.strip()}
-    for c in candidates:
-        t = c["text"].strip()
-        if t not in seen:
-            seen.add(t)
-            unique_candidates.append(c)
-
-    return unique_candidates[:3]
+    return cleaned_res

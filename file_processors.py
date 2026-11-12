@@ -162,12 +162,13 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                 if not is_mock:
                     is_item = is_item_flags[idx_in_global] if is_item_flags else False
                     is_book = is_book_flags[idx_in_global] if is_book_flags else False
+                    m_tier = translation_memory.get_model_tier(ai_model)
                     if is_item:
-                        translation_memory.add_item_to_memory(orig, res, target_lang)
+                        translation_memory.add_item_to_memory(orig, res, target_lang, tier=m_tier)
                     elif is_book:
-                        translation_memory.add_book_to_memory(orig, res, target_lang)
+                        translation_memory.add_book_to_memory(orig, res, target_lang, tier=m_tier)
                     else:
-                        translation_memory.add_to_memory(orig, res, target_lang)
+                        translation_memory.add_to_memory(orig, res, target_lang, tier=m_tier)
 
     # 조립 완료된 항목들을 우선 메모리에 즉시 반영
     if assembled_count > 0:
@@ -198,6 +199,10 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
 
                 if engine_key == "local_ai":
                     res = translate_local_ai(texts_chunk, custom_url, ai_model, api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
+                elif engine_key == "deepseek":
+                    res = translate_local_ai(texts_chunk, "https://api.deepseek.com/v1", ai_model or "deepseek-flash", api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
+                elif engine_key == "claude":
+                    res = translate_local_ai(texts_chunk, "https://api.anthropic.com/v1", ai_model or "claude-haiku-5-5", api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
                 elif engine_key == "deepl":
                     res = [translate_deepl(t, api_key, is_pro=is_paid, reference_map=reference_map, target_lang=target_lang) for t in texts_chunk]
                 elif engine_key == "openai":
@@ -232,7 +237,7 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                         log_callback(f"⏳ {log_prefix} (병렬) [{completed_items}/{total_unique}]")
         else:
             # 무료 제미나이, Local AI, 또는 순차 번역
-            batch_size = 40 if engine_key in ("gemini_batch", "local_ai") else 15
+            batch_size = 40 if engine_key in ("gemini_batch", "local_ai", "deepseek", "claude") else 15
             completed_items = assembled_count
             for i in range(0, total_llm, batch_size):
                 if cancel_checker and cancel_checker():
@@ -250,6 +255,10 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
 
                 if engine_key == "local_ai":
                     res_texts = translate_local_ai(texts_chunk, custom_url, ai_model, api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
+                elif engine_key == "deepseek":
+                    res_texts = translate_local_ai(texts_chunk, "https://api.deepseek.com/v1", ai_model or "deepseek-flash", api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
+                elif engine_key == "claude":
+                    res_texts = translate_local_ai(texts_chunk, "https://api.anthropic.com/v1", ai_model or "claude-haiku-5-5", api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
                 elif engine_key == "deepl":
                     res_texts = [translate_deepl(t, api_key, is_pro=False, reference_map=reference_map, target_lang=target_lang) for t in texts_chunk]
                 elif engine_key == "openai":
@@ -598,7 +607,7 @@ def _translate_hqm_texts(targets, engine_key, api_key, is_paid, progress_callbac
     if total == 0:
         return []
 
-    if engine_key == "gemini_batch":
+    if engine_key in ("gemini_batch", "openai", "claude", "deepseek", "local_ai"):
         res_texts = _run_batch_jobs(
             targets,
             lambda item: item["text"],
@@ -653,7 +662,7 @@ def _translate_hqm_texts_entries(entries, engine_key, api_key, is_paid, progress
     if total == 0:
         return translated_texts
 
-    if engine_key in ("gemini_batch", "local_ai"):
+    if engine_key in ("gemini_batch", "openai", "claude", "deepseek", "local_ai"):
         log_pref = "초고속 HQM 텍스트 덩어리 번역" if is_paid else "HQM 텍스트 번역"
         if engine_key == "local_ai": log_pref = "Local AI HQM 텍스트 번역"
         res_texts = _run_batch_jobs(
