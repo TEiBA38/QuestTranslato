@@ -861,8 +861,10 @@ def hotpatch_resource_pack(pack_zip_path, old_tgt, new_tgt):
                 
     if changed:
         shutil.move(temp_path, pack_zip_path)
+        return True
     else:
         os.remove(temp_path)
+        return False
 
 
 

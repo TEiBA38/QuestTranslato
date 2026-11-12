@@ -132,6 +132,219 @@ def delete_memory_entry(category, original_src, target_lang="한국어 (Korean)"
     return True
 
 
+def patch_modpack_files(modpack_dir, old_tgt, new_tgt):
+    """
+    모드팩 폴더 내 퀘스트, 리소스팩/언어, 가이드북 파일들을 초고속 스캔하여
+    텍스트를 인플레이스(In-place) 치환하고 카테고리별 수정 파일 개수를 반환합니다.
+    """
+    if not modpack_dir or not os.path.isdir(modpack_dir) or not old_tgt or not new_tgt:
+        return {"modpack_name": "", "total": 0, "quests": 0, "lang_resources": 0, "books": 0}
+
+    import glob
+    mp_name = os.path.basename(modpack_dir.rstrip(os.sep))
+    results = {"modpack_name": mp_name, "total": 0, "quests": 0, "lang_resources": 0, "books": 0}
+
+    # 1. 퀘스트 파일 탐색 (.snbt, .json)
+    quest_patterns = [
+        os.path.join(modpack_dir, "config", "ftbquests", "quests", "**", "*.snbt"),
+        os.path.join(modpack_dir, "defaultconfigs", "ftbquests", "quests", "**", "*.snbt"),
+        os.path.join(modpack_dir, "config", "betterquesting", "**", "*.json"),
+        os.path.join(modpack_dir, "config", "hqm", "**", "*.json"),
+    ]
+    quest_files = set()
+    for p in quest_patterns:
+        quest_files.update(glob.glob(p, recursive=True))
+
+    # 2. 리소스팩 및 언어 파일 탐색 (.json, .lang)
+    lang_patterns = [
+        os.path.join(modpack_dir, "kubejs", "assets", "**", "lang", "*.json"),
+        os.path.join(modpack_dir, "resourcepacks", "**", "lang", "*.json"),
+        os.path.join(modpack_dir, "resourcepacks", "**", "lang", "*.lang"),
+    ]
+    lang_files = set()
+    for p in lang_patterns:
+        lang_files.update(glob.glob(p, recursive=True))
+
+    # 3. 가이드북 파일 탐색 (patchouli_books)
+    book_patterns = [
+        os.path.join(modpack_dir, "patchouli_books", "**", "*.json"),
+        os.path.join(modpack_dir, "config", "patchouli_books", "**", "*.json"),
+    ]
+    book_files = set()
+    for p in book_patterns:
+        book_files.update(glob.glob(p, recursive=True))
+
+    def _patch_file(filepath):
+        try:
+            if not os.path.isfile(filepath):
+                return False
+            if filepath.lower().endswith(('.zip', '.jar', '.png', '.ogg', '.bak', '.bak.gz')):
+                return False
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            if old_tgt in content:
+                new_content = content.replace(old_tgt, new_tgt)
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                return True
+        except Exception as e:
+            logging.debug(f"파일 핫패치 오류 ({filepath}): {e}")
+        return False
+
+    for qf in quest_files:
+        if _patch_file(qf):
+            results["quests"] += 1
+            results["total"] += 1
+
+    for lf in lang_files:
+        if _patch_file(lf):
+            results["lang_resources"] += 1
+            results["total"] += 1
+
+    for bf in book_files:
+        if _patch_file(bf):
+            results["books"] += 1
+            results["total"] += 1
+
+    # 4. 리소스팩 ZIP 파일 내부 핫패치
+    try:
+        import mod_jar_extractor
+        candidates = glob.glob(os.path.join(modpack_dir, f"{mp_name}[*].zip"))
+        candidates.extend(glob.glob(os.path.join(modpack_dir, "resourcepacks", f"{mp_name}[*].zip")))
+        legacy = os.path.join(modpack_dir, "QuestTranslatorPro_Pack.zip")
+        if os.path.exists(legacy):
+            candidates.append(legacy)
+
+        for pz in set(candidates):
+            try:
+                changed = mod_jar_extractor.hotpatch_resource_pack(pz, old_tgt, new_tgt)
+                if changed:
+                    results["lang_resources"] += 1
+                    results["total"] += 1
+            except Exception as ze:
+                logging.debug(f"ZIP 리소스팩 핫패치 오류 ({pz}): {ze}")
+    except Exception as e:
+        logging.debug(f"리소스팩 핫패치 모듈 호출 실패: {e}")
+
+    return results
+
+
+def patch_modpack_batch_files(modpack_dir, batch_changes):
+    """
+    일괄 치환 시 모드팩 파일들을 단 1회 순회하여 모든 치환 대상(batch_changes)을
+    동시에 일괄 치환(In-place)하고 카테고리별 수정 파일 개수를 반환합니다.
+    """
+    if not modpack_dir or not os.path.isdir(modpack_dir) or not batch_changes:
+        return {"modpack_name": "", "total": 0, "quests": 0, "lang_resources": 0, "books": 0}
+
+    import glob
+    mp_name = os.path.basename(modpack_dir.rstrip(os.sep))
+    results = {"modpack_name": mp_name, "total": 0, "quests": 0, "lang_resources": 0, "books": 0}
+
+    pairs = []
+    for ch in batch_changes:
+        o = ch.get("old_tgt", "")
+        n = ch.get("new_tgt", "")
+        if o and n is not None and o != n:
+            pairs.append((o, n))
+
+    if not pairs:
+        return results
+
+    # 1. 퀘스트 파일 탐색
+    quest_patterns = [
+        os.path.join(modpack_dir, "config", "ftbquests", "quests", "**", "*.snbt"),
+        os.path.join(modpack_dir, "defaultconfigs", "ftbquests", "quests", "**", "*.snbt"),
+        os.path.join(modpack_dir, "config", "betterquesting", "**", "*.json"),
+        os.path.join(modpack_dir, "config", "hqm", "**", "*.json"),
+    ]
+    quest_files = set()
+    for p in quest_patterns:
+        quest_files.update(glob.glob(p, recursive=True))
+
+    # 2. 리소스팩 및 언어 파일 탐색
+    lang_patterns = [
+        os.path.join(modpack_dir, "kubejs", "assets", "**", "lang", "*.json"),
+        os.path.join(modpack_dir, "resourcepacks", "**", "lang", "*.json"),
+        os.path.join(modpack_dir, "resourcepacks", "**", "lang", "*.lang"),
+    ]
+    lang_files = set()
+    for p in lang_patterns:
+        lang_files.update(glob.glob(p, recursive=True))
+
+    # 3. 가이드북 파일 탐색
+    book_patterns = [
+        os.path.join(modpack_dir, "patchouli_books", "**", "*.json"),
+        os.path.join(modpack_dir, "config", "patchouli_books", "**", "*.json"),
+    ]
+    book_files = set()
+    for p in book_patterns:
+        book_files.update(glob.glob(p, recursive=True))
+
+    def _patch_file_multi(filepath):
+        try:
+            if not os.path.isfile(filepath):
+                return False
+            if filepath.lower().endswith(('.zip', '.jar', '.png', '.ogg', '.bak', '.bak.gz')):
+                return False
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+
+            modified = False
+            for old_val, new_val in pairs:
+                if old_val in content:
+                    content = content.replace(old_val, new_val)
+                    modified = True
+
+            if modified:
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                return True
+        except Exception as e:
+            logging.debug(f"일괄 핫패치 오류 ({filepath}): {e}")
+        return False
+
+    for qf in quest_files:
+        if _patch_file_multi(qf):
+            results["quests"] += 1
+            results["total"] += 1
+
+    for lf in lang_files:
+        if _patch_file_multi(lf):
+            results["lang_resources"] += 1
+            results["total"] += 1
+
+    for bf in book_files:
+        if _patch_file_multi(bf):
+            results["books"] += 1
+            results["total"] += 1
+
+    # ZIP 리소스팩 핫패치
+    try:
+        import mod_jar_extractor
+        candidates = glob.glob(os.path.join(modpack_dir, f"{mp_name}[*].zip"))
+        candidates.extend(glob.glob(os.path.join(modpack_dir, "resourcepacks", f"{mp_name}[*].zip")))
+        legacy = os.path.join(modpack_dir, "QuestTranslatorPro_Pack.zip")
+        if os.path.exists(legacy):
+            candidates.append(legacy)
+
+        for pz in set(candidates):
+            zip_changed = False
+            for old_val, new_val in pairs:
+                try:
+                    if mod_jar_extractor.hotpatch_resource_pack(pz, old_val, new_val):
+                        zip_changed = True
+                except Exception:
+                    pass
+            if zip_changed:
+                results["lang_resources"] += 1
+                results["total"] += 1
+    except Exception as e:
+        logging.debug(f"ZIP 리소스팩 일괄 패치 오류: {e}")
+
+    return results
+
+
 # ====================================================================
 # 오역률 및 음운 분석 엔진 (Two-Pillar Validation + WordNet)
 # ====================================================================

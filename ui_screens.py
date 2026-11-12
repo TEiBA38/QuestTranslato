@@ -707,8 +707,16 @@ class UIScreensMixin:
         )
         btn_search.pack(side="left", padx=(0, 8))
 
+        btn_guide = ctk.CTkButton(
+            search_row, text="💡 인게임 반영 가이드", width=145, height=28,
+            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+            fg_color="#854d0e", hover_color="#a16207",
+            command=lambda: open_guide_modal()
+        )
+        btn_guide.pack(side="right", padx=(6, 0))
+
         btn_add_data = ctk.CTkButton(
-            search_row, text="➕ 새 번역 추가", width=125, height=28,
+            search_row, text="➕ 새 번역 추가", width=115, height=28,
             font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
             fg_color="#0284c7", hover_color="#0369a1",
             command=lambda: open_add_dialog()
@@ -993,28 +1001,199 @@ class UIScreensMixin:
         tree.bind("<ButtonRelease-1>", on_tree_click)
         tree.bind("<space>", on_space_key)
 
+        def open_guide_modal():
+            guide_win = ctk.CTkToplevel(editor)
+            guide_win.title("💡 인게임 반영 가이드 & 주의사항")
+            guide_win.geometry("660x680")
+            guide_win.minsize(560, 520)
+            guide_win.grab_set()
+
+            scroller = ctk.CTkScrollableFrame(guide_win, fg_color="#121216", corner_radius=8)
+            scroller.pack(fill="both", expand=True, padx=16, pady=16)
+
+            # 1. ⚠️ 최상단 강조 경고 배너
+            warn_frame = ctk.CTkFrame(scroller, fg_color="#271c06", border_width=2, border_color="#f59e0b", corner_radius=8)
+            warn_frame.pack(fill="x", pady=(0, 14))
+
+            ctk.CTkLabel(
+                warn_frame,
+                text="⚠️ 이 세션 이전에 번역한 파일들은 수정한 내역이 변경되지 않습니다!",
+                font=ctk.CTkFont(family=FONT_NAME, size=13, weight="bold"),
+                text_color="#fde68a"
+            ).pack(anchor="w", padx=14, pady=(12, 4))
+
+            ctk.CTkLabel(
+                warn_frame,
+                text="오역 수정 이후에 다시 번역을 돌려 파일을 교체하시는 것을 추천드립니다.",
+                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                text_color="#fef3c7"
+            ).pack(anchor="w", padx=14, pady=(0, 12))
+
+            # 2. 기본 적용 규칙 안내
+            rule_frame = ctk.CTkFrame(scroller, fg_color="#1a1a22", corner_radius=8)
+            rule_frame.pack(fill="x", pady=(0, 14))
+
+            ctk.CTkLabel(
+                rule_frame, text="🎮 기본 반영 안내",
+                font=ctk.CTkFont(family=FONT_NAME, size=13, weight="bold"),
+                text_color="#38bdf8"
+            ).pack(anchor="w", padx=14, pady=(10, 4))
+
+            ctk.CTkLabel(
+                rule_frame,
+                text="• 마인크래프트를 끈 상태에서 수정 후 게임 실행 시 ➡️ [100% 자동 적용]\n• 마인크래프트가 켜져 있는 상태 ➡️ 아래 상황별 새로고침 명령어를 사용하세요.",
+                font=ctk.CTkFont(family=FONT_NAME, size=11), justify="left", text_color="#cbd5e1"
+            ).pack(anchor="w", padx=14, pady=(0, 10))
+
+            # 3. 상황별 인게임 새로고침 방법 (4개 독립 숨김 박스)
+            ctk.CTkLabel(
+                scroller, text="📋 상황별 인게임 새로고침 방법 (클릭하여 펼치기)",
+                font=ctk.CTkFont(family=FONT_NAME, size=13, weight="bold"),
+                text_color="#f1f5f9"
+            ).pack(anchor="w", pady=(4, 8))
+
+            cases = [
+                (
+                    "1. 퀘스트 모드 계열 (FTB Quests, Better Questing, HQM 등)",
+                    "• FTB Quests (1.12 ~ 1.20+): /ftbquests reload\n"
+                    "• Better Questing (1.7.10 ~ 1.12.2): /bq_admin default load\n"
+                    "• Hardcore Questing Mode (HQM): /hqm reload\n"
+                    "• Custom NPCs (퀘스트/대화): 대화창 닫고 다시 열기 또는 /reload"
+                ),
+                (
+                    "2. 아이템명 / 블록명 / 모드 언어 파일 (리소스팩)",
+                    "• 모든 모드 언어 파일 (.lang, ko_kr.json): [ F3 + T ] (단축키)\n"
+                    "  ※ 치트 권한 불필요! 인게임에서 리소스팩 전체를 즉시 다시 읽어 들입니다.\n"
+                    "• KubeJS 아이템/툴팁 스크립트: /kubejs reload client_scripts"
+                ),
+                (
+                    "3. 가이드북 및 레시피 모드 (Patchouli, 데이터팩)",
+                    "• 패출리 책 (Patchouli Books): /patchouli reload 또는 [ F3 + T ]\n"
+                    "• 데이터팩 / 레시피: /reload"
+                ),
+                (
+                    "4. 치트 권한(OP)이 없는 경우 (싱글 LAN 열기, 멀티 등)",
+                    "• 싱글플레이: ESC ➡️ 'LAN 서버 열기' ➡️ [치트 허용: ON] 후 명령어 입력\n"
+                    "• 멀티플레이 / 치트 불가 시: 월드 재접속(서버 재접속) 또는 마인크래프트 재실행"
+                ),
+            ]
+
+            for idx, (title, content) in enumerate(cases):
+                acc_container = ctk.CTkFrame(scroller, fg_color="#181820", corner_radius=6, border_width=1, border_color="#2b2b36")
+                acc_container.pack(fill="x", pady=4)
+
+                body_frame = ctk.CTkFrame(acc_container, fg_color="#121218", corner_radius=4)
+                ctk.CTkLabel(
+                    body_frame, text=content,
+                    font=ctk.CTkFont(family="Consolas" if os.name == 'nt' else FONT_NAME, size=11),
+                    justify="left", text_color="#93c5fd"
+                ).pack(anchor="w", padx=12, pady=10)
+
+                def make_toggle(b_frame, btn_ref, item_title):
+                    is_open = [False]
+                    def _toggle():
+                        is_open[0] = not is_open[0]
+                        if is_open[0]:
+                            b_frame.pack(fill="x", padx=6, pady=(0, 6))
+                            btn_ref.configure(text=f"▼  {item_title}", text_color="#67e8f9")
+                        else:
+                            b_frame.pack_forget()
+                            btn_ref.configure(text=f"▶  {item_title}", text_color="#e2e8f0")
+                    return _toggle
+
+                btn_toggle = ctk.CTkButton(
+                    acc_container, text=f"▶  {title}", anchor="w",
+                    font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+                    fg_color="transparent", hover_color="#242430", text_color="#e2e8f0",
+                    height=32
+                )
+                btn_toggle.pack(fill="x", padx=4, pady=2)
+                toggle_cmd = make_toggle(body_frame, btn_toggle, title)
+                btn_toggle.configure(command=toggle_cmd)
+
+            # 4. 작업 주의사항 프레임
+            caution_frame = ctk.CTkFrame(scroller, fg_color="#1a1a22", corner_radius=8)
+            caution_frame.pack(fill="x", pady=(14, 4))
+
+            ctk.CTkLabel(
+                caution_frame, text="💡 작업 주의사항",
+                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                text_color="#a3e635"
+            ).pack(anchor="w", padx=14, pady=(10, 4))
+
+            ctk.CTkLabel(
+                caution_frame,
+                text="• 단어 일괄 치환 시 너무 짧은 1~2글자 일반 단어(조사 등) 치환에 주의하세요.\n"
+                     "• 공백(' ') 치환 시 해당 단어가 문장에서 완전히 삭제됩니다.\n"
+                     "• 잘못 수정했더라도 디스코드 알림이나 [되돌리기]를 통해 언제든 복구할 수 있습니다.",
+                font=ctk.CTkFont(family=FONT_NAME, size=11), justify="left", text_color="#cbd5e1"
+            ).pack(anchor="w", padx=14, pady=(0, 10))
+
+            btn_close = ctk.CTkButton(
+                guide_win, text="닫기", height=32,
+                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                fg_color="#334155", hover_color="#475569",
+                command=guide_win.destroy
+            )
+            btn_close.pack(pady=(0, 12))
+
         def apply_hotpatch(old_tgt, new_tgt):
             import temp_session_logger
             if temp_session_logger.is_debug_mode():
-                self.log(f"🧪 [테스트 모드] 리소스팩 파일 수정을 건너뜁니다. ({old_tgt} ➡️ {new_tgt})")
+                self.log(f"🧪 [테스트 모드] 모드팩 파일 수정을 건너뜁니다. ({old_tgt} ➡️ {new_tgt})")
                 return
-            if hasattr(self.app_state, 'modpack_dir') and self.app_state.modpack_dir:
-                import os, glob
-                import mod_jar_extractor
-                mp_dir = self.app_state.modpack_dir
-                mp_name = os.path.basename(mp_dir.rstrip(os.sep))
-                candidates = glob.glob(os.path.join(mp_dir, f"{mp_name}[*].zip"))
-                candidates.extend(glob.glob(os.path.join(mp_dir, "resourcepacks", f"{mp_name}[*].zip")))
-                legacy = os.path.join(mp_dir, "QuestTranslatorPro_Pack.zip")
-                if os.path.exists(legacy):
-                    candidates.append(legacy)
 
-                for pz in set(candidates):
-                    try:
-                        mod_jar_extractor.hotpatch_resource_pack(pz, old_tgt, new_tgt)
-                        self.log(f"✅ 리소스팩({os.path.basename(pz)}) 핫패치 완료! ({old_tgt} ➡️ {new_tgt})")
-                    except Exception as e:
-                        self.log(f"⚠️ 리소스팩 핫패치 실패 ({os.path.basename(pz)}): {e}")
+            mp_dir = getattr(self.app_state, 'modpack_dir', None) or getattr(self, 'selected_modpack_path', None)
+            if not mp_dir or not os.path.isdir(mp_dir):
+                return
+
+            try:
+                import translation_editor
+                res = translation_editor.patch_modpack_files(mp_dir, old_tgt, new_tgt)
+                mp_name = res.get("modpack_name") or os.path.basename(mp_dir.rstrip(os.sep))
+                total = res.get("total", 0)
+                quests = res.get("quests", 0)
+                lang_res = res.get("lang_resources", 0)
+                books = res.get("books", 0)
+
+                if total > 0:
+                    self.log(
+                        f"⚡ [모드팩 파일 즉시 패치] '{mp_name}' 파일 총 {total}개 수정 완료 "
+                        f"(퀘스트: {quests}개, 리소스팩/아이템: {lang_res}개, 가이드북: {books}개)"
+                    )
+                else:
+                    self.log(f"ℹ️ [번역 메모리 갱신] 캐시 및 클라우드 DB에 반영되었습니다. ('{mp_name}' 모드팩 내 일치 항목 0개)")
+            except Exception as e:
+                self.log(f"⚠️ 모드팩 파일 즉시 패치 중 오류 발생: {e}")
+
+        def apply_batch_hotpatch(batch_changes):
+            import temp_session_logger
+            if temp_session_logger.is_debug_mode():
+                self.log(f"🧪 [테스트 모드] 모드팩 파일 일괄 수정을 건너뜁니다. ({len(batch_changes)}건)")
+                return
+
+            mp_dir = getattr(self.app_state, 'modpack_dir', None) or getattr(self, 'selected_modpack_path', None)
+            if not mp_dir or not os.path.isdir(mp_dir):
+                return
+
+            try:
+                import translation_editor
+                res = translation_editor.patch_modpack_batch_files(mp_dir, batch_changes)
+                mp_name = res.get("modpack_name") or os.path.basename(mp_dir.rstrip(os.sep))
+                total = res.get("total", 0)
+                quests = res.get("quests", 0)
+                lang_res = res.get("lang_resources", 0)
+                books = res.get("books", 0)
+
+                if total > 0:
+                    self.log(
+                        f"⚡ [모드팩 파일 즉시 패치] '{mp_name}' 파일 총 {total}개 일괄 치환 완료 "
+                        f"(퀘스트: {quests}개, 리소스팩/아이템: {lang_res}개, 가이드북: {books}개)"
+                    )
+                else:
+                    self.log(f"ℹ️ [번역 메모리 갱신] 캐시 및 클라우드 DB에 반영되었습니다. ('{mp_name}' 모드팩 내 일치 항목 0개)")
+            except Exception as e:
+                self.log(f"⚠️ 모드팩 파일 즉시 일괄 패치 중 오류 발생: {e}")
 
         def register_glossary_rule(src, tgt):
             if not chk_glossary_var.get() or not src or not tgt:
@@ -1184,11 +1363,11 @@ class UIScreensMixin:
                             (translation_memory._books_cache if item["category"] == "books" else translation_memory._global_cache)
                         )
                         translation_memory._store(cache_dict, item["src"], new_tgt, "한국어(Korean)")
-                    apply_hotpatch(old_tgt, new_tgt)
                     updated_count += 1
 
             if updated_count > 0:
                 translation_memory.save_memory(flush_now=True)
+                apply_batch_hotpatch(batch_changes)
                 action_text = f"단어 삭제: '{find_term}' 제거" if is_deletion else f"일괄 치환: '{find_term}' ➡️ '{repl_term}'"
                 translation_memory.dispatch_batch_audit_report(
                     batch_changes, error_rate=err_rate, validity=val_rate, verdict=verdict,

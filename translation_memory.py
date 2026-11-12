@@ -1398,6 +1398,8 @@ from translation_editor import (
     search_memory,
     update_memory_entry,
     delete_memory_entry,
+    patch_modpack_files,
+    patch_modpack_batch_files,
     _decompose_korean,
     _compare_syllables_phonetic,
     _CORE_MINECRAFT_DICT,
