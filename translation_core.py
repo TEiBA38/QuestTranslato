@@ -121,7 +121,7 @@ def _generate_zip_review_report(context, raw_dir, out_dir, report_title):
                     with open(dst_path, 'r', encoding='utf-8', errors='ignore') as fh:
                         dst = fh.read()
                     review_items.append((rel_p, analyze_snbt_texts(src, dst)))
-                elif f.lower().endswith(('.json', '.lang')):
+                elif f.lower().endswith('.json'):
                     with open(src_path, encoding='utf-8', errors='ignore') as fh:
                         src = json.load(fh)
                     with open(dst_path, encoding='utf-8', errors='ignore') as fh:
@@ -175,6 +175,8 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
     out_dir, completed_set, resuming = context.ask_resume(candidates, out_dir)
     if out_dir is None:
         return # Cancelled by user
+    if hasattr(context, "app"):
+        context.app._translation_out_dir = out_dir
 
     try:
         if os.path.exists(raw_dir):
@@ -324,6 +326,8 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                         hqm_content, engine_key, api_key, is_paid,
                         progress_callback=hqm_progress_cb,
                         log_callback=context.log, cancel_checker=context.is_cancelled, glossary=glossary, ai_model=ai_model, target_lang=target_lang, custom_url=custom_url)
+                except (TranslationCancelledError, QuotaExceededError):
+                    raise
                 except Exception as exc:
                     context.log(f"⚠️ [{os.path.basename(file_path)}] HQM 처리 경고: {exc}")
                     translated_hqm = hqm_content
@@ -476,7 +480,8 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                     context.log("🧠 [AI 자동 추출] 번역 시작 전 모드팩 핵심 단어를 추출하여 단어장을 진화시킵니다...")
                     from translation_engines import auto_extract_glossary
                     extracted_glossary = auto_extract_glossary(
-                        sample_subset, engine_key, api_key, ai_model, target_lang, custom_url
+                        sample_subset, engine_key, api_key, ai_model, target_lang, custom_url,
+                        is_paid=is_paid, cancel_checker=context.is_cancelled
                     )
                     
                     if extracted_glossary:
@@ -493,7 +498,7 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                                 app.app_state.glossaries_by_lang[target_lang] = {}
                             app.app_state.glossaries_by_lang[target_lang].update(clean_extracted)
                             if hasattr(app, "save_user_settings"):
-                                app.save_user_settings()
+                                app.after(0, app.save_user_settings)
                 elif len(uncached_samples) > 0:
                     context.log(f"💾 새로 번역할 텍스트가 {len(uncached_samples)}개로 적어 용어 추출을 건너뜁니다.")
                 else:

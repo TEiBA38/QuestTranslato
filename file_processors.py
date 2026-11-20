@@ -9,10 +9,10 @@ from translation_engines import (
     TranslationCancelledError,
     is_code_or_id,
     normalize_reference_text,
-    translate_deepl,
-    translate_google,
-    translate_openai,
+    translate_openai_batch,
     translate_gemini_batch,
+    translate_claude,
+    translate_deepseek,
     translate_local_ai,
 )
 
@@ -183,41 +183,89 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
             translation_memory.save_memory(flush_now=True)
         return translated_results
 
+    def _chunk_entries_by_points(entries, max_points=240, word_pts=1, sentence_pts=3, long_pts=10, long_char_threshold=250, overflow_tolerance=2):
+        """가중치 점수 기반으로 배치 청크를 분할합니다.
+        - 단어/아이템(is_item=True, 250자 미만): 1점 (무료 최대 240개)
+        - 일반 문장(is_item=False, 250자 미만): 3점 (무료 최대 80개)
+        - 장문/가이드북(250자 이상): 10점 (무료 최대 24개)
+        - 문장(3점)/장문(10점) 조합으로 정확히 max_points에 안 떨어질 때는 +overflow_tolerance(+2점)까지 수용"""
+        chunks_out = []
+        cur_chunk = []
+        cur_points = 0
+        for entry in entries:
+            u_idx, txt = entry[0], str(entry[1])
+            is_word = bool(unique_is_item[u_idx]) if u_idx < len(unique_is_item) else False
+            if len(txt) >= long_char_threshold:
+                # 250~600자는 10점, 초장문(1,200~3,000자 등)은 길이에 비례해 가중치 상향하여 출력 토큰 잘림 방지
+                pts = long_pts * max(1, (len(txt) + 599) // 600)
+            elif is_word:
+                pts = word_pts
+            else:
+                pts = sentence_pts
+
+            if cur_chunk and (cur_points >= max_points or (cur_points + pts) > (max_points + overflow_tolerance)):
+                chunks_out.append(cur_chunk)
+                cur_chunk = [entry]
+                cur_points = pts
+            else:
+                cur_chunk.append(entry)
+                cur_points += pts
+        if cur_chunk:
+            chunks_out.append(cur_chunk)
+        return chunks_out
+
     total_llm = len(llm_target_entries)
+    is_free_gemini_lite = (
+        (not is_paid)
+        and engine_key == "gemini_batch"
+        and ("lite" in str(ai_model or "gemini-3.5-flash-lite").lower())
+    )
 
     try:
-        if is_paid:
-            batch_size = 50
-            chunks = [llm_target_entries[i:i + batch_size] for i in range(0, total_llm, batch_size)]
+        if is_paid or is_free_gemini_lite:
+            if is_free_gemini_lite:
+                # 무료 Gemini Flash-Lite (15 RPM): 최대 240점(+2 허용) + 2스레드 파이프라이닝으로 11~12 RPM 확보
+                chunks = _chunk_entries_by_points(llm_target_entries, max_points=240, word_pts=1, sentence_pts=3, long_pts=10, long_char_threshold=250, overflow_tolerance=2)
+                worker_count = min(2, len(chunks) or 1)
+            elif engine_key in ("gemini_batch", "openai", "claude", "deepseek"):
+                # 유료 클라우드 LLM: 최대 배치 150점(+2 허용) + 10스레드 병렬
+                chunks = _chunk_entries_by_points(llm_target_entries, max_points=150, word_pts=1, sentence_pts=3, long_pts=10, long_char_threshold=250, overflow_tolerance=2)
+                worker_count = min(10, len(chunks) or 1)
+            else:
+                batch_size = 50
+                chunks = [llm_target_entries[i:i + batch_size] for i in range(0, total_llm, batch_size)]
+                worker_count = min(10, len(chunks) or 1)
             completed_items = assembled_count
+            import threading
+            abort_event = threading.Event()
+
+            def _worker_cancel_checker():
+                return abort_event.is_set() or (bool(cancel_checker()) if cancel_checker else False)
 
             def process_chunk(entry_chunk):
-                if cancel_checker and cancel_checker():
+                if _worker_cancel_checker():
                     raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
                 texts_chunk = [entry[1] for entry in entry_chunk]
                 chunk_glossary = _build_chunk_glossary(texts_chunk, glossary)
 
                 if engine_key == "local_ai":
-                    res = translate_local_ai(texts_chunk, custom_url, ai_model, api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
+                    res = translate_local_ai(texts_chunk, custom_url, ai_model, api_key=api_key, log_callback=log_callback, cancel_checker=_worker_cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
                 elif engine_key == "deepseek":
-                    res = translate_local_ai(texts_chunk, "https://api.deepseek.com/v1", ai_model or "deepseek-flash", api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
+                    res = translate_deepseek(texts_chunk, api_key, ai_model=ai_model, log_callback=log_callback, cancel_checker=_worker_cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
                 elif engine_key == "claude":
-                    res = translate_local_ai(texts_chunk, "https://api.anthropic.com/v1", ai_model or "claude-haiku-5-5", api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
-                elif engine_key == "deepl":
-                    res = [translate_deepl(t, api_key, is_pro=is_paid, reference_map=reference_map, target_lang=target_lang) for t in texts_chunk]
+                    res = translate_claude(texts_chunk, api_key, ai_model=ai_model, log_callback=log_callback, cancel_checker=_worker_cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
                 elif engine_key == "openai":
-                    res = [translate_openai(t, api_key, reference_map=reference_map, glossary=chunk_glossary, ai_model=ai_model, target_lang=target_lang) for t in texts_chunk]
-                elif engine_key == "google":
-                    res = [translate_google(t, api_key, reference_map=reference_map, target_lang=target_lang) for t in texts_chunk]
+                    res = translate_openai_batch(texts_chunk, api_key, reference_map=reference_map, glossary=chunk_glossary, ai_model=ai_model, target_lang=target_lang, log_callback=log_callback, cancel_checker=_worker_cancel_checker)
                 else:
-                    res = translate_gemini_batch(texts_chunk, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=chunk_glossary, ai_model=ai_model, target_lang=target_lang)
+                    res = translate_gemini_batch(texts_chunk, api_key, is_paid, log_callback, _worker_cancel_checker, reference_map=reference_map, glossary=chunk_glossary, ai_model=ai_model, target_lang=target_lang)
                 return entry_chunk, res, chunk_glossary
 
-            with ThreadPoolExecutor(max_workers=min(8, len(chunks) or 1)) as executor:
+            executor = ThreadPoolExecutor(max_workers=worker_count)
+            try:
                 futures = [executor.submit(process_chunk, chunk) for chunk in chunks]
                 for future in as_completed(futures):
-                    if cancel_checker and cancel_checker():
-                        executor.shutdown(wait=False, cancel_futures=True)
+                    if _worker_cancel_checker():
+                        abort_event.set()
                         _flush_completed_to_memory()
                         translation_memory.save_memory()
                         raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
@@ -235,17 +283,24 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                         progress_callback(completed_items, total_unique)
                     if log_callback:
                         log_callback(f"⏳ {log_prefix} (병렬) [{completed_items}/{total_unique}]")
+            finally:
+                abort_event.set()
+                executor.shutdown(wait=False, cancel_futures=True)
         else:
-            # 무료 제미나이, Local AI, 또는 순차 번역
-            batch_size = 40 if engine_key in ("gemini_batch", "local_ai", "deepseek", "claude") else 15
+            # 무료 5 RPM 제미나이(3.8-flash/4-hydrogen), Local AI, 또는 순차 번역
+            if engine_key == "gemini_batch":
+                seq_chunks = _chunk_entries_by_points(llm_target_entries, max_points=240, word_pts=1, sentence_pts=3, long_pts=10, long_char_threshold=250, overflow_tolerance=2)
+            else:
+                batch_size = 40 if engine_key in ("local_ai", "deepseek", "claude") else 15
+                seq_chunks = [llm_target_entries[i:i + batch_size] for i in range(0, total_llm, batch_size)]
+
             completed_items = assembled_count
-            for i in range(0, total_llm, batch_size):
+            for entry_chunk in seq_chunks:
                 if cancel_checker and cancel_checker():
                     _flush_completed_to_memory()
                     translation_memory.save_memory()
                     raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
 
-                entry_chunk = llm_target_entries[i:i + batch_size]
                 texts_chunk = [entry[1] for entry in entry_chunk]
                 chunk_glossary = _build_chunk_glossary(texts_chunk, glossary)
 
@@ -256,15 +311,11 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                 if engine_key == "local_ai":
                     res_texts = translate_local_ai(texts_chunk, custom_url, ai_model, api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
                 elif engine_key == "deepseek":
-                    res_texts = translate_local_ai(texts_chunk, "https://api.deepseek.com/v1", ai_model or "deepseek-flash", api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
+                    res_texts = translate_deepseek(texts_chunk, api_key, ai_model=ai_model, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
                 elif engine_key == "claude":
-                    res_texts = translate_local_ai(texts_chunk, "https://api.anthropic.com/v1", ai_model or "claude-haiku-5-5", api_key=api_key, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
-                elif engine_key == "deepl":
-                    res_texts = [translate_deepl(t, api_key, is_pro=False, reference_map=reference_map, target_lang=target_lang) for t in texts_chunk]
+                    res_texts = translate_claude(texts_chunk, api_key, ai_model=ai_model, log_callback=log_callback, cancel_checker=cancel_checker, reference_map=reference_map, glossary=chunk_glossary, target_lang=target_lang)
                 elif engine_key == "openai":
-                    res_texts = [translate_openai(t, api_key, reference_map=reference_map, glossary=chunk_glossary, ai_model=ai_model, target_lang=target_lang) for t in texts_chunk]
-                elif engine_key == "google":
-                    res_texts = [translate_google(t, api_key, reference_map=reference_map, target_lang=target_lang) for t in texts_chunk]
+                    res_texts = translate_openai_batch(texts_chunk, api_key, reference_map=reference_map, glossary=chunk_glossary, ai_model=ai_model, target_lang=target_lang, log_callback=log_callback, cancel_checker=cancel_checker)
                 else:
                     res_texts = translate_gemini_batch(texts_chunk, api_key, is_paid, log_callback, cancel_checker, reference_map=reference_map, glossary=chunk_glossary, ai_model=ai_model, target_lang=target_lang)
                 
@@ -286,7 +337,7 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
         _flush_completed_to_memory()
         import translation_engines
         if not getattr(translation_engines, "MOCK_MODE", False):
-            translation_memory.save_memory(flush_now=True)
+            translation_memory.save_memory(flush_now=False)
         if temp_session_logger.is_debug_mode():
             saved_temp = temp_session_logger.save_temp_session()
             if log_callback:
@@ -427,9 +478,9 @@ def process_snbt_with_progress(content, engine_key, api_key, is_paid=False, prog
 
     log_pref = "초고속 SNBT 번역" if is_paid else "SNBT 번역"
     if engine_key == "local_ai": log_pref = "Local AI SNBT 번역"
-    elif engine_key == "deepl": log_pref = "DeepL SNBT 번역"
     elif engine_key == "openai": log_pref = "OpenAI SNBT 번역"
-    elif engine_key == "google": log_pref = "Google SNBT 번역"
+    elif engine_key == "claude": log_pref = "Claude SNBT 번역"
+    elif engine_key == "deepseek": log_pref = "DeepSeek SNBT 번역"
 
     translated_texts = _run_batch_jobs(
         targets,
@@ -493,9 +544,9 @@ def process_json_safely(node, engine_key, api_key, is_paid=False, progress_callb
 
     log_pref = "초고속 다국어 번역" if is_paid else "다국어 번역"
     if engine_key == "local_ai": log_pref = "Local AI 다국어 번역"
-    elif engine_key == "deepl": log_pref = "DeepL 다국어 번역"
     elif engine_key == "openai": log_pref = "OpenAI 다국어 번역"
-    elif engine_key == "google": log_pref = "Google 다국어 번역"
+    elif engine_key == "claude": log_pref = "Claude 다국어 번역"
+    elif engine_key == "deepseek": log_pref = "DeepSeek 다국어 번역"
 
     translated_texts = _run_batch_jobs(
         targets,
@@ -602,39 +653,15 @@ def extract_hqm_targets(content):
 
 
 def _translate_hqm_texts(targets, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
-    translated = []
-    total = len(targets)
-    if total == 0:
+    if not targets:
         return []
-
-    if engine_key in ("gemini_batch", "openai", "claude", "deepseek", "local_ai"):
-        res_texts = _run_batch_jobs(
-            targets,
-            lambda item: item["text"],
-            engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
-            log_prefix="초고속 HQM 번역" if is_paid else "HQM 번역"
-        )
-        translated = [str(res or item["text"]) for item, res in zip(targets, res_texts)]
-    else:
-        for count, target in enumerate(targets, 1):
-            if cancel_checker and cancel_checker():
-                raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-
-            source = target["text"]
-            if engine_key == "deepl":
-                result = translate_deepl(source, api_key, reference_map=reference_map, target_lang=target_lang)
-            elif engine_key == "openai":
-                result = translate_openai(source, api_key, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
-            else:
-                result = translate_google(source, api_key, reference_map=reference_map, target_lang=target_lang)
-
-            translated.append(str(result or source))
-            if progress_callback:
-                progress_callback(count, total)
-            if log_callback:
-                log_callback(f"⏳ HQM 텍스트 번역 진행 중... [{count}/{total}]")
-
-    return translated
+    res_texts = _run_batch_jobs(
+        targets,
+        lambda item: item["text"],
+        engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
+        log_prefix="초고속 HQM 번역" if is_paid else "HQM 번역"
+    )
+    return [str(res or item["text"]) for item, res in zip(targets, res_texts)]
 
 
 def _fit_utf8_exact_bytes(text, target_len):
@@ -657,42 +684,18 @@ def _fit_utf8_exact_bytes(text, target_len):
 
 
 def _translate_hqm_texts_entries(entries, engine_key, api_key, is_paid, progress_callback, log_callback, cancel_checker, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):
-    translated_texts = []
-    total = len(entries)
-    if total == 0:
-        return translated_texts
-
-    if engine_key in ("gemini_batch", "openai", "claude", "deepseek", "local_ai"):
-        log_pref = "초고속 HQM 텍스트 덩어리 번역" if is_paid else "HQM 텍스트 번역"
-        if engine_key == "local_ai": log_pref = "Local AI HQM 텍스트 번역"
-        res_texts = _run_batch_jobs(
-            entries,
-            lambda entry: entry.value,
-            engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
-            log_prefix=log_pref, custom_url=custom_url
-        )
-        translated_texts.extend([str(res or entry.value) for entry, res in zip(entries, res_texts)])
-        return translated_texts
-    else:
-        for count, entry in enumerate(entries, 1):
-            if cancel_checker and cancel_checker():
-                raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-
-            source = entry.value
-            if engine_key == "deepl":
-                result = translate_deepl(source, api_key, reference_map=reference_map, target_lang=target_lang)
-            elif engine_key == "openai":
-                result = translate_openai(source, api_key, reference_map=reference_map, glossary=glossary, ai_model=ai_model, target_lang=target_lang)
-            else:
-                result = translate_google(source, api_key, reference_map=reference_map, target_lang=target_lang)
-
-            translated_texts.append(str(result or source))
-            if progress_callback:
-                progress_callback(count, total)
-            if log_callback:
-                log_callback(f"⏳ HQM 텍스트 번역 진행 중... [{count}/{total}]")
-
-    return translated_texts
+    if not entries:
+        return []
+    log_pref = "초고속 HQM 텍스트 덩어리 번역" if is_paid else "HQM 텍스트 번역"
+    if engine_key == "local_ai":
+        log_pref = "Local AI HQM 텍스트 번역"
+    res_texts = _run_batch_jobs(
+        entries,
+        lambda entry: entry.value,
+        engine_key, api_key, is_paid, log_callback, cancel_checker, progress_callback, reference_map, glossary, ai_model, target_lang,
+        log_prefix=log_pref, custom_url=custom_url
+    )
+    return [str(res or entry.value) for entry, res in zip(entries, res_texts)]
 
 
 def process_hqm_with_progress(content, engine_key, api_key, is_paid=False, progress_callback=None, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):

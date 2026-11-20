@@ -270,13 +270,15 @@ def _lookup_safe(cache, text, target_lang_norm):
     2단계: 색상/서식 코드 무시 일치 (Formatting-Agnostic Match)
     3단계: O(1) 초고속 숫자 템플릿 일치 (Number-Template Match)
     """
-    for lang_key, entries in cache.items():
+    with _lock:
+        lang_items = list(cache.items())
+    for lang_key, entries in lang_items:
         if lang_key.replace(" ", "") != target_lang_norm:
             continue
 
         # 1단계: 완전 일치
-        if text in entries:
-            val = entries[text]
+        val = entries.get(text)
+        if val is not None:
             if is_valid_translation(text, val, lang_key):
                 return val
             else:
@@ -285,9 +287,9 @@ def _lookup_safe(cache, text, target_lang_norm):
 
         # 2단계: 색상 및 서식 코드 무시 매칭
         prefix, clean, suffix = _extract_formatting(text)
-        if clean and clean != text and clean in entries:
-            clean_val = entries[clean]
-            if is_valid_translation(clean, clean_val, lang_key):
+        if clean and clean != text:
+            clean_val = entries.get(clean)
+            if clean_val is not None and is_valid_translation(clean, clean_val, lang_key):
                 return _restore_formatting(clean_val, prefix, suffix)
 
         # 3단계: 숫자 템플릿 매칭 (O(1) 인덱스 조회)
@@ -305,9 +307,12 @@ def find_few_shot_examples(query_texts, target_lang="한국어 (Korean)", max_ex
     if not _global_loaded:
         load_memory()
     target_lang_norm = target_lang.replace(" ", "")
-    cache = _global_cache.get(target_lang_norm, {})
-    if not cache:
-        cache = _global_cache.get("한국어(Korean)", {})
+    cache = {}
+    with _lock:
+        for k, v in _global_cache.items():
+            if k.replace(" ", "") == target_lang_norm and isinstance(v, dict):
+                cache = v
+                break
     if not cache:
         return []
 
@@ -390,7 +395,7 @@ def get_cache_stats_summary(target_lang="한국어 (Korean)"):
 
     api_calls = _session_api_calls
     if api_calls > 0:
-        rpd_info = f"{api_calls:,}회 (Gemini 무료 티어 일일 1,500 RPD 중 {api_calls:,}회 소모)"
+        rpd_info = f"{api_calls:,}회 (Gemini 무료 3.5/3.1 Flash-Lite 기준 일일 500 RPD 중 {api_calls:,}회 소모)"
     else:
         rpd_info = "0회 (100% 캐시 및 로컬 단어 조립 처리로 API 소모 0회)"
 
@@ -426,10 +431,11 @@ def _load_ko_pack_keys():
 
 
 def _save_ko_pack_keys(sync_cloud=True):
-    """모드 내장 공식 한글패치(ko_pack) 불변 보호 키 목록 안전 저장"""
+    """모드 내장 공식 한글패치(ko_pack) 불변 보호 키 목록 안전 저장.
+    실제로 디스크에 저장되었으면 True, 변경이 없거나 실패하면 False를 반환합니다."""
     global _ko_pack_keys_dirty
     if not _ko_pack_keys_dirty:
-        return
+        return False
     try:
         dump_data = {
             cat: sorted(list(keys))
@@ -442,8 +448,10 @@ def _save_ko_pack_keys(sync_cloud=True):
         _ko_pack_keys_dirty = False
         if sync_cloud:
             upload_ko_pack_keys_to_cloudflare()
+        return True
     except Exception as e:
         logging.error(f"ko_pack_keys 저장 실패: {e}")
+        return False
 
 
 _ko_pack_keys_etag = ""
@@ -503,7 +511,7 @@ def upload_ko_pack_keys_to_cloudflare(sync_wait=False):
 
     t = threading.Thread(target=_do_upload, daemon=True)
     t.start()
-    if sync_wait:
+    if sync_wait and threading.current_thread() is not threading.main_thread():
         t.join(timeout=10.0)
 
 
@@ -625,26 +633,8 @@ def _store(cache, text, translated_text, target_lang_norm, force_override=False,
 
 def load_memory():
     """로컬 메모리 로드 및 Cloudflare 최신 데이터 동기화"""
-    global _global_loaded, _items_loaded, _books_loaded
-    _load_ko_pack_keys()
-    with _lock:
-        if not _global_loaded:
-            loaded_g = _read_and_clean_file(MEMORY_FILE)
-            _global_cache.clear()
-            _global_cache.update(loaded_g)
-            _global_loaded = True
-        if not _items_loaded:
-            loaded_i = _read_and_clean_file(ITEMS_MEMORY_FILE)
-            _items_cache.clear()
-            _items_cache.update(loaded_i)
-            _items_loaded = True
-        if not _books_loaded:
-            loaded_b = _read_and_clean_file(BOOKS_MEMORY_FILE)
-            _books_cache.clear()
-            _books_cache.update(loaded_b)
-            _books_loaded = True
-
-    sync_from_cloudflare()
+    default_memory_store.local.load(sync_cloud=False)
+    default_memory_store.cloud.sync_from_cloudflare()
 
 
 def _load_modpack_memory():
@@ -932,6 +922,8 @@ MODEL_TIER_MAPPING = {
     "claude-sonnet-5-5": 2,
     "gpt-6.1-terra": 2,
     "gemini-3.8-flash": 2,
+    "gemini-4-hydrogen": 2,
+    "gemini-4-argon": 2,
     "deepseek-v4-pro": 2,
     # Tier 3: 중품질 / 표준 AI
     "gpt-5-mini": 3,
@@ -949,7 +941,7 @@ MODEL_TIER_MAPPING = {
 def get_model_tier(model_name: str) -> int:
     """
     AI 모델명에 대응하는 번역 품질 티어(2~4)를 반환합니다.
-    - Tier 2 (고품질 AI): claude-sonnet-5-5, gpt-6.1-terra, gemini-3.8-flash, deepseek-v4-pro 등
+    - Tier 2 (고품질 AI): claude-sonnet-5-5, gpt-6.1-terra, gemini-3.8-flash, gemini-4-hydrogen, deepseek-v4-pro 등
     - Tier 3 (중품질/표준 AI): gpt-5-mini, gpt-4.1, gemini-3.6-flash, claude-haiku-5-5 등
     - Tier 4 (저품질/가성비 AI / 기본값): gemini-3.5-flash-lite, gpt-6-luna, deepseek-flash, Local AI 등
     """
@@ -959,7 +951,7 @@ def get_model_tier(model_name: str) -> int:
     for name, tier in MODEL_TIER_MAPPING.items():
         if name in m:
             return tier
-    if any(k in m for k in ("sonnet", "terra", "3.8-flash", "v4-pro")):
+    if any(k in m for k in ("sonnet", "terra", "3.8-flash", "v4-pro", "hydrogen", "argon")):
         return 2
     if any(k in m for k in ("mini", "4.1", "3.6-flash", "haiku")):
         return 3
@@ -1059,7 +1051,7 @@ def add_book_to_memory(text, translated_text, target_lang="한국어 (Korean)", 
 
 
 
-def _safe_save_file(filepath, data):
+def _safe_save_file(filepath, data, deleted_keys=None):
     if not filepath:
         return None
     try:
@@ -1070,6 +1062,9 @@ def _safe_save_file(filepath, data):
             merged[lang] = {}
             if lang in disk_data: merged[lang].update(disk_data[lang])
             if lang in data: merged[lang].update(data[lang])
+            if deleted_keys:
+                for dk in deleted_keys:
+                    merged[lang].pop(dk, None)
 
         if os.path.exists(filepath):
             try:
@@ -1088,31 +1083,36 @@ def _safe_save_file(filepath, data):
         return data
 
 
-def _save_local_caches_only():
+def _save_local_caches_only(deleted_keys=None):
     """서버 업로드 없이 로컬 4개 캐시 파일만 안전하게 디스크에 병합 저장"""
+    ko_keys_saved = False
     with _lock:
-        merged_global = _safe_save_file(MEMORY_FILE, _global_cache)
+        merged_global = _safe_save_file(MEMORY_FILE, _global_cache, deleted_keys=deleted_keys)
         if merged_global is not None:
             _global_cache.clear()
             _global_cache.update(merged_global)
 
         if _current_modpack_file and _modpack_cache:
-            merged_modpack = _safe_save_file(_current_modpack_file, _modpack_cache)
+            merged_modpack = _safe_save_file(_current_modpack_file, _modpack_cache, deleted_keys=deleted_keys)
             if merged_modpack is not None:
                 _modpack_cache.clear()
                 _modpack_cache.update(merged_modpack)
 
-        merged_items = _safe_save_file(ITEMS_MEMORY_FILE, _items_cache)
+        merged_items = _safe_save_file(ITEMS_MEMORY_FILE, _items_cache, deleted_keys=deleted_keys)
         if merged_items is not None:
             _items_cache.clear()
             _items_cache.update(merged_items)
 
-        merged_books = _safe_save_file(BOOKS_MEMORY_FILE, _books_cache)
+        merged_books = _safe_save_file(BOOKS_MEMORY_FILE, _books_cache, deleted_keys=deleted_keys)
         if merged_books is not None:
             _books_cache.clear()
             _books_cache.update(merged_books)
 
-        _save_ko_pack_keys()
+        # 비재진입 _lock 내부에서 upload_ko_pack_keys_to_cloudflare() 재진입 데드락 원천 차단
+        ko_keys_saved = _save_ko_pack_keys(sync_cloud=False)
+
+    if ko_keys_saved:
+        upload_ko_pack_keys_to_cloudflare()
 
 
 def save_memory(flush_now=False):
@@ -1128,22 +1128,15 @@ def save_memory(flush_now=False):
     except Exception:
         pass
 
-    _save_local_caches_only()
-
-    with _lock:
-        dirty_general_copy = {k: v.copy() for k, v in _dirty_general.items()}
-        dirty_items_copy = {k: v.copy() for k, v in _dirty_items.items()}
-        dirty_books_copy = {k: v.copy() for k, v in _dirty_books.items()}
-        _dirty_general.clear()
-        _dirty_items.clear()
-        _dirty_books.clear()
+    default_memory_store.local.save_local_only()
+    dirty_general_copy, dirty_items_copy, dirty_books_copy = default_memory_store.local.drain_dirty_batches()
 
     if dirty_general_copy:
-        enqueue_commit(dirty_general_copy, "general")
+        default_memory_store.cloud.enqueue_commit(dirty_general_copy, "general")
     if dirty_items_copy:
-        enqueue_commit(dirty_items_copy, "items")
+        default_memory_store.cloud.enqueue_commit(dirty_items_copy, "items")
     if dirty_books_copy:
-        enqueue_commit(dirty_books_copy, "books")
+        default_memory_store.cloud.enqueue_commit(dirty_books_copy, "books")
 
     try:
         import translation_word
@@ -1152,7 +1145,8 @@ def save_memory(flush_now=False):
         pass
 
     if flush_now:
-        flush_commit_queue(sync_wait=True)
+        is_bg = threading.current_thread() is not threading.main_thread()
+        flush_commit_queue(sync_wait=is_bg)
 
 
 
@@ -1359,7 +1353,7 @@ def flush_commit_queue(sync_wait=False):
             existing_thread = None
 
     if existing_thread is not None:
-        if sync_wait and existing_thread.is_alive():
+        if sync_wait and existing_thread.is_alive() and threading.current_thread() is not threading.main_thread():
             existing_thread.join(timeout=20.0)
         return
 
@@ -1431,8 +1425,18 @@ def flush_commit_queue(sync_wait=False):
                     _consecutive_upload_errors = 0
                     _save_pending_commits_to_disk()
                     logging.info(f"✅ [Cloudflare Commit] 신규 번역 {committed_total:,}개 일괄 커밋 완료!")
+                    try:
+                        import session_logger
+                        session_logger.log_event("OK", "CLOUD_COMMIT", f"committed={committed_total}")
+                    except Exception:
+                        pass
                 else:
                     _consecutive_upload_errors += 1
+                    try:
+                        import session_logger
+                        session_logger.log_event("FAIL", "CLOUD_COMMIT", f"committed={committed_total}, failed={len(failed_items)}")
+                    except Exception:
+                        pass
                     with _lock:
                         for item in failed_items:
                             key = (item["cat"], item["lang"], item["src"])
@@ -1453,9 +1457,6 @@ def flush_commit_queue(sync_wait=False):
                         f"📦 [Auto-Compact] 누적 커밋 파일이 {total_uncompacted}개에 도달하여 "
                         f"마스터 스냅샷 자동 압축 업로드 및 정리를 백그라운드에서 실행합니다."
                     )
-                    _session_committed_chunks = 0
-                    sync_state["uncompacted_chunks"] = 0
-                    _save_sync_state(sync_state)
                     upload_snapshots_to_cloudflare(force=True, purge_commits=True)
         finally:
             with _lock:
@@ -1464,7 +1465,7 @@ def flush_commit_queue(sync_wait=False):
     t = threading.Thread(target=_do_commit, daemon=True)
     _active_commit_thread = t
     t.start()
-    if sync_wait:
+    if sync_wait and threading.current_thread() is not threading.main_thread():
         t.join(timeout=20.0)
 
 
@@ -1493,7 +1494,7 @@ def upload_snapshots_to_cloudflare(force=False, purge_commits=True, min_entries=
         existing_pack = _active_pack_thread if (_active_pack_thread is not None and _active_pack_thread.is_alive()) else None
 
     if existing_pack is not None:
-        if sync_wait:
+        if sync_wait and threading.current_thread() is not threading.main_thread():
             existing_pack.join(timeout=30.0)
         return
 
@@ -1505,6 +1506,17 @@ def upload_snapshots_to_cloudflare(force=False, purge_commits=True, min_entries=
         except Exception:
             pass
 
+        sync_state = _load_sync_state()
+        last_commit_id = str(sync_state.get("last_commit_id", "") or "").strip()
+        last_compacted_id = str(sync_state.get("last_compacted_commit_id", "") or "").strip()
+        uncompacted = max(_session_committed_chunks, sync_state.get("uncompacted_chunks", 0))
+
+        # 새로 병합할 커밋이 없고 이미 최신 상태까지 마스터 압축이 완료된 경우 불필요한 Pull 및 대용량 재업로드 생략
+        if not last_commit_id and _session_committed_count == 0 and uncompacted == 0:
+            return
+        if last_commit_id and last_commit_id == last_compacted_id and _session_committed_count == 0 and uncompacted == 0:
+            return
+
         # 2. 압축 직전 R2의 모든 최신 커밋(내 커밋 + 다른 유저 커밋 C3, C4)을 끝까지 Pull하여 로컬에 합침 (사전 머지)
         try:
             sync_from_cloudflare(force_wait=True, bypass_cooldown=True)
@@ -1513,14 +1525,6 @@ def upload_snapshots_to_cloudflare(force=False, purge_commits=True, min_entries=
 
         sync_state = _load_sync_state()
         last_commit_id = str(sync_state.get("last_commit_id", "") or "").strip()
-        last_compacted_id = str(sync_state.get("last_compacted_commit_id", "") or "").strip()
-        uncompacted = max(_session_committed_chunks, sync_state.get("uncompacted_chunks", 0))
-
-        # 새로 병합할 커밋이 없고 이미 최신 상태까지 마스터 압축이 완료된 경우 불필요한 대용량 재업로드 생략
-        if not last_commit_id and _session_committed_count == 0 and uncompacted == 0:
-            return
-        if last_commit_id and last_commit_id == last_compacted_id and _session_committed_count == 0 and uncompacted == 0:
-            return
 
         all_succeeded = True
         conflict_detected = False
@@ -1531,9 +1535,10 @@ def upload_snapshots_to_cloudflare(force=False, purge_commits=True, min_entries=
                 with _lock:
                     data_copy = {k: v.copy() for k, v in cache.items() if isinstance(v, dict)}
                 total_items = sum(len(v) for v in data_copy.values())
-                # 최소 항목 수 검증 (빈 캐시/손상된 캐시로 마스터 덮어쓰기 원천 방지)
-                if total_items < min_entries:
-                    logging.warning(f"스냅샷 업로드 스킵: [{cat}] 항목 수({total_items})가 안전 기준({min_entries}) 미달")
+                # 최소 항목 수 검증 (books는 특성상 수량이 적으므로 500건 안전 하한 적용)
+                cat_min_entries = min(min_entries, 500) if cat == "books" else min_entries
+                if total_items < cat_min_entries:
+                    logging.warning(f"스냅샷 업로드 스킵: [{cat}] 항목 수({total_items})가 안전 기준({cat_min_entries}) 미달")
                     all_succeeded = False
                     continue
 
@@ -1594,7 +1599,7 @@ def upload_snapshots_to_cloudflare(force=False, purge_commits=True, min_entries=
     t = threading.Thread(target=_async_pack, daemon=True)
     _active_pack_thread = t
     t.start()
-    if sync_wait:
+    if sync_wait and threading.current_thread() is not threading.main_thread():
         t.join(timeout=30.0)
 
 
@@ -1613,10 +1618,16 @@ def finalize_translation_session(modpack_path=None, sync_wait=False):
     except Exception:
         pass
 
-    # 1. 로컬 저장 및 남은 큐 즉시 커밋 전송 (자투리 수량에 상관없이 100% 즉시 전송)
-    save_memory(flush_now=True)
+    # 1. 로컬 디스크 즉시 저장 후, 커밋 대기열 전송 (sync_wait=False일 때는 워커 스레드를 블로킹하지 않음)
+    save_memory(flush_now=False)
+    with _lock:
+        has_pending_or_committed = bool(_commit_queue) or (_session_committed_count > 0) or (_session_committed_chunks > 0)
+    flush_commit_queue(sync_wait=sync_wait)
 
-    # 2. 마스터 스냅샷 갱신 및 누적 커밋 정리 (사전 머지 후 업로드)
+    if not has_pending_or_committed:
+        return
+
+    # 2. 신규 커밋이 발생한 세션에서만 마스터 스냅샷 갱신 및 보조 파일 업로드 실행
     upload_snapshots_to_cloudflare(force=True, purge_commits=True, sync_wait=sync_wait)
 
     # 3. 공식 한글패치 보호 키(ko_pack_keys) 및 단어사전(words) 클라우드 업로드
@@ -1817,6 +1828,11 @@ def sync_from_cloudflare(force_wait=False, bypass_cooldown=False):
             # 4단계: 변경사항이 있었을 때만 로컬 파일 업데이트
             if changed_master or changed_pull:
                 _save_local_caches_only()
+            try:
+                import session_logger
+                session_logger.log_event("OK", "CLOUD_SYNC", f"master_changed={changed_master}, pull_changed={changed_pull}")
+            except Exception:
+                pass
 
             # 5단계: 이전에 오프라인이라 못 보낸 대기 커밋이 있으면 자동 푸시
             if _commit_queue:
@@ -1829,8 +1845,218 @@ def sync_from_cloudflare(force_wait=False, bypass_cooldown=False):
     t = threading.Thread(target=_async_cloudflare_sync, daemon=True)
     _active_sync_thread = t
     t.start()
-    if force_wait:
+    if force_wait and threading.current_thread() is not threading.main_thread():
         t.join(timeout=25.0)
+
+
+# ====================================================================
+# 3차 대분류 클래스: LocalCacheStore + CloudSyncClient -> MemoryStore
+# ====================================================================
+class LocalCacheStore:
+    """로컬 4종 캐시(global/items/books/modpack), 공식 보호 키, 세션 통계, 디스크 병합 저장을 전담합니다."""
+
+    def load(self, sync_cloud=False):
+        """로컬 4종 캐시 파일과 공식 보호 키를 로드합니다."""
+        global _global_loaded, _items_loaded, _books_loaded
+        _load_ko_pack_keys()
+        with _lock:
+            if not _global_loaded:
+                loaded_g = _read_and_clean_file(MEMORY_FILE)
+                _global_cache.clear()
+                _global_cache.update(loaded_g)
+                _global_loaded = True
+            if not _items_loaded:
+                loaded_i = _read_and_clean_file(ITEMS_MEMORY_FILE)
+                _items_cache.clear()
+                _items_cache.update(loaded_i)
+                _items_loaded = True
+            if not _books_loaded:
+                loaded_b = _read_and_clean_file(BOOKS_MEMORY_FILE)
+                _books_cache.clear()
+                _books_cache.update(loaded_b)
+                _books_loaded = True
+            # 🧪 테스트 모드 전용: 오역 수정기 즉시 테스트용 임시 시드 단어 주입 (원본 디스크/클라우드 미반영)
+            try:
+                import temp_session_logger
+                if temp_session_logger.is_debug_mode():
+                    seeds = temp_session_logger.get_debug_editor_seeds()
+                    lang_key = "한국어 (Korean)"
+                    cat_map = {
+                        "general": _global_cache,
+                        "items": _items_cache,
+                        "books": _books_cache,
+                    }
+                    for cat_name, seed_entries in seeds.items():
+                        target_cache = cat_map.get(cat_name)
+                        if target_cache is not None and seed_entries:
+                            lang_dict = target_cache.setdefault(lang_key, {})
+                            for s_src, s_tgt in seed_entries.items():
+                                lang_dict.setdefault(s_src, s_tgt)
+            except Exception:
+                pass
+        if sync_cloud:
+            sync_from_cloudflare()
+
+    def save_local_only(self, deleted_keys=None):
+        """서버 업로드 없이 로컬 4개 캐시 파일과 공식 보호 키만 안전하게 디스크에 병합 저장합니다."""
+        return _save_local_caches_only(deleted_keys=deleted_keys)
+
+    def drain_dirty_batches(self):
+        """로컬 캐시에 누적된 dirty 변경분(general/items/books)을 원자적으로 추출하고 비웁니다."""
+        with _lock:
+            dirty_general_copy = {k: v.copy() for k, v in _dirty_general.items()}
+            dirty_items_copy = {k: v.copy() for k, v in _dirty_items.items()}
+            dirty_books_copy = {k: v.copy() for k, v in _dirty_books.items()}
+            _dirty_general.clear()
+            _dirty_items.clear()
+            _dirty_books.clear()
+        return dirty_general_copy, dirty_items_copy, dirty_books_copy
+
+    def set_modpack(self, modpack_path):
+        return set_current_modpack(modpack_path)
+
+    def get_modpack_id(self):
+        return get_current_modpack_id()
+
+    def reset_stats(self):
+        return reset_session_stats()
+
+    def stats_summary(self, target_lang="한국어 (Korean)"):
+        return get_cache_stats_summary(target_lang)
+
+    def get(self, text, category="general", target_lang="한국어 (Korean)"):
+        if category == "items":
+            return get_cached_item_translation(text, target_lang)
+        if category == "books":
+            return get_cached_book_translation(text, target_lang)
+        return get_cached_translation(text, target_lang)
+
+    def put(self, text, translated_text, category="general", target_lang="한국어 (Korean)", force_override=False, tier=None):
+        if category == "items":
+            return add_item_to_memory(text, translated_text, target_lang, force_override=force_override, tier=tier)
+        if category == "books":
+            return add_book_to_memory(text, translated_text, target_lang, force_override=force_override, tier=tier)
+        return add_to_memory(text, translated_text, target_lang, force_override=force_override, tier=tier)
+
+    def put_official(self, text, translated_text, target_lang="한국어 (Korean)", is_item=False):
+        return add_official_ko_to_memory(text, translated_text, target_lang=target_lang, is_item=is_item)
+
+    def bulk_update(self, entries, target_lang="한국어(Korean)", force_override=True, tier=None):
+        """(category, src, new_tgt) 튜플 목록을 _lock 1회 획득으로 원자적 일괄 갱신합니다."""
+        if not entries:
+            return 0
+        count = 0
+        with _lock:
+            for cat, src_txt, new_tgt in entries:
+                cache_dict = (
+                    _items_cache if cat == "items" else
+                    (_books_cache if cat == "books" else _global_cache)
+                )
+                _store(cache_dict, src_txt, new_tgt, target_lang, force_override=force_override, tier=tier)
+                count += 1
+        return count
+
+    def delete(self, category, original_src, target_lang="한국어 (Korean)"):
+        return delete_memory_entry(category, original_src, target_lang=target_lang)
+
+    def save_ko_pack_keys(self, sync_cloud=True):
+        return _save_ko_pack_keys(sync_cloud=sync_cloud)
+
+
+class CloudSyncClient:
+    """Cloudflare R2 기반 증분 커밋(/commit), Pull(/pull), 스냅샷 압축(/snapshot), 보호 키 동기화를 전담합니다."""
+
+    def get_worker_url(self):
+        return get_worker_url()
+
+    def set_worker_url(self, worker_url):
+        return set_worker_url(worker_url)
+
+    def is_upload_safe(self):
+        return is_cloud_upload_safe()
+
+    def enqueue_commit(self, cache_dict, category="general"):
+        return enqueue_commit(cache_dict, category=category)
+
+    def flush_commits(self, sync_wait=False):
+        return flush_commit_queue(sync_wait=sync_wait)
+
+    def sync_from_cloudflare(self, force_wait=False, bypass_cooldown=False):
+        return sync_from_cloudflare(force_wait=force_wait, bypass_cooldown=bypass_cooldown)
+
+    def wait_for_sync(self, timeout=6.0):
+        return wait_for_cloud_sync(timeout=timeout)
+
+    def upload_snapshots(self, force=False, purge_commits=True, min_entries=5000, sync_wait=False):
+        return upload_snapshots_to_cloudflare(
+            force=force, purge_commits=purge_commits, min_entries=min_entries, sync_wait=sync_wait
+        )
+
+    def upload_ko_pack_keys(self, sync_wait=False):
+        return upload_ko_pack_keys_to_cloudflare(sync_wait=sync_wait)
+
+    def sync_ko_pack_keys(self, force=False):
+        return sync_ko_pack_keys_from_cloudflare(force=force)
+
+    def finalize_session(self, modpack_path=None, sync_wait=False):
+        return finalize_translation_session(modpack_path=modpack_path, sync_wait=sync_wait)
+
+
+class MemoryStore:
+    """로컬 4종 캐시(LocalCacheStore)와 클라우드 동기화(CloudSyncClient)를 조합 소유하는 단일 파사드."""
+
+    def __init__(self, local: LocalCacheStore = None, cloud: CloudSyncClient = None):
+        self.local = local or LocalCacheStore()
+        self.cloud = cloud or CloudSyncClient()
+
+    def load(self):
+        self.local.load(sync_cloud=False)
+        return self.cloud.sync_from_cloudflare()
+
+    def save(self, flush_now=False):
+        return save_memory(flush_now=flush_now)
+
+    def save_local_only(self, deleted_keys=None):
+        return self.local.save_local_only(deleted_keys=deleted_keys)
+
+    def set_modpack(self, modpack_path):
+        return self.local.set_modpack(modpack_path)
+
+    def reset_stats(self):
+        return self.local.reset_stats()
+
+    def stats_summary(self, target_lang="한국어 (Korean)"):
+        return self.local.stats_summary(target_lang)
+
+    def get(self, text, category="general", target_lang="한국어 (Korean)"):
+        return self.local.get(text, category=category, target_lang=target_lang)
+
+    def put(self, text, translated_text, category="general", target_lang="한국어 (Korean)", force_override=False, tier=None):
+        return self.local.put(
+            text, translated_text, category=category, target_lang=target_lang,
+            force_override=force_override, tier=tier
+        )
+
+    def bulk_update(self, entries, target_lang="한국어(Korean)", force_override=True, tier=None):
+        return self.local.bulk_update(entries, target_lang=target_lang, force_override=force_override, tier=tier)
+
+    def delete(self, category, original_src, target_lang="한국어 (Korean)"):
+        return self.local.delete(category, original_src, target_lang=target_lang)
+
+    def sync_cloud(self, force_wait=False, bypass_cooldown=False):
+        return self.cloud.sync_from_cloudflare(force_wait=force_wait, bypass_cooldown=bypass_cooldown)
+
+    def wait_cloud_sync(self, timeout=6.0):
+        return self.cloud.wait_for_sync(timeout=timeout)
+
+    def flush_commits(self, sync_wait=False):
+        return self.cloud.flush_commits(sync_wait=sync_wait)
+
+    def finalize_session(self, modpack_path=None, sync_wait=False):
+        return self.cloud.finalize_session(modpack_path=modpack_path, sync_wait=sync_wait)
+
+
+default_memory_store = MemoryStore()
 
 
 

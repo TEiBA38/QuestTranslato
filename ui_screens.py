@@ -7,6 +7,7 @@ import os
 import time
 import re
 import translation_memory
+import translation_editor
 import logging
 
 try:
@@ -28,6 +29,7 @@ from constants import (
     MODELS_CLAUDE,
     MODELS_DEEPSEEK,
     normalize_model_name,
+    has_hangul,
 )
 
 
@@ -427,15 +429,21 @@ class UIScreensMixin:
             choice = self.plan_combo.get()
         engine = self.engine_combo.get()
         if "Gemini" in engine:
+            gemini_plans = [
+                "무료 계정 (안전대기 / 10 RPM 속도제한)",
+                "유료 계정 (초고속·고품질 번역 / 제한없음)",
+            ]
+            if choice in gemini_plans:
+                self._last_gemini_plan = choice
             current_raw = normalize_model_name(self.model_combo.get())
-            if "무료" in choice:
-                self.model_combo.configure(values=MODELS_GEMINI_FREE)
-                matched = next((m for m in MODELS_GEMINI_FREE if normalize_model_name(m) == current_raw), None)
-                self.model_combo.set(matched or MODELS_GEMINI_FREE[0])
-            else:
+            if choice == "유료 계정 (초고속·고품질 번역 / 제한없음)":
                 self.model_combo.configure(values=MODELS_GEMINI_PAID)
                 matched = next((m for m in MODELS_GEMINI_PAID if normalize_model_name(m) == current_raw), None)
                 self.model_combo.set(matched or MODELS_GEMINI_PAID[0])
+            else:
+                self.model_combo.configure(values=MODELS_GEMINI_FREE)
+                matched = next((m for m in MODELS_GEMINI_FREE if normalize_model_name(m) == current_raw), None)
+                self.model_combo.set(matched or MODELS_GEMINI_FREE[0])
 
     def on_engine_change(self, choice):
         if "Custom API" in choice or "Local AI" in choice:
@@ -460,11 +468,18 @@ class UIScreensMixin:
                 "무료 계정 (안전대기 / 10 RPM 속도제한)",
                 "유료 계정 (초고속·고품질 번역 / 제한없음)",
             ]
+            current_plan = self.plan_combo.get()
+            if current_plan in gemini_plans:
+                self._last_gemini_plan = current_plan
+
             current_raw = normalize_model_name(self.model_combo.get())
             if "Gemini" in choice:
                 self.plan_combo.configure(state="normal", values=gemini_plans)
                 if self.plan_combo.get() not in gemini_plans:
-                    self.plan_combo.set(gemini_plans[0])
+                    restored_plan = getattr(self, "_last_gemini_plan", gemini_plans[0])
+                    if restored_plan not in gemini_plans:
+                        restored_plan = gemini_plans[0]
+                    self.plan_combo.set(restored_plan)
                 self.model_combo.configure(state="normal")
                 self.on_plan_change(self.plan_combo.get())
                 self.log("💡 Google AI (Gemini) API 키를 입력하고 계정 상태(무료/유료)를 선택해주세요.")
@@ -536,7 +551,7 @@ class UIScreensMixin:
                 k, v = line.split('=', 1)
                 new_glossary[k.strip()] = v.strip()
             self.app_state.glossary = new_glossary
-            if hasattr(self, "glossaries_by_lang"):
+            if hasattr(self.app_state, "glossaries_by_lang"):
                 lang = self.target_lang_combo.get()
                 self.app_state.glossaries_by_lang[lang] = new_glossary
             self.save_user_settings()
@@ -651,7 +666,13 @@ class UIScreensMixin:
             return None, None, False, None, None, None
 
         if engine_key == "gemini_batch":
-            is_paid = "유료" in self.plan_combo.get()
+            gemini_paid_label = "유료 계정 (초고속·고품질 번역 / 제한없음)"
+            gemini_free_label = "무료 계정 (안전대기 / 10 RPM 속도제한)"
+            current_plan = self.plan_combo.get()
+            if current_plan not in (gemini_free_label, gemini_paid_label):
+                self.plan_combo.set(gemini_free_label)
+                current_plan = gemini_free_label
+            is_paid = (current_plan == gemini_paid_label)
         else:
             is_paid = True
         ai_model = normalize_model_name(self.model_combo.get())
@@ -661,1084 +682,27 @@ class UIScreensMixin:
     def request_cancel(self):
         self.app_state.cancel_requested = True
         self.log("🛑 사용자가 번역 취소를 요청했습니다. 지금까지 번역된 내용을 로컬 캐시에 저장 중...")
-        try:
-            translation_memory.save_memory()
-            self.log("💾 [로컬 캐시 보존] 지금까지 번역된 내용이 로컬 캐시에 안전하게 영구 저장되었습니다!")
-        except Exception as e:
-            pass
         self.btn_cancel.configure(state="disabled")
+
+        def _bg_save():
+            try:
+                translation_memory.save_memory(flush_now=False)
+                self.log("💾 [로컬 캐시 보존] 지금까지 번역된 내용이 로컬 캐시에 안전하게 영구 저장되었습니다!")
+            except Exception:
+                pass
+        threading.Thread(target=_bg_save, daemon=True).start()
 
     def is_cancelled(self):
         return self.app_state.cancel_requested
 
     def open_memory_editor(self):
-        editor = ctk.CTkToplevel(self)
-        editor.title("🔍 인게임 오역 수정기 (Memory Editor)")
-        editor.geometry("1040x820")
-        editor.minsize(920, 700)
-        editor.grab_set()
-
-        # ================================================================
-        # 1. 상단 통합 검색 바
-        # ================================================================
-        search_card = ctk.CTkFrame(editor, fg_color="#18181d", corner_radius=10, border_width=1, border_color="#2a2a33")
-        search_card.pack(fill="x", padx=14, pady=(12, 6))
-
-        search_row = ctk.CTkFrame(search_card, fg_color="transparent")
-        search_row.pack(fill="x", padx=12, pady=10)
-
-        query_var = ctk.StringVar()
-        entry_search = ctk.CTkEntry(
-            search_row, textvariable=query_var,
-            placeholder_text="검색어 (영어 원문 또는 한글 번역문 입력...)",
-            font=ctk.CTkFont(family=FONT_NAME, size=12), width=260
-        )
-        entry_search.pack(side="left", padx=(0, 6))
-
-        field_var = ctk.StringVar(value="통합 (원문+번역)")
-        field_combo = ctk.CTkComboBox(
-            search_row, variable=field_var,
-            values=["통합 (원문+번역)", "영어 원문(EN)만", "한글 번역(KO)만"],
-            font=ctk.CTkFont(family=FONT_NAME, size=11), width=125
-        )
-        field_combo.pack(side="left", padx=(0, 6))
-
-        cat_var = ctk.StringVar(value="all")
-        cat_combo = ctk.CTkComboBox(
-            search_row, variable=cat_var,
-            values=["all", "items", "general", "books"],
-            font=ctk.CTkFont(family=FONT_NAME, size=11), width=80
-        )
-        cat_combo.pack(side="left", padx=(0, 6))
-
-        limit_var = ctk.StringVar(value="1,000개")
-        limit_combo = ctk.CTkComboBox(
-            search_row, variable=limit_var,
-            values=["500개", "1,000개", "3,000개", "5,000개", "제한 없음(전체)"],
-            font=ctk.CTkFont(family=FONT_NAME, size=11), width=110
-        )
-        limit_combo.pack(side="left", padx=(0, 8))
-
-        btn_search = ctk.CTkButton(
-            search_row, text="🔍 검색", width=75, height=28,
-            font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
-            command=lambda: do_search()
-        )
-        btn_search.pack(side="left", padx=(0, 8))
-
-        btn_guide = ctk.CTkButton(
-            search_row, text="💡 인게임 반영 가이드", width=145, height=28,
-            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
-            fg_color="#854d0e", hover_color="#a16207",
-            command=lambda: open_guide_modal()
-        )
-        btn_guide.pack(side="right", padx=(6, 0))
-
-        btn_add_data = ctk.CTkButton(
-            search_row, text="➕ 새 번역 추가", width=115, height=28,
-            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
-            fg_color="#0284c7", hover_color="#0369a1",
-            command=lambda: open_add_dialog()
-        )
-        btn_add_data.pack(side="right")
-
-        # ================================================================
-        # 2. 수정 & 치환 작업 패널 (검색창 바로 밑에 밀착 배치!)
-        # ================================================================
-        action_container = ctk.CTkFrame(editor, fg_color="#18181d", corner_radius=10, border_width=1, border_color="#2a2a33")
-        action_container.pack(fill="x", padx=14, pady=(0, 6))
-
-        # 2-A. [패널: 오역 데이터 직접 수정] (기본 패널)
-        panel_edit = ctk.CTkFrame(action_container, fg_color="transparent")
-        panel_edit.pack(fill="x", padx=12, pady=10)
-
-        # 원문 표시 행
-        row_orig = ctk.CTkFrame(panel_edit, fg_color="transparent")
-        row_orig.pack(fill="x", pady=(0, 6))
-
-        ctk.CTkLabel(
-            row_orig, text="원문:",
-            font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"), text_color="#cbd5e1"
-        ).pack(side="left", padx=(0, 8))
-
-        lbl_original = ctk.CTkLabel(
-            row_orig, text="(아래 목록에서 수정할 항목을 클릭하세요)", anchor="w",
-            font=ctk.CTkFont(family=FONT_NAME, size=12),
-            fg_color="#111113", corner_radius=6, height=28
-        )
-        lbl_original.pack(side="left", fill="x", expand=True)
-
-        # 번역 입력 및 저장 버튼 행
-        row_trans = ctk.CTkFrame(panel_edit, fg_color="transparent")
-        row_trans.pack(fill="x", pady=(0, 6))
-
-        ctk.CTkLabel(
-            row_trans, text="번역:",
-            font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"), text_color="#cbd5e1"
-        ).pack(side="left", padx=(0, 8))
-
-        entry_translated = ctk.CTkEntry(
-            row_trans, font=ctk.CTkFont(family=FONT_NAME, size=12),
-            fg_color="#111113", border_color="#52525b"
-        )
-        entry_translated.pack(side="left", fill="x", expand=True, padx=(0, 10))
-
-        btn_save = ctk.CTkButton(
-            row_trans, text="💾 저장 및 즉시 적용", width=140, height=30,
-            font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
-            fg_color="#15803d", hover_color="#166534",
-            command=lambda: do_save()
-        )
-        btn_save.pack(side="right")
-
-        chk_glossary_var = ctk.BooleanVar(value=True)
-        chk_glossary = ctk.CTkCheckBox(
-            panel_edit, text="📖 용어집(Glossary)에도 고정 등록하여 향후 AI 오역 재발 방지",
-            variable=chk_glossary_var,
-            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
-            text_color="#38bdf8", checkmark_color="#ffffff", fg_color="#0284c7"
-        )
-        chk_glossary.pack(anchor="w", padx=(44, 0))
-
-        # 2-B. [패널: 동일 단어 일괄 치환] (스위칭 패널)
-        panel_replace = ctk.CTkFrame(action_container, fg_color="transparent")
-
-        replace_row = ctk.CTkFrame(panel_replace, fg_color="transparent")
-        replace_row.pack(fill="x", padx=4, pady=8)
-
-        ctk.CTkLabel(
-            replace_row, text="찾을 단어:",
-            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"), text_color="#cbd5e1"
-        ).pack(side="left", padx=(0, 4))
-
-        find_var = ctk.StringVar()
-        entry_find = ctk.CTkEntry(
-            replace_row, textvariable=find_var, placeholder_text="예: 팃커스, 휭커스 (다중 가능)",
-            font=ctk.CTkFont(family=FONT_NAME, size=11), width=230
-        )
-        entry_find.pack(side="left", padx=(0, 8))
-
-        ctk.CTkLabel(
-            replace_row, text="➡️ 바꿀 단어:",
-            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"), text_color="#cbd5e1"
-        ).pack(side="left", padx=(0, 4))
-
-        replace_var = ctk.StringVar()
-        entry_replace = ctk.CTkEntry(
-            replace_row, textvariable=replace_var, placeholder_text="예: 팅커스 (표준어)",
-            font=ctk.CTkFont(family=FONT_NAME, size=11), width=200
-        )
-        entry_replace.pack(side="left", padx=(0, 10))
-
-        btn_batch_replace = ctk.CTkButton(
-            replace_row, text="⚡ 선택 항목 일괄 치환", height=30,
-            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
-            fg_color="#ea580c", hover_color="#c2410c",
-            command=lambda: do_batch_replace()
-        )
-        btn_batch_replace.pack(side="right")
-
-        # ================================================================
-        # 3. 툴바 (선택 제어 & 모드 전환 버튼)
-        # ================================================================
-        toolbar = ctk.CTkFrame(editor, fg_color="transparent")
-        toolbar.pack(fill="x", padx=14, pady=(0, 6))
-
-        btn_select_all = ctk.CTkButton(
-            toolbar, text="☑ 전체 선택", width=75, height=26,
-            font=ctk.CTkFont(family=FONT_NAME, size=11),
-            fg_color="#334155", hover_color="#475569",
-            command=lambda: set_all_selection(True)
-        )
-        btn_select_all.pack(side="left", padx=(0, 6))
-
-        btn_deselect_all = ctk.CTkButton(
-            toolbar, text="선택 해제", width=65, height=26,
-            font=ctk.CTkFont(family=FONT_NAME, size=11),
-            fg_color="#27272a", hover_color="#3f3f46",
-            command=lambda: set_all_selection(False)
-        )
-        btn_deselect_all.pack(side="left", padx=(0, 10))
-
-        lbl_selected_count = ctk.CTkLabel(
-            toolbar, text="선택: 0개 / 검색: 0개",
-            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
-            text_color="#38bdf8"
-        )
-        lbl_selected_count.pack(side="left")
-
-        btn_ai_retranslate = ctk.CTkButton(
-            toolbar, text="🤖 선택 항목 AI 재번역", width=155, height=26,
-            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
-            fg_color="#7c3aed", hover_color="#6d28d9",
-            command=lambda: do_ai_retranslate()
-        )
-        btn_ai_retranslate.pack(side="left", padx=(12, 0))
-
-        # 우측: 모드 스위치 버튼 2개
-        mode_box = ctk.CTkFrame(toolbar, fg_color="#18181d", corner_radius=8, border_width=1, border_color="#2a2a33")
-        mode_box.pack(side="right")
-
-        btn_mode_edit = ctk.CTkButton(
-            mode_box, text="🛠️ 번역 직접 수정", width=125, height=26,
-            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
-            fg_color="#0284c7", hover_color="#0369a1",
-            command=lambda: switch_mode("edit")
-        )
-        btn_mode_edit.pack(side="left", padx=2, pady=2)
-
-        btn_mode_replace = ctk.CTkButton(
-            mode_box, text="⚡ 동일 단어 일괄 치환", width=140, height=26,
-            font=ctk.CTkFont(family=FONT_NAME, size=11),
-            fg_color="transparent", text_color="#94a3b8", hover_color="#27272a",
-            command=lambda: switch_mode("replace")
-        )
-        btn_mode_replace.pack(side="left", padx=2, pady=2)
-
-        def switch_mode(mode):
-            if mode == "edit":
-                btn_mode_edit.configure(fg_color="#0284c7", text_color="#ffffff")
-                btn_mode_replace.configure(fg_color="transparent", text_color="#94a3b8")
-                panel_replace.pack_forget()
-                panel_edit.pack(fill="x", padx=12, pady=10)
-            else:
-                btn_mode_replace.configure(fg_color="#ea580c", text_color="#ffffff")
-                btn_mode_edit.configure(fg_color="transparent", text_color="#94a3b8")
-                panel_edit.pack_forget()
-                panel_replace.pack(fill="x", padx=12, pady=10)
-
-        # ================================================================
-        # 4. 중앙 및 하단 결과 테이블 리스트 (Treeview - 시원하게 펼쳐짐)
-        # ================================================================
-        table_container = ctk.CTkFrame(editor, fg_color="#141418", corner_radius=10, border_width=1, border_color="#27272a")
-        table_container.pack(fill="both", expand=True, padx=14, pady=(0, 12))
-
-        style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
-
-        style.configure(
-            "DarkTree.Treeview",
-            background="#141418",
-            foreground="#f1f5f9",
-            fieldbackground="#141418",
-            borderwidth=0,
-            rowheight=28,
-            font=(FONT_NAME, 10)
-        )
-        style.map(
-            "DarkTree.Treeview",
-            background=[("selected", "#0284c7")],
-            foreground=[("selected", "#ffffff")]
-        )
-        style.configure(
-            "DarkTree.Treeview.Heading",
-            background="#202026",
-            foreground="#94a3b8",
-            relief="flat",
-            borderwidth=0,
-            font=(FONT_NAME, 10, "bold")
-        )
-        style.map(
-            "DarkTree.Treeview.Heading",
-            background=[("active", "#2a2a32")]
-        )
-
-        cols = ("check", "category", "src", "tgt")
-        tree = ttk.Treeview(table_container, columns=cols, show="headings", style="DarkTree.Treeview", selectmode="browse")
-
-        tree.heading("check", text="선택")
-        tree.column("check", width=46, minwidth=46, anchor="center", stretch=False)
-        tree.heading("category", text="분류")
-        tree.column("category", width=75, minwidth=65, anchor="center", stretch=False)
-        tree.heading("src", text="영어 원문 (EN)")
-        tree.column("src", width=420, minwidth=200, anchor="w")
-        tree.heading("tgt", text="한글 번역 (KO)")
-        tree.column("tgt", width=420, minwidth=200, anchor="w")
-
-        scrollbar = ctk.CTkScrollbar(table_container, orientation="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y", padx=(0, 2), pady=2)
-        tree.pack(side="left", fill="both", expand=True, padx=2, pady=2)
-
-        # ================================================================
-        # 5. 데이터 로직 & 비즈니스 기능
-        # ================================================================
-        selected_item = {"category": None, "src": None, "tgt": None}
-        current_items = []
-        checked_iids = set()
-
-        def update_selected_count():
-            cnt = len(checked_iids)
-            total_cnt = len(current_items)
-            lbl_selected_count.configure(text=f"선택: {cnt}개 / 검색: {total_cnt}개")
-
-        def set_all_selection(select_all=True):
-            checked_iids.clear()
-            chk_char = "☑" if select_all else "☐"
-            for i, item in enumerate(current_items):
-                iid = str(i)
-                if select_all:
-                    checked_iids.add(iid)
-                cat_display = f"[{item['category']}]" + (" 🔒바닐라" if item.get("is_vanilla") else (" 🔒공식" if item.get("is_official") else ""))
-                tree.item(iid, values=(chk_char, cat_display, item["src"], item["tgt"]))
-            update_selected_count()
-
-        def on_item_click(item):
-            selected_item["category"] = item["category"]
-            selected_item["src"] = item["src"]
-            selected_item["tgt"] = item["tgt"]
-            selected_item["is_vanilla"] = item.get("is_vanilla", False)
-
-            if item.get("is_vanilla"):
-                lbl_original.configure(text=f"{item['src']}  🔒 [바닐라 마인크래프트 공식 번역 - 수정 불가]")
-                entry_translated.configure(state="normal")
-                entry_translated.delete(0, 'end')
-                entry_translated.insert(0, item["tgt"])
-                entry_translated.configure(state="disabled")
-                btn_save.configure(state="disabled", fg_color="#3f3f46", text="🔒 바닐라 공식 (수정 불가)")
-            else:
-                lbl_original.configure(text=item["src"])
-                entry_translated.configure(state="normal")
-                entry_translated.delete(0, 'end')
-                entry_translated.insert(0, item["tgt"])
-                btn_save.configure(state="normal", fg_color="#15803d", text="💾 저장 및 즉시 적용")
-
-        def toggle_check(iid):
-            if not iid:
-                return
-            idx = int(iid)
-            if 0 <= idx < len(current_items):
-                if iid in checked_iids:
-                    checked_iids.remove(iid)
-                    chk_char = "☐"
-                else:
-                    checked_iids.add(iid)
-                    chk_char = "☑"
-                item = current_items[idx]
-                cat_display = f"[{item['category']}]" + (" 🔒바닐라" if item.get("is_vanilla") else (" 🔒공식" if item.get("is_official") else ""))
-                tree.item(iid, values=(chk_char, cat_display, item["src"], item["tgt"]))
-                update_selected_count()
-
-        def on_tree_click(event):
-            iid = tree.identify_row(event.y)
-            col = tree.identify_column(event.x)
-            if not iid:
-                return
-            idx = int(iid)
-            if 0 <= idx < len(current_items):
-                item = current_items[idx]
-                on_item_click(item)
-            if col == "#1":
-                toggle_check(iid)
-
-        def on_space_key(event):
-            sel = tree.selection()
-            if sel:
-                toggle_check(sel[0])
-
-        tree.bind("<ButtonRelease-1>", on_tree_click)
-        tree.bind("<space>", on_space_key)
-
-        def open_guide_modal():
-            guide_win = ctk.CTkToplevel(editor)
-            guide_win.title("💡 인게임 반영 가이드 & 주의사항")
-            guide_win.geometry("660x680")
-            guide_win.minsize(560, 520)
-            guide_win.grab_set()
-
-            scroller = ctk.CTkScrollableFrame(guide_win, fg_color="#121216", corner_radius=8)
-            scroller.pack(fill="both", expand=True, padx=16, pady=16)
-
-            # 1. ⚠️ 최상단 강조 경고 배너
-            warn_frame = ctk.CTkFrame(scroller, fg_color="#271c06", border_width=2, border_color="#f59e0b", corner_radius=8)
-            warn_frame.pack(fill="x", pady=(0, 14))
-
-            ctk.CTkLabel(
-                warn_frame,
-                text="⚠️ 이 세션 이전에 번역한 파일들은 수정한 내역이 변경되지 않습니다!",
-                font=ctk.CTkFont(family=FONT_NAME, size=13, weight="bold"),
-                text_color="#fde68a"
-            ).pack(anchor="w", padx=14, pady=(12, 4))
-
-            ctk.CTkLabel(
-                warn_frame,
-                text="오역 수정 이후에 다시 번역을 돌려 파일을 교체하시는 것을 추천드립니다.",
-                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
-                text_color="#fef3c7"
-            ).pack(anchor="w", padx=14, pady=(0, 12))
-
-            # 2. 기본 적용 규칙 안내
-            rule_frame = ctk.CTkFrame(scroller, fg_color="#1a1a22", corner_radius=8)
-            rule_frame.pack(fill="x", pady=(0, 14))
-
-            ctk.CTkLabel(
-                rule_frame, text="🎮 기본 반영 안내",
-                font=ctk.CTkFont(family=FONT_NAME, size=13, weight="bold"),
-                text_color="#38bdf8"
-            ).pack(anchor="w", padx=14, pady=(10, 4))
-
-            ctk.CTkLabel(
-                rule_frame,
-                text="• 마인크래프트를 끈 상태에서 수정 후 게임 실행 시 ➡️ [100% 자동 적용]\n• 마인크래프트가 켜져 있는 상태 ➡️ 아래 상황별 새로고침 명령어를 사용하세요.",
-                font=ctk.CTkFont(family=FONT_NAME, size=11), justify="left", text_color="#cbd5e1"
-            ).pack(anchor="w", padx=14, pady=(0, 10))
-
-            # 3. 상황별 인게임 새로고침 방법 (4개 독립 숨김 박스)
-            ctk.CTkLabel(
-                scroller, text="📋 상황별 인게임 새로고침 방법 (클릭하여 펼치기)",
-                font=ctk.CTkFont(family=FONT_NAME, size=13, weight="bold"),
-                text_color="#f1f5f9"
-            ).pack(anchor="w", pady=(4, 8))
-
-            cases = [
-                (
-                    "1. 퀘스트 모드 계열 (FTB Quests, Better Questing, HQM 등)",
-                    "• FTB Quests (1.12 ~ 1.20+): /ftbquests reload\n"
-                    "• Better Questing (1.7.10 ~ 1.12.2): /bq_admin default load\n"
-                    "• Hardcore Questing Mode (HQM): /hqm reload\n"
-                    "• Custom NPCs (퀘스트/대화): 대화창 닫고 다시 열기 또는 /reload"
-                ),
-                (
-                    "2. 아이템명 / 블록명 / 모드 언어 파일 (리소스팩)",
-                    "• 모든 모드 언어 파일 (.lang, ko_kr.json): [ F3 + T ] (단축키)\n"
-                    "  ※ 치트 권한 불필요! 인게임에서 리소스팩 전체를 즉시 다시 읽어 들입니다.\n"
-                    "• KubeJS 아이템/툴팁 스크립트: /kubejs reload client_scripts"
-                ),
-                (
-                    "3. 가이드북 및 레시피 모드 (Patchouli, 데이터팩)",
-                    "• 패출리 책 (Patchouli Books): /patchouli reload 또는 [ F3 + T ]\n"
-                    "• 데이터팩 / 레시피: /reload"
-                ),
-                (
-                    "4. 치트 권한(OP)이 없는 경우 (싱글 LAN 열기, 멀티 등)",
-                    "• 싱글플레이: ESC ➡️ 'LAN 서버 열기' ➡️ [치트 허용: ON] 후 명령어 입력\n"
-                    "• 멀티플레이 / 치트 불가 시: 월드 재접속(서버 재접속) 또는 마인크래프트 재실행"
-                ),
-            ]
-
-            for idx, (title, content) in enumerate(cases):
-                acc_container = ctk.CTkFrame(scroller, fg_color="#181820", corner_radius=6, border_width=1, border_color="#2b2b36")
-                acc_container.pack(fill="x", pady=4)
-
-                body_frame = ctk.CTkFrame(acc_container, fg_color="#121218", corner_radius=4)
-                ctk.CTkLabel(
-                    body_frame, text=content,
-                    font=ctk.CTkFont(family="Consolas" if os.name == 'nt' else FONT_NAME, size=11),
-                    justify="left", text_color="#93c5fd"
-                ).pack(anchor="w", padx=12, pady=10)
-
-                def make_toggle(b_frame, btn_ref, item_title):
-                    is_open = [False]
-                    def _toggle():
-                        is_open[0] = not is_open[0]
-                        if is_open[0]:
-                            b_frame.pack(fill="x", padx=6, pady=(0, 6))
-                            btn_ref.configure(text=f"▼  {item_title}", text_color="#67e8f9")
-                        else:
-                            b_frame.pack_forget()
-                            btn_ref.configure(text=f"▶  {item_title}", text_color="#e2e8f0")
-                    return _toggle
-
-                btn_toggle = ctk.CTkButton(
-                    acc_container, text=f"▶  {title}", anchor="w",
-                    font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
-                    fg_color="transparent", hover_color="#242430", text_color="#e2e8f0",
-                    height=32
-                )
-                btn_toggle.pack(fill="x", padx=4, pady=2)
-                toggle_cmd = make_toggle(body_frame, btn_toggle, title)
-                btn_toggle.configure(command=toggle_cmd)
-
-            # 4. 작업 주의사항 프레임
-            caution_frame = ctk.CTkFrame(scroller, fg_color="#1a1a22", corner_radius=8)
-            caution_frame.pack(fill="x", pady=(14, 4))
-
-            ctk.CTkLabel(
-                caution_frame, text="💡 작업 주의사항",
-                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
-                text_color="#a3e635"
-            ).pack(anchor="w", padx=14, pady=(10, 4))
-
-            ctk.CTkLabel(
-                caution_frame,
-                text="• 단어 일괄 치환 시 너무 짧은 1~2글자 일반 단어(조사 등) 치환에 주의하세요.\n"
-                     "• 공백(' ') 치환 시 해당 단어가 문장에서 완전히 삭제됩니다.\n"
-                     "• 잘못 수정했더라도 디스코드 알림이나 [되돌리기]를 통해 언제든 복구할 수 있습니다.",
-                font=ctk.CTkFont(family=FONT_NAME, size=11), justify="left", text_color="#cbd5e1"
-            ).pack(anchor="w", padx=14, pady=(0, 10))
-
-            btn_close = ctk.CTkButton(
-                guide_win, text="닫기", height=32,
-                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
-                fg_color="#334155", hover_color="#475569",
-                command=guide_win.destroy
-            )
-            btn_close.pack(pady=(0, 12))
-
-        def apply_hotpatch(old_tgt, new_tgt):
-            import temp_session_logger
-            if temp_session_logger.is_debug_mode():
-                self.log(f"🧪 [테스트 모드] 모드팩 파일 수정을 건너뜁니다. ({old_tgt} ➡️ {new_tgt})")
-                return
-
-            mp_dir = getattr(self.app_state, 'modpack_dir', None) or getattr(self, 'selected_modpack_path', None)
-            if not mp_dir or not os.path.isdir(mp_dir):
-                return
-
-            try:
-                import translation_editor
-                res = translation_editor.patch_modpack_files(mp_dir, old_tgt, new_tgt)
-                mp_name = res.get("modpack_name") or os.path.basename(mp_dir.rstrip(os.sep))
-                total = res.get("total", 0)
-                quests = res.get("quests", 0)
-                lang_res = res.get("lang_resources", 0)
-                books = res.get("books", 0)
-
-                if total > 0:
-                    self.log(
-                        f"⚡ [모드팩 파일 즉시 패치] '{mp_name}' 파일 총 {total}개 수정 완료 "
-                        f"(퀘스트: {quests}개, 리소스팩/아이템: {lang_res}개, 가이드북: {books}개)"
-                    )
-                else:
-                    self.log(f"ℹ️ [번역 메모리 갱신] 캐시 및 클라우드 DB에 반영되었습니다. ('{mp_name}' 모드팩 내 일치 항목 0개)")
-            except Exception as e:
-                self.log(f"⚠️ 모드팩 파일 즉시 패치 중 오류 발생: {e}")
-
-        def apply_batch_hotpatch(batch_changes):
-            import temp_session_logger
-            if temp_session_logger.is_debug_mode():
-                self.log(f"🧪 [테스트 모드] 모드팩 파일 일괄 수정을 건너뜁니다. ({len(batch_changes)}건)")
-                return
-
-            mp_dir = getattr(self.app_state, 'modpack_dir', None) or getattr(self, 'selected_modpack_path', None)
-            if not mp_dir or not os.path.isdir(mp_dir):
-                return
-
-            try:
-                import translation_editor
-                res = translation_editor.patch_modpack_batch_files(mp_dir, batch_changes)
-                mp_name = res.get("modpack_name") or os.path.basename(mp_dir.rstrip(os.sep))
-                total = res.get("total", 0)
-                quests = res.get("quests", 0)
-                lang_res = res.get("lang_resources", 0)
-                books = res.get("books", 0)
-
-                if total > 0:
-                    self.log(
-                        f"⚡ [모드팩 파일 즉시 패치] '{mp_name}' 파일 총 {total}개 일괄 치환 완료 "
-                        f"(퀘스트: {quests}개, 리소스팩/아이템: {lang_res}개, 가이드북: {books}개)"
-                    )
-                else:
-                    self.log(f"ℹ️ [번역 메모리 갱신] 캐시 및 클라우드 DB에 반영되었습니다. ('{mp_name}' 모드팩 내 일치 항목 0개)")
-            except Exception as e:
-                self.log(f"⚠️ 모드팩 파일 즉시 일괄 패치 중 오류 발생: {e}")
-
-        def register_glossary_rule(src, tgt):
-            if not chk_glossary_var.get() or not src or not tgt:
-                return
-            import temp_session_logger
-            if temp_session_logger.is_debug_mode():
-                self.log(f"🧪 [테스트 모드] 용어집 설정 저장을 건너뜁니다. ({src} ➡️ {tgt})")
-                return
-            clean_src = src.strip()
-            clean_tgt = tgt.strip()
-            if hasattr(self, 'app_state') and self.app_state:
-                target_lang = self.target_lang_combo.get() if hasattr(self, 'target_lang_combo') else "한국어 (Korean)"
-                self.app_state.glossary[clean_src] = clean_tgt
-                if target_lang not in self.app_state.glossaries_by_lang:
-                    self.app_state.glossaries_by_lang[target_lang] = {}
-                self.app_state.glossaries_by_lang[target_lang][clean_src] = clean_tgt
-                self.save_user_settings()
-                self.log(f"📖 [용어집 등록] '{clean_src}' = '{clean_tgt}' 규칙 저장 (향후 AI 오역 재발 방지)")
-
-        def do_search(*args):
-            tree.delete(*tree.get_children())
-            current_items.clear()
-            checked_iids.clear()
-            selected_item["category"] = None
-            selected_item["src"] = None
-            selected_item["tgt"] = None
-            lbl_original.configure(text="(아래 목록에서 수정할 항목을 클릭하세요)")
-            entry_translated.delete(0, 'end')
-
-            q = query_var.get().strip()
-            if len(q) < 1:
-                update_selected_count()
-                return
-
-            f_val = field_var.get()
-            s_field = "src" if "EN" in f_val else ("tgt" if "KO" in f_val else "all")
-
-            l_str = limit_var.get()
-            if "500" in l_str:
-                lim = 500
-            elif "3,000" in l_str:
-                lim = 3000
-            elif "5,000" in l_str:
-                lim = 5000
-            elif "전체" in l_str:
-                lim = 100000
-            else:
-                lim = 1000
-
-            results = translation_memory.search_memory(q, category=cat_var.get(), limit=lim, search_field=s_field)
-            current_items.extend(results)
-
-            for i, r in enumerate(results):
-                iid = str(i)
-                cat_display = f"[{r['category']}]" + (" 🔒바닐라" if r.get("is_vanilla") else (" 🔒공식" if r.get("is_official") else ""))
-                tree.insert("", "end", iid=iid, values=("☐", cat_display, r["src"], r["tgt"]))
-            update_selected_count()
-
-        entry_search.bind("<Return>", do_search)
-
-        def do_save():
-            if not selected_item["src"]:
-                self.show_messagebox("warning", "안내", "수정할 항목을 아래 목록에서 먼저 선택해 주세요.")
-                return
-            src_val = selected_item["src"]
-            if selected_item.get("is_vanilla") or translation_memory.is_vanilla_official_key(src_val, selected_item["category"]):
-                self.show_messagebox(
-                    "warning", "수정 불가",
-                    "바닐라 마인크래프트 공식 명칭은 게임 시스템 무결성을 위해 오역 수정기로 수정할 수 없습니다."
-                )
-                return
-
-            new_val = entry_translated.get().strip()
-            if not new_val:
-                self.show_messagebox("warning", "경고", "번역문을 입력해 주세요.")
-                return
-            old_val = selected_item["tgt"]
-
-            # 오역률 산출 (단순 수치 참고용)
-            err_rate, val_rate, verdict, det = translation_memory.calculate_translation_error_rate(
-                src_val, new_val, reference_hint=old_val
-            )
-            self.log(f"🔍 [오역률 검증] 원문 '{src_val}' ➡️ 수정 '{new_val}' | 오역률: {err_rate:.1f}%")
-
-            # 통일된 수정 확인 알림창
-            confirm_msg = (
-                f"정말 이렇게 수정하시겠습니까?\n\n"
-                f"• 영어 원문: {src_val}\n"
-                f"• 원래 번역: {old_val}\n"
-                f"• 바뀐 번역: {new_val}\n\n"
-                f"(오역률 감지: {err_rate:.1f}%)"
-            )
-            if not messagebox.askyesno("번역 수정 확인", confirm_msg, parent=editor):
-                return
-
-            # 캐시 업데이트 및 Cloudflare 커밋 큐 자동 등록
-            translation_memory.update_memory_entry(selected_item["category"], src_val, new_val)
-            apply_hotpatch(old_val, new_val)
-            register_glossary_rule(src_val, new_val)
-
-            # 디스코드 노란색 임베드 + 초록색 롤백 버튼 감사 로그 전송
-            translation_memory.dispatch_audit_report(
-                selected_item["category"], src_val, old_val, new_val,
-                error_rate=err_rate, validity=val_rate, verdict=verdict, details=det
-            )
-            selected_item["tgt"] = new_val
-            self.show_messagebox("info", "성공", f"수정사항이 저장되었습니다! (오역률: {err_rate:.1f}%)")
-            do_search()
-
-        def do_batch_replace():
-            selected_indices = sorted([int(iid) for iid in checked_iids if iid.isdigit() and int(iid) < len(current_items)])
-            if not selected_indices:
-                self.show_messagebox("warning", "경고", "치환할 항목을 하나 이상 선택(체크)해주세요.")
-                return
-
-            find_term = find_var.get().strip()
-            if not find_term:
-                self.show_messagebox("warning", "경고", "찾을 단어를 입력해주세요.")
-                return
-
-            # 바꿀 단어가 비어있거나 공백(space)이면 감지한 단어를 아예 삭제/제거
-            raw_repl = replace_var.get()
-            is_deletion = (not raw_repl) or (raw_repl.strip() == "")
-            repl_term = "" if is_deletion else raw_repl.strip()
-            repl_label = "[단어 삭제]" if is_deletion else f"'{repl_term}'"
-
-            # Tier 0 바닐라 마인크래프트 공식 항목 사전 필터링 (절대 불변)
-            selected_items = [current_items[i] for i in selected_indices]
-            valid_selected_items = []
-            vanilla_skipped_count = 0
-            for item in selected_items:
-                if item.get("is_vanilla") or translation_memory.is_vanilla_official_key(item["src"], item["category"]):
-                    vanilla_skipped_count += 1
-                else:
-                    valid_selected_items.append(item)
-
-            if vanilla_skipped_count > 0:
-                self.log(
-                    f"🔒 [공식 번역 보호] 선택 항목 중 바닐라 마인크래프트 공식 명칭 {vanilla_skipped_count}개는 "
-                    f"절대 불변 항목이므로 치환 대상에서 안전하게 자동 제외되었습니다."
-                )
-
-            if not valid_selected_items:
-                self.show_messagebox(
-                    "warning", "치환 불가",
-                    "선택된 모든 항목이 바닐라 마인크래프트 공식 명칭이므로 치환할 수 없습니다."
-                )
-                return
-
-            # 오역률 산출
-            target_basis = query_var.get().strip() or find_term or "단어"
-            err_rate, val_rate, verdict, det = translation_memory.calculate_translation_error_rate(
-                target_basis, repl_term or find_term, reference_hint=find_term
-            )
-
-            # 통일된 일괄 치환/삭제 확인 팝업창
-            confirm_msg = (
-                f"정말 이렇게 수정하시겠습니까?\n\n"
-                f"• 선택된 항목: 총 {len(valid_selected_items)}개"
-                + (f" (바닐라 공식 {vanilla_skipped_count}개 제외)" if vanilla_skipped_count > 0 else "") + "\n"
-                f"• 찾은 단어: '{find_term}'\n"
-                f"• 바뀐 번역: {repl_label}\n\n"
-                f"(오역률 감지: {err_rate:.1f}%)"
-            )
-            if not messagebox.askyesno("일괄 치환 확인", confirm_msg, parent=editor):
-                return
-
-            updated_count = 0
-            find_terms = [t.strip() for t in re.split(r'[,|/]', find_term) if t.strip()] if find_term else []
-            batch_changes = []
-
-            for item in valid_selected_items:
-                old_tgt = item["tgt"]
-                new_tgt = old_tgt
-                if find_terms:
-                    for ft in find_terms:
-                        pattern = re.compile(re.escape(ft), re.IGNORECASE)
-                        if pattern.search(new_tgt):
-                            new_tgt = pattern.sub(repl_term, new_tgt)
-                        elif pattern.search(item["src"]):
-                            new_tgt = new_tgt.replace(ft, repl_term)
-                else:
-                    new_tgt = repl_term
-
-                # 공백 치환(삭제) 시 남은 연속 공백 및 양끝 공백 정리
-                if is_deletion:
-                    new_tgt = re.sub(r'\s+', ' ', new_tgt).strip()
-
-                if new_tgt != old_tgt:
-                    batch_changes.append({
-                        "category": item["category"], "src": item["src"],
-                        "old_tgt": old_tgt, "new_tgt": new_tgt
-                    })
-                    item["tgt"] = new_tgt
-                    with translation_memory._lock:
-                        cache_dict = (
-                            translation_memory._items_cache if item["category"] == "items" else
-                            (translation_memory._books_cache if item["category"] == "books" else translation_memory._global_cache)
-                        )
-                        translation_memory._store(cache_dict, item["src"], new_tgt, "한국어(Korean)", force_override=True)
-                    updated_count += 1
-
-            if updated_count > 0:
-                translation_memory.save_memory(flush_now=True)
-                apply_batch_hotpatch(batch_changes)
-                action_text = f"단어 삭제: '{find_term}' 제거" if is_deletion else f"일괄 치환: '{find_term}' ➡️ '{repl_term}'"
-                translation_memory.dispatch_batch_audit_report(
-                    batch_changes, error_rate=err_rate, validity=val_rate, verdict=verdict,
-                    details=f"{action_text} (총 {updated_count}건)"
-                )
-
-            q_term = query_var.get().strip()
-            if q_term and not is_deletion:
-                register_glossary_rule(q_term, repl_term)
-
-            self.show_messagebox("info", "완료", f"총 {updated_count}개 항목이 {repl_label}(으)로 일괄 수정되었습니다.")
-            do_search()
-
-        def do_ai_retranslate():
-            selected_indices = sorted([int(iid) for iid in checked_iids if iid.isdigit() and int(iid) < len(current_items)])
-            if not selected_indices:
-                self.show_messagebox("warning", "경고", "AI로 재번역할 항목을 하나 이상 선택(체크)해주세요.")
-                return
-
-            selected_items = [current_items[i] for i in selected_indices]
-
-            # 1. Tier 0 바닐라 마인크래프트 공식 항목 사전 제외 (절대 불변)
-            valid_items = []
-            vanilla_skipped_count = 0
-            for item in selected_items:
-                if item.get("is_vanilla") or translation_memory.is_vanilla_official_key(item["src"], item["category"]):
-                    vanilla_skipped_count += 1
-                else:
-                    valid_items.append(item)
-
-            if vanilla_skipped_count > 0:
-                self.log(
-                    f"🔒 [공식 번역 보호] 선택 항목 중 바닐라 마인크래프트 공식 명칭 {vanilla_skipped_count}개는 "
-                    f"절대 불변 항목이므로 AI 재번역 대상에서 자동 제외되었습니다."
-                )
-
-            if not valid_items:
-                self.show_messagebox(
-                    "warning", "재번역 불가",
-                    "선택된 모든 항목이 바닐라 마인크래프트 공식 명칭이므로 재번역할 수 없습니다."
-                )
-                return
-
-            # 2. 메인 화면 번역 설정 및 API 키 검증 (그대로 가져오기)
-            engine_key, api_key, is_paid, ai_model, target_lang, custom_url = self.validate_inputs()
-            if not engine_key:
-                return
-
-            # 3. 사용자 시작 확인
-            model_display = ai_model or engine_key
-            target_tier = translation_memory.get_model_tier(ai_model)
-            confirm_msg = (
-                f"선택한 {len(valid_items)}개 항목을 AI로 재번역하시겠습니까?\n\n"
-                f"• 적용 모델: {model_display}\n"
-                f"• 대상 언어: {target_lang}\n"
-                + (f"• 바닐라 공식 {vanilla_skipped_count}개 자동 제외됨\n" if vanilla_skipped_count > 0 else "") +
-                f"\n(완료 후 한 줄 비교 로그를 검토하고 적용 여부(O/X)를 결정할 수 있습니다.)"
-            )
-            if not messagebox.askyesno("AI 재번역 시작", confirm_msg, parent=editor):
-                return
-
-            # 4. 프로그레스/대기 팝업 표시
-            prog_win = ctk.CTkToplevel(editor)
-            prog_win.title("🤖 AI 재번역 진행 중...")
-            prog_win.geometry("380x140")
-            prog_win.resizable(False, False)
-            prog_win.grab_set()
-
-            ctk.CTkLabel(
-                prog_win, text=f"🤖 {len(valid_items)}개 항목 AI 재번역 중...",
-                font=ctk.CTkFont(family=FONT_NAME, size=13, weight="bold"),
-                text_color="#38bdf8"
-            ).pack(pady=(20, 6))
-
-            ctk.CTkLabel(
-                prog_win, text=f"모델: {model_display} | 잠시만 기다려주세요...",
-                font=ctk.CTkFont(family=FONT_NAME, size=11),
-                text_color="#94a3b8"
-            ).pack(pady=(0, 10))
-
-            prog_bar = ctk.CTkProgressBar(prog_win, width=300, mode="indeterminate")
-            prog_bar.pack(pady=(0, 15))
-            prog_bar.start()
-
-            # 5. 백그라운드 스레드에서 API 호출
-            def _run():
-                texts_to_trans = [it["src"] for it in valid_items]
-                active_glossary = getattr(self.app_state, 'glossary', None) if hasattr(self, 'app_state') else None
-                try:
-                    results = translation_editor.retranslate_texts(
-                        texts_to_trans, engine_key, api_key, is_paid=is_paid,
-                        ai_model=ai_model, target_lang=target_lang,
-                        custom_url=custom_url, glossary=active_glossary
-                    )
-                except Exception as e:
-                    self.after(0, lambda: _on_error(str(e)))
-                    return
-
-                self.after(0, lambda: _on_finish(results))
-
-            def _on_error(err_msg):
-                if prog_win.winfo_exists():
-                    prog_win.destroy()
-                self.show_messagebox("error", "오류", f"AI 재번역 중 오류가 발생했습니다:\n{err_msg}")
-
-            def _on_finish(results):
-                if prog_win.winfo_exists():
-                    prog_win.destroy()
-                open_review_dialog(valid_items, results, model_display, target_tier)
-
-            threading.Thread(target=_run, daemon=True).start()
-
-        def open_review_dialog(items, new_translations, model_name, m_tier):
-            review_win = ctk.CTkToplevel(editor)
-            review_win.title("🤖 AI 재번역 결과 검토 & 적용 (O/X)")
-            review_win.geometry("980x640")
-            review_win.minsize(820, 500)
-            review_win.grab_set()
-
-            # 상단 헤더
-            top_frame = ctk.CTkFrame(review_win, fg_color="transparent")
-            top_frame.pack(fill="x", padx=16, pady=(16, 8))
-
-            ctk.CTkLabel(
-                top_frame, text=f"✨ {len(items)}개 항목 AI 재번역 완료",
-                font=ctk.CTkFont(family=FONT_NAME, size=15, weight="bold"),
-                text_color="#38bdf8"
-            ).pack(anchor="w")
-
-            changed_count = sum(1 for it, nt in zip(items, new_translations) if nt != it["tgt"])
-            ctk.CTkLabel(
-                top_frame,
-                text=f"• 적용 모델: {model_name} | 변경 감지: {changed_count}개 (동일: {len(items) - changed_count}개)\n"
-                     f"• 아래 한 줄 비교 로그를 검토한 후 [✅ 적용하기 (O)] 또는 [❌ 취소 (X)]를 선택하세요.",
-                font=ctk.CTkFont(family=FONT_NAME, size=11),
-                justify="left", text_color="#cbd5e1"
-            ).pack(anchor="w", pady=(4, 0))
-
-            # 중앙: 원문, 기존 번역, AI 재번역이 모두 한 줄에 들어가는 텍스트 박스
-            box_frame = ctk.CTkFrame(review_win, fg_color="#121216", corner_radius=8, border_width=1, border_color="#2b2b36")
-            box_frame.pack(fill="both", expand=True, padx=16, pady=8)
-
-            txt_box = ctk.CTkTextbox(
-                box_frame,
-                font=ctk.CTkFont(family="Consolas" if os.name == 'nt' else FONT_NAME, size=11),
-                fg_color="transparent", text_color="#f1f5f9", wrap="none"
-            )
-            txt_box.pack(fill="both", expand=True, padx=8, pady=8)
-
-            # 한 줄 로그 채우기 (원문, 기존 번역, AI 재번역 모두 한 줄에 표시)
-            for idx, (item, new_t) in enumerate(zip(items, new_translations), 1):
-                clean_src = item['src'].replace('\n', ' ').strip()
-                clean_old = item['tgt'].replace('\n', ' ').strip()
-                clean_new = new_t.replace('\n', ' ').strip()
-                line = f"[{idx:02d}] 원문: {clean_src} ｜ 기존 번역: {clean_old} ➡️ AI 재번역: {clean_new}\n"
-                txt_box.insert("end", line)
-
-            txt_box.configure(state="disabled")
-
-            # 하단 액션 버튼 바
-            btn_row = ctk.CTkFrame(review_win, fg_color="transparent")
-            btn_row.pack(fill="x", padx=16, pady=(8, 16))
-
-            def on_apply():
-                batch_changes = []
-                for item, new_t in zip(items, new_translations):
-                    old_t = item["tgt"]
-                    if new_t != old_t:
-                        batch_changes.append({
-                            "category": item["category"], "src": item["src"],
-                            "old_tgt": old_t, "new_tgt": new_t
-                        })
-                        item["tgt"] = new_t
-                        with translation_memory._lock:
-                            cache_dict = (
-                                translation_memory._items_cache if item["category"] == "items" else
-                                (translation_memory._books_cache if item["category"] == "books" else translation_memory._global_cache)
-                            )
-                            translation_memory._store(
-                                cache_dict, item["src"], new_t, "한국어(Korean)",
-                                force_override=True, tier=m_tier
-                            )
-
-                if batch_changes:
-                    translation_memory.save_memory(flush_now=True)
-                    apply_batch_hotpatch(batch_changes)
-                    translation_memory.dispatch_batch_audit_report(
-                        batch_changes,
-                        details=f"AI 재번역 ({model_name}) 적용 ({len(batch_changes)}건)"
-                    )
-                    self.show_messagebox("info", "적용 완료", f"총 {len(batch_changes)}개 항목의 AI 재번역이 성공적으로 적용되었습니다!")
-                else:
-                    self.show_messagebox("info", "안내", "기존 번역과 달라진 항목이 없어 적용되지 않았습니다.")
-
-                review_win.destroy()
-                do_search()
-
-            btn_apply = ctk.CTkButton(
-                btn_row, text="✅ 적용하기 (O)", width=160, height=34,
-                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
-                fg_color="#15803d", hover_color="#166534",
-                command=on_apply
-            )
-            btn_apply.pack(side="right", padx=(8, 0))
-
-            btn_cancel = ctk.CTkButton(
-                btn_row, text="❌ 취소 (X)", width=120, height=34,
-                font=ctk.CTkFont(family=FONT_NAME, size=12),
-                fg_color="#334155", hover_color="#475569",
-                command=review_win.destroy
-            )
-            btn_cancel.pack(side="right")
-
-        # ================================================================
-        # 새 번역 데이터 추가 다이얼로그
-        # ================================================================
-        def open_add_dialog():
-            dlg = ctk.CTkToplevel(editor)
-            dlg.title("➕ 새 번역 데이터 추가")
-            dlg.geometry("520x370")
-            dlg.minsize(480, 320)
-            dlg.grab_set()
-
-            ctk.CTkLabel(
-                dlg, text="캐시 테이블에 새 번역을 직접 등록합니다.",
-                font=ctk.CTkFont(family=FONT_NAME, size=13, weight="bold"), text_color="#38bdf8"
-            ).pack(padx=16, pady=(16, 8), anchor="w")
-
-            form_frame = ctk.CTkFrame(dlg, fg_color="transparent")
-            form_frame.pack(fill="both", expand=True, padx=16, pady=4)
-
-            ctk.CTkLabel(form_frame, text="카테고리:").grid(row=0, column=0, sticky="w", pady=4)
-            add_cat_var = ctk.StringVar(value="items")
-            add_cat_combo = ctk.CTkComboBox(form_frame, variable=add_cat_var, values=["items", "general", "books"], width=120)
-            add_cat_combo.grid(row=0, column=1, sticky="w", pady=4)
-
-            ctk.CTkLabel(form_frame, text="영어 원문:").grid(row=1, column=0, sticky="w", pady=4)
-            add_src_entry = ctk.CTkEntry(form_frame, placeholder_text="예: Tinkers' Construct", width=340)
-            add_src_entry.grid(row=1, column=1, sticky="we", pady=4)
-            curr_q = query_var.get().strip()
-            if curr_q:
-                add_src_entry.insert(0, curr_q)
-
-            ctk.CTkLabel(form_frame, text="한글 번역문:").grid(row=2, column=0, sticky="w", pady=4)
-            add_tgt_entry = ctk.CTkEntry(form_frame, placeholder_text="예: 팅커스 컨스트럭트", width=340)
-            add_tgt_entry.grid(row=2, column=1, sticky="we", pady=4)
-
-            add_glossary_var = ctk.BooleanVar(value=True)
-            ctk.CTkCheckBox(
-                form_frame, text="📖 용어집(Glossary)에도 고정 등록 (향후 오역 재발 방지)",
-                variable=add_glossary_var, text_color="#38bdf8", fg_color="#0284c7"
-            ).grid(row=3, column=1, sticky="w", pady=(8, 12))
-
-            form_frame.grid_columnconfigure(1, weight=1)
-
-            def do_add_save():
-                src = add_src_entry.get().strip()
-                tgt = add_tgt_entry.get().strip()
-                cat = add_cat_var.get()
-                if not src or not tgt:
-                    messagebox.showwarning("경고", "원문과 번역문을 모두 입력해주세요.", parent=dlg)
-                    return
-
-                err_rate, val_rate, verdict, det = translation_memory.calculate_translation_error_rate(src, tgt)
-                self.log(f"🔍 [신규 등록 오역률 검증] 원문 '{src}' ➡️ 번역 '{tgt}' | 오역률: {err_rate:.1f}% ({verdict})")
-
-                translation_memory.update_memory_entry(cat, src, tgt)
-                apply_hotpatch(src, tgt)
-                if add_glossary_var.get():
-                    register_glossary_rule(src, tgt)
-                translation_memory.dispatch_audit_report(
-                    cat, src, "", tgt,
-                    error_rate=err_rate, validity=val_rate, verdict=verdict, details=det
-                )
-
-                dlg.destroy()
-                self.show_messagebox("info", "등록 완료", f"'{src}' ➡️ '{tgt}' 데이터가 성공적으로 등록되었습니다!")
-                query_var.set(src)
-                do_search()
-
-            btn_box = ctk.CTkFrame(dlg, fg_color="transparent")
-            btn_box.pack(fill="x", padx=16, pady=(0, 16))
-
-            ctk.CTkButton(
-                btn_box, text="💾 저장 및 등록",
-                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
-                fg_color="#15803d", hover_color="#166534",
-                command=do_add_save
-            ).pack(side="right", padx=(8, 0))
-
-            ctk.CTkButton(
-                btn_box, text="취소", fg_color="#3f3f46", hover_color="#52525b",
-                command=dlg.destroy
-            ).pack(side="right")
+        from memory_editor_window import MemoryEditorWindow
+        return MemoryEditorWindow(self)
 
     def open_ai_model_info_modal(self):
-        """AI 모델별 무료/유료 구분, 회사별 스펙, 파일 100개당 예상 비용 및 RPD 가이드 모달"""
+        """AI 모델별 무료/유료 구분, 회사별 스펙, 1,000개 항목당 예상 비용 및 RPD 가이드 모달"""
         info_win = ctk.CTkToplevel(self)
-        info_win.title("ℹ️ AI 모델 정보 (무료 vs 유료 · 회사별 요금 · 파일 100개당 예상 비용)")
+        info_win.title("ℹ️ AI 모델 정보 (무료 vs 유료 · 회사별 요금 · 1,000개 항목당 예상 비용)")
         info_win.geometry("820x720")
         info_win.minsize(700, 540)
         info_win.transient(self)
@@ -1761,7 +725,7 @@ class UIScreensMixin:
                 "💡 [핵심 요약: 무료 vs 유료 API]\n"
                 "• 카드 등록이나 선결제 없이 쓸 수 있는 진정한 무료 AI API는 사실상 Google Gemini뿐입니다!\n"
                 "• OpenAI(GPT), DeepSeek, Claude는 모두 최소 $2~$5 이상의 선불 크레딧 충전(유료 결제)이 필수입니다.\n"
-                "• 아래 '파일 100개당 예상 비용'은 캐시 적중을 제외한 순수 신규 번역(약 5만~20만 토큰 소모) 기준 추정치입니다."
+                "• 아래 '신규 항목 1,000개당 예상 비용'은 진행 로그의 번역 개수(예: /4,847) 기준, 단어+문장 혼합 평균 길이(입력 2.5만~4만 / 출력 3.5만~5.5만 토큰) 추정치입니다."
             ),
             font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
             text_color="#e0f2fe", justify="left"
@@ -1807,6 +771,27 @@ class UIScreensMixin:
                 _toggle()
 
         # ====================================================================
+        # [요약] 한눈에 보는 목적별 추천 모델 (가성비 / 성능 / 고품질)
+        # ====================================================================
+        quick_pick_body = (
+            "  💰 [가성비 최강 — 대형 모드팩 5,000~20,000개 대량 번역]\n"
+            "     • 무료 1순위: gemini-3.5-flash-lite (0원 · 500 RPD / 15 RPM, 소진 시 3.1-flash-lite 백업)\n"
+            "     • 유료 1순위: claude-haiku-5-5 / gpt-6-luna (1,000개당 30~45원 · 초저가 고속)\n"
+            "     • 유료 최저가(비피크): deepseek-flash (1,000개당 30~55원, 저녁~오전/주말 15~28원)\n\n"
+            "  ⚡ [성능 · 밸런스 — 품질과 비용의 균형]\n"
+            "     • 저비용 고성능: deepseek-v4-pro (1,000개당 120~190원)\n"
+            "     • Gemini 유료 주력: gemini-3.8-flash (1,000개당 210~330원)\n"
+            "     • 중급 올라운더: gpt-6.1-terra (1,000개당 280~440원) / gemini-4-hydrogen (무료 5 RPM · 유료 420~660원)\n\n"
+            "  👑 [고품질 정밀 — 스토리 퀘스트 · 가이드북 · 오역 AI 재번역]\n"
+            "     • 스토리/어투 1순위: claude-sonnet-5-5 (1,000개당 530~840원)\n"
+            "     • 서식/지시 정밀 1순위: gpt-6.1-sol (1,000개당 560~880원)\n"
+            "     • Gemini 최상위: gemini-4-argon (1,000개당 프로모션 560~880원 / 12월 정가 1,120~1,760원)\n\n"
+            "  💡 추천 조합: 대량 번역은 무료 flash-lite 또는 유료 haiku-5-5/gpt-6-luna로 빠르게 밀고,\n"
+            "     어색한 핵심 문장만 오역 수정기 'AI 재번역'에서 sonnet-5-5 / gpt-6.1-sol로 다듬는 것이 가장 효율적입니다."
+        )
+        create_accordion(scroll, "⭐ 한눈에 보는 목적별 추천 모델 (가성비 · 성능 · 고품질)", quick_pick_body, default_open=True, active_color="#b45309")
+
+        # ====================================================================
         # [대분류 1] 무료 AI API
         # ====================================================================
         ctk.CTkLabel(
@@ -1819,22 +804,25 @@ class UIScreensMixin:
             "• Google AI Studio에서 API 키만 발급받으면 결제 수단 등록 없이 즉시 무료로 작동합니다.\n"
             "• 무료 할당량(RPD)은 'API 키' 단위가 아닌 'Google Cloud 프로젝트' 단위로 적용되며 매일 태평양 자정(한국 오후 4~5시)에 초기화됩니다.\n\n"
             "  1) gemini-3.5-flash-lite (★무료 대량 번역 1순위 추천 / 기본값)\n"
-            "     - 일일 무료 한도: 500 ~ 1,500 RPD | 분당 10~15 RPM | 분당 250,000 TPM\n"
-            "     - 예상 비용: 0원 (완전 무료) | 대형 모드팩도 하루 안에 거뜬히 번역 가능한 주력 모델\n\n"
+            "     - 일일 무료 한도: 500 RPD | 분당 15 RPM (자동 10~11 RPM 속도 조절) | 분당 250,000 TPM\n"
+            "     - 예상 비용: 0원 (완전 무료) | 210점 배치 기준 하루 최대 약 3만~10만 항목 무료 번역 가능\n\n"
             "  2) gemini-3.1-flash-lite\n"
-            "     - 일일 무료 한도: 500 ~ 1,500 RPD | 분당 15 RPM | 분당 250,000 TPM\n"
-            "     - 예상 비용: 0원 | 3.5-flash-lite 할당량 소진 시 스위칭하기 좋은 백업 모델\n\n"
+            "     - 일일 무료 한도: 500 RPD | 분당 15 RPM (자동 10~11 RPM 속도 조절) | 분당 250,000 TPM\n"
+            "     - 예상 비용: 0원 | 3.5-flash-lite 일일 500 RPD 소진 시 스위칭하기 좋은 백업 모델\n\n"
             "  3) gemini-3.8-flash (⚠️ 무료 사용 시 주의)\n"
-            "     - 일일 무료 한도: 하루 딱 20 RPD / 분당 5 RPM 제한!\n"
-            "     - 예상 비용: 0원 | 성능은 최상급이나 무료 계정은 하루 20회 호출 후 즉시 차단되므로 소량 번역에만 사용하세요."
+            "     - 일일 무료 한도: 하루 20 RPD / 분당 5 RPM 제한 (자동 4.5 RPM 이하 보호)\n"
+            "     - 예상 비용: 0원 | 성능은 최상급이나 무료 계정은 소량 번역에만 사용하세요.\n\n"
+            "  4) gemini-4-hydrogen (최신 Gemini 4 세대)\n"
+            "     - 무료 분당 5 RPM 제한 (자동 4.5 RPM 이하 보호)\n"
+            "     - 예상 비용: 0원 (무료 티어) | 최신 세대 고성능 모델"
         )
-        create_accordion(scroll, "🟢 Google AI (Gemini) 무료 티어 (모델별 일일 RPD 한도)", free_gemini_body, default_open=True, active_color="#15803d")
+        create_accordion(scroll, "🟢 Google AI (Gemini) 무료 티어 (모델별 일일 RPD / RPM 한도)", free_gemini_body, default_open=True, active_color="#15803d")
 
         # ====================================================================
-        # [대분류 2] 유료 AI API (회사별 구분 & 파일 100개당 예상 비용)
+        # [대분류 2] 유료 AI API (회사별 구분 & 신규 항목 1,000개당 예상 비용)
         # ====================================================================
         ctk.CTkLabel(
-            scroll, text="💳 2. 유료 AI API (선불 충전/결제 등록 필수 — 회사별 요금 & 파일 100개당 예상 비용)",
+            scroll, text="💳 2. 유료 AI API (선불 충전/결제 등록 필수 — 회사별 요금 & 신규 1,000개 항목당 예상 비용)",
             font=ctk.CTkFont(family=FONT_NAME, size=14, weight="bold"),
             text_color="#38bdf8"
         ).pack(anchor="w", padx=10, pady=(14, 4))
@@ -1842,61 +830,64 @@ class UIScreensMixin:
         paid_companies = [
             (
                 "🏢 [Google AI (Gemini) 유료] (결제 카드 연동 후 사용한 만큼 후불 결제)",
-                "• 결제 수단 연동 즉시 무료 RPD 제한이 해제되어 초고속·고품질 배치 번역(1,000+ RPM)이 가능합니다.\n\n"
+                "• 결제 수단 연동 즉시 무료 RPD/RPM 제한이 해제되며, 150점 가중치 병렬 배치(10스레드) + 커넥션 풀 재사용으로 초고속 번역이 가능합니다.\n\n"
                 "  • gemini-3.1-flash-lite : 입력 $0.20 / 출력 $1.50 (1M 토큰당)\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.08 ~ $0.35 (약 110원 ~ 490원)\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.06 ~ $0.09 (약 80원 ~ 130원)\n\n"
                 "  • gemini-3.5-flash-lite : 입력 $0.30 / 출력 $2.50 (1M 토큰당)\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.14 ~ $0.55 (약 200원 ~ 770원)\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.10 ~ $0.15 (약 135원 ~ 210원)\n\n"
                 "  • gemini-3.6-flash : 입력 ~$0.50 / 출력 ~$3.00 (1M 토큰당)\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.18 ~ $0.68 (약 250원 ~ 950원)\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.12 ~ $0.19 (약 165원 ~ 260원)\n\n"
                 "  • gemini-3.8-flash (★유료 주력 워크호스) : 입력 $0.75 / 출력 $3.75 (1M 토큰당)\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.22 ~ $0.90 (약 300원 ~ 1,250원)\n\n"
-                "  • gemini-4-argon (★유료 전용 최상위 플래그십) : 입력 $2.00 / 출력 $10.00 (1M 토큰당)\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.60 ~ $2.40 (약 840원 ~ 3,300원)"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.15 ~ $0.24 (약 210원 ~ 330원)\n\n"
+                "  • gemini-4-hydrogen (최신 Gemini 4 세대 고성능) : 입력 $1.50 (캐시 $0.075) / 출력 $7.50 (1M 토큰당)\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.30 ~ $0.47 (약 420원 ~ 660원)\n\n"
+                "  • gemini-4-argon (★유료 전용 최상위 플래그십) : 입력 $2.00 / 출력 $10.00 (12/1 정가 $4.00 / $20.00)\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.40 ~ $0.63 (약 560원 ~ 880원 / 정가 시 1,120원 ~ 1,760원)"
             ),
             (
                 "🏢 [OpenAI (ChatGPT)] (최소 $5 선불 크레딧 충전 필수)",
-                "• OpenAI는 $0 미결제 상태에서는 3 RPM 제한으로 번역이 불가능하며, 최소 $5 선불 충전(Tier 1: 500 RPM)이 필수입니다.\n\n"
+                "• OpenAI는 $0 미결제 상태에서는 3 RPM 제한으로 번역이 불가능하며, 최소 $5 선불 충전(Tier 1: 500 RPM)이 필수입니다.\n"
+                "• ID 매핑 JSON 배치(최대 150점) + 10스레드 병렬 처리가 적용되어 기존 단건 호출 대비 입력 토큰 비용이 크게 절감됩니다.\n\n"
                 "  • gpt-6-luna (👑유료 가성비 전체 1위 / 기본값) : 입력 $0.10 (캐시 $0.01) / 출력 $0.50\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.03 ~ $0.12 (약 40원 ~ 170원) — 가장 저렴하고 빠른 최신 모델!\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.02 ~ $0.03 (약 30원 ~ 45원) — 가장 저렴하고 빠른 최신 모델!\n\n"
                 "  • gpt-4o-mini (구버전 호환용) : 입력 $0.15 / 출력 $0.60\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.04 ~ $0.15 (약 50원 ~ 210원)\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.025 ~ $0.04 (약 35원 ~ 55원)\n\n"
                 "  • gpt-4.1-mini : 입력 $0.40 / 출력 $1.60\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.10 ~ $0.40 (약 140원 ~ 560원)\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.07 ~ $0.10 (약 95원 ~ 145원)\n\n"
                 "  • gpt-5-mini : 입력 $0.25 / 출력 $2.00\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.10 ~ $0.45 (약 140원 ~ 630원)\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.08 ~ $0.12 (약 110원 ~ 170원)\n\n"
                 "  • gpt-6.1-terra (중급 밸런스) : 입력 $1.00 / 출력 $5.00\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.30 ~ $1.20 (약 420원 ~ 1,700원)\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.20 ~ $0.32 (약 280원 ~ 440원)\n\n"
                 "  • gpt-4.1 : 입력 $2.00 / 출력 $8.00\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.50 ~ $2.00 (약 700원 ~ 2,800원)\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.33 ~ $0.52 (약 460원 ~ 730원)\n\n"
                 "  • gpt-5 : 입력 $1.25 / 출력 $10.00\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.55 ~ $2.20 (약 770원 ~ 3,100원)\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.38 ~ $0.60 (약 530원 ~ 840원)\n\n"
                 "  • gpt-6.1-sol (★고성능 정밀 번역) : 입력 $2.00 / 출력 $10.00\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.60 ~ $2.40 (약 840원 ~ 3,300원)\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.40 ~ $0.63 (약 560원 ~ 880원)\n\n"
                 "  • gpt-6-astra (최상위 초고가 플래그십) : 입력 $10.00 / 출력 $50.00\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $3.00 ~ $12.00 (약 4,200원 ~ 16,800원)"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $2.00 ~ $3.15 (약 2,800원 ~ 4,410원)"
             ),
             (
                 "🏢 [Anthropic (Claude)] (최소 $5 선불 크레딧 충전 필수)",
                 "• 번역 엔진에서 'Anthropic (Claude)' 선택 후 공식 API 키만 입력하면 바로 작동합니다.\n"
-                "• 한국어 어투와 판타지/스토리 문맥이 가장 매끄러운 모델군입니다.\n\n"
+                "• 한국어 어투와 판타지/스토리 문맥이 가장 매끄러우며, Prompt Caching + 150점 배치 최적화로 반복 입력 비용이 절감됩니다.\n\n"
                 "  • claude-haiku-5-5 (👑한국어 자연스러움 가성비 1위 / 기본값) : 입력 $0.10 (캐시 $0.01) / 출력 $0.50\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.03 ~ $0.12 (약 40원 ~ 170원)\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.02 ~ $0.03 (약 30원 ~ 45원)\n\n"
                 "  • claude-sonnet-5-5 (★고품질 번역의 정석) : 입력 $2.00 (캐시 $0.10) / 출력 $10.00\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.60 ~ $2.40 (약 840원 ~ 3,300원)\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.38 ~ $0.60 (약 530원 ~ 840원)\n\n"
                 "  • claude-opus-5-5 : 입력 $4.00 / 출력 $20.00\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $1.20 ~ $4.80 (약 1,700원 ~ 6,700원)\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.80 ~ $1.26 (약 1,120원 ~ 1,760원)\n\n"
                 "  • claude-fable-5-2 : 입력 $10.00 / 출력 $50.00\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $3.00 ~ $12.00 (약 4,200원 ~ 16,800원)"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $2.00 ~ $3.15 (약 2,800원 ~ 4,410원)"
             ),
             (
                 "🏢 [DeepSeek (딥시크)] (최소 $2 선불 크레딧 충전 필수)",
                 "• 번역 엔진에서 'DeepSeek (딥시크)' 선택 후 API 키만 입력하면 바로 작동합니다.\n"
-                "• 비피크 시간대(한국 시간 오후 7시 ~ 익일 오전 10시 및 주말)에는 자동으로 50% 반값 할인이 적용됩니다!\n\n"
+                "• 150점 ID 매핑 배치 + 자동 Prefix Cache 할인 + 비피크 시간대(한국 시간 오후 7시 ~ 익일 오전 10시 및 주말) 50% 할인이 적용됩니다!\n\n"
                 "  • deepseek-flash (V4.1, 👑초저가 가성비 추천 / 기본값) : 입력 $0.15 (캐시 $0.003) / 출력 $0.60\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.02 ~ $0.15 (약 30원 ~ 200원, 비피크 할인 시 약 15원 ~ 100원!)\n\n"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.02 ~ $0.04 (약 30원 ~ 55원, 비피크 할인 시 약 15원 ~ 28원!)\n\n"
                 "  • deepseek-v4-pro (고성능 추론 모델) : 입력 $0.66 / 출력 $1.98\n"
-                "    👉 감지된 파일 100개당 예상 비용: 약 $0.13 ~ $0.50 (약 180원 ~ 700원)"
+                "    👉 신규 1,000개 항목당 예상 비용: 약 $0.09 ~ $0.14 (약 120원 ~ 190원)"
             ),
         ]
 

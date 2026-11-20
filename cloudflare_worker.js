@@ -116,7 +116,6 @@
 
           if (listed.objects && listed.objects.length > 0) {
             for (const obj of listed.objects) {
-              lastKey = obj.key;
               try {
                 const fileObj = await env.R2_BUCKET.get(obj.key);
                 if (fileObj) {
@@ -127,8 +126,10 @@
                     }
                   }
                 }
+                lastKey = obj.key;
               } catch (readErr) {
-                // 개별 커밋 파일 손상 시 무시하고 다음 파일 계속 처리
+                // 일시적 R2 읽기 오류 시 lastKey를 선행 진행시키지 않고 중단하여 다음 /pull에서 재시도 보장
+                break;
               }
             }
           }
@@ -302,34 +303,9 @@
 
           const uploaded = await env.R2_BUCKET.put(key, bodyBytes, putOptions);
 
-          // 🌟 스냅샷에 통합 완료된 과거 커밋 파일 자동 정리 (purge)
-          let purgedCount = 0;
-
-          if (purgeUntil || purgeAll) {
-            let cursor = undefined;
-            while (true) {
-              const listOpt = { prefix: "commits/", limit: 1000, cursor };
-              const listed = await env.R2_BUCKET.list(listOpt);
-              if (!listed.objects || listed.objects.length === 0) break;
-
-              const keysToDelete = [];
-              for (const obj of listed.objects) {
-                if (purgeAll || (purgeUntil && obj.key <= purgeUntil)) {
-                  keysToDelete.push(obj.key);
-                }
-              }
-
-              if (keysToDelete.length > 0) {
-                await env.R2_BUCKET.delete(keysToDelete);
-                purgedCount += keysToDelete.length;
-              }
-
-              if (!listed.truncated || (purgeUntil && listed.objects[listed.objects.length - 1].key > purgeUntil)) {
-                break;
-              }
-              cursor = listed.cursor;
-            }
-          }
+          // 단일 카테고리 스냅샷 업로드 시 다른 카테고리 미병합 커밋 유실 방지를 위해
+          // 커밋 일괄 정리는 3개 마스터 모두 성공 후 전용 엔드포인트(POST /commits/purge)에서만 수행합니다.
+          const purgedCount = 0;
 
           return new Response(
             JSON.stringify({
@@ -384,6 +360,14 @@
           if (!bodyText || bodyText.length < 20) {
             return new Response("Empty words data rejected", { status: 400, headers: corsHeaders });
           }
+          try {
+            const parsedWords = JSON.parse(bodyText);
+            if (!parsedWords || typeof parsedWords !== "object" || Array.isArray(parsedWords)) {
+              return new Response("Invalid words JSON object", { status: 400, headers: corsHeaders });
+            }
+          } catch (_) {
+            return new Response("Malformed JSON rejected", { status: 400, headers: corsHeaders });
+          }
 
           const uploaded = await env.R2_BUCKET.put(key, bodyText, {
             httpMetadata: { contentType: "application/json; charset=utf-8" },
@@ -436,6 +420,10 @@
           const bodyBuffer = await request.arrayBuffer();
           if (!bodyBuffer || bodyBuffer.byteLength < 10) {
             return new Response("Empty ko-pack-keys data rejected", { status: 400, headers: corsHeaders });
+          }
+          const magic = new Uint8Array(bodyBuffer.slice(0, 2));
+          if (magic[0] !== 0x1f || magic[1] !== 0x8b) {
+            return new Response("Invalid gzip payload rejected", { status: 400, headers: corsHeaders });
           }
 
           const uploaded = await env.R2_BUCKET.put(key, bodyBuffer, {
@@ -536,18 +524,10 @@
   // 🌟 피드백 / 버그 제보 Discord 연동 헬퍼 함수
   // ==============================================================================
   // Cloudflare 대시보드 -> Worker -> Settings -> Variables and Secrets 에서
-  // DISCORD_WEBHOOK_URL, DISCORD_BOT_TOKEN 설정 가능 (미설정 시 기본 연동값 사용)
+  // DISCORD_WEBHOOK_URL, DISCORD_BOT_TOKEN, DISCORD_PUBLIC_KEY, DISCORD_AUDIT_WEBHOOK_URL 설정 필수
   const DEFAULT_CHANNEL_ID = "1563501678127358094";
-  const DEFAULT_WEBHOOK_URL = [
-    "https://discord.com/api/webhooks",
-    "1563502227686170786",
-    "sW5axXPbGCcaN7w--WbtJ5AI32iHayAr8aApvLZ9mBqRWXadiwM_EzN7mdN9JN1y_7IJ"
-  ].join("/");
-  const DEFAULT_BOT_TOKEN = [
-    "MTU2MzUxMTU0MjU2ODQ1MjE1Nw",
-    "GsHr3n",
-    "cXZUn1cB1-5FT-ZgFrYDXMuodBrzNdP9ZMdPvk"
-  ].join(".");
+  const DEFAULT_WEBHOOK_URL = "";
+  const DEFAULT_BOT_TOKEN = "";
 
   function getKoreanTimeString() {
     const now = new Date();
@@ -584,7 +564,7 @@
     }
 
     const embed = {
-      title: `[${catText}] ${data.title}`,
+      title: `[${catText}] ${String(data.title || "제보").slice(0, 220)}`,
       color: embedColor,
       fields: fields,
       footer: { text: `QuestTranslator Pro · ${getKoreanTimeString()} (KST)` }
@@ -643,8 +623,10 @@
           body: JSON.stringify(payload)
         });
       }
-    } else {
-      // 봇 토큰이 없을 경우 웹훅으로 전송 (웹훅은 버튼 미지원)
+    }
+
+    // 봇 토큰 미설정이거나 Bot API 전송 실패 시 웹훅으로 자동 폴백
+    if ((!resp || !resp.ok) && webhookUrl) {
       const urlWithWait = webhookUrl + (webhookUrl.includes("?") ? "&wait=true" : "?wait=true");
       const webhookPayload = {
         username: "QuestTranslator 제보봇",
@@ -665,6 +647,13 @@
           body: JSON.stringify(webhookPayload)
         });
       }
+    }
+
+    if (!resp) {
+      return new Response(JSON.stringify({ ok: false, error: "DISCORD_BOT_TOKEN / DISCORD_WEBHOOK_URL 미설정" }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
     }
 
     if (!resp.ok) {
@@ -1013,12 +1002,50 @@
   // 🛡️ 오역 수정 감사 로그 & 디스코드 버튼 즉시 롤백 (Interactions)
   // ==============================================================================
   // Cloudflare 대시보드 -> Worker -> Settings -> Variables and Secrets 에서
-  // DISCORD_AUDIT_WEBHOOK_URL, DISCORD_PUBLIC_KEY, DISCORD_BOT_TOKEN 설정 (비밀변수 권장)
-  const DEFAULT_AUDIT_WEBHOOK_URL = [
-    "https://discordapp.com/api/webhooks",
-    "1567785312665608213",
-    "_sBZuIeTus_bIacmss1BEKH6G8ToU1giBn4l-KdghM8cg8vd3ZcRyG-fDBKNwA80wg9z"
-  ].join("/");
+  // DISCORD_AUDIT_WEBHOOK_URL, DISCORD_PUBLIC_KEY, DISCORD_BOT_TOKEN 시크릿 사용
+  const DEFAULT_AUDIT_WEBHOOK_URL = "";
+  const AUDIT_VALID_CATEGORIES = new Set(["general", "items", "books"]);
+
+  function buildValidRollbackItems(auditData) {
+    const lang = String(auditData.lang || "한국어 (Korean)").trim();
+    const out = [];
+    if (Array.isArray(auditData.batch_items) && auditData.batch_items.length > 0) {
+      for (const item of auditData.batch_items) {
+        if (!item || typeof item !== "object") continue;
+        const cat = String(item.cat || "").trim();
+        const src = String(item.src || "").trim();
+        const tgt = String(item.old_tgt || "").trim();
+        if (AUDIT_VALID_CATEGORIES.has(cat) && src && tgt && src !== tgt) {
+          out.push({ cat, lang, src, tgt });
+        }
+      }
+      return out;
+    }
+    const cat = String(auditData.category || "").trim();
+    const src = String(auditData.src || "").trim();
+    const tgt = String(auditData.old_tgt || "").trim();
+    if (AUDIT_VALID_CATEGORIES.has(cat) && src && tgt && src !== tgt) {
+      out.push({ cat, lang, src, tgt });
+    }
+    return out;
+  }
+
+  async function writeRollbackCommitsToR2(env, now, items) {
+    if (!env.R2_BUCKET || !Array.isArray(items) || items.length === 0) return 0;
+    const chunkSize = 500;
+    for (let i = 0; i < items.length; i += chunkSize) {
+      const chunk = items.slice(i, i + chunkSize);
+      const commitId = `${(now + Math.floor(i / chunkSize)).toString().padStart(16, "0")}_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
+      const commitKey = `commits/${commitId}.json`;
+      await env.R2_BUCKET.put(commitKey, JSON.stringify({
+        timestamp: now,
+        items: chunk
+      }), {
+        httpMetadata: { contentType: "application/json; charset=utf-8" }
+      });
+    }
+    return items.length;
+  }
 
   async function handleAuditStatus(request, env, corsHeaders) {
   const url = new URL(request.url);
@@ -1087,20 +1114,8 @@ async function handleAuditLinkRollback(request, env, corsHeaders) {
 
   const now = Date.now();
   if (!isTest) {
-    const commitId = `${now.toString().padStart(16, "0")}_${crypto.randomUUID()}`;
-    const commitKey = `commits/${commitId}.json`;
-    const rollbackItem = {
-      cat: auditData.category || "items",
-      lang: auditData.lang || "한국어 (Korean)",
-      src: auditData.src,
-      tgt: auditData.old_tgt
-    };
-    await env.R2_BUCKET.put(commitKey, JSON.stringify({
-      timestamp: now,
-      items: [rollbackItem]
-    }), {
-      httpMetadata: { contentType: "application/json; charset=utf-8" }
-    });
+    const rollbackItems = buildValidRollbackItems(auditData);
+    await writeRollbackCommitsToR2(env, now, rollbackItems);
   }
 
   auditData.rolled_back = true;
@@ -1110,37 +1125,63 @@ async function handleAuditLinkRollback(request, env, corsHeaders) {
     httpMetadata: { contentType: "application/json; charset=utf-8" }
   });
 
+  function escapeHtml(val) {
+    return String(val || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   // 🔔 디스코드 원본 임베드 메시지를 [롤백 완료] 상태로 실시간 업데이트
   const webhookUrl = env.DISCORD_AUDIT_WEBHOOK_URL || DEFAULT_AUDIT_WEBHOOK_URL;
-  if (auditData.discord_message_id && webhookUrl) {
+  const botToken = env.DISCORD_BOT_TOKEN || DEFAULT_BOT_TOKEN;
+  const safeSrcShort = String(auditData.src || "").replace(/`/g, "'").slice(0, 900);
+  const safeNewShort = String(auditData.new_tgt || "").replace(/`/g, "'").slice(0, 900);
+  const safeOldShort = String(auditData.old_tgt || "(삭제)").replace(/`/g, "'").slice(0, 900);
+  const safeCatShort = String(auditData.category || "items").replace(/`/g, "'").slice(0, 120);
+
+  if (auditData.discord_message_id) {
     try {
-      const cleanWebhook = webhookUrl.split("?")[0];
-      const patchUrl = `${cleanWebhook}/messages/${auditData.discord_message_id}`;
       const rolledEmbed = {
         title: isTest ? "🧪 [테스트] 롤백 완료 (번역 복구됨)" : "✅ [롤백 완료] 이전 번역으로 복구됨",
         color: 0x10B981, // 산뜻한 에메랄드 초록색
         description: `🎉 **이 번역 수정 내역은 관리자에 의해 원래 값으로 정상 롤백되었습니다.**\n(완료 일시: ${new Date(now).toISOString().replace('T', ' ').slice(0, 19)} UTC)`,
         fields: [
-          { name: "📌 원문 (src)", value: `\`${auditData.src}\``, inline: false },
-          { name: "❌ 취소된 번역 (수정 취소)", value: `~~${auditData.new_tgt}~~`, inline: true },
-          { name: "✅ 복구된 번역 (원복 완료)", value: `**${auditData.old_tgt || "(삭제)"}**`, inline: true },
+          { name: "📌 원문 (src)", value: `\`${safeSrcShort}\``, inline: false },
+          { name: "❌ 취소된 번역 (수정 취소)", value: `~~${safeNewShort}~~`, inline: true },
+          { name: "✅ 복구된 번역 (원복 완료)", value: `**${safeOldShort}**`, inline: true },
           { name: "상태", value: "`🟢 롤백 완료됨 (원복)`", inline: true },
-          { name: "🏷️ 카테고리", value: `\`${auditData.category}\`${isTest ? " (🧪 테스트)" : ""}`, inline: true }
+          { name: "🏷️ 카테고리", value: `\`${safeCatShort}\`${isTest ? " (🧪 테스트)" : ""}`, inline: true }
         ],
         footer: { text: "QuestTranslator Pro · 롤백 완료됨" }
       };
+      const patchPayload = {
+        content: `⏪ **[롤백 완료]** \`${safeSrcShort.slice(0, 300)}\` 항목이 이전 번역(\`${safeOldShort.slice(0, 300)}\`)(으)로 복구되었습니다!`,
+        embeds: [rolledEmbed],
+        components: []
+      };
 
-      await fetch(patchUrl, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          content: `⏪ **[롤백 완료]** \`${auditData.src}\` 항목이 이전 번역(\`${auditData.old_tgt || "(삭제)"}\`)(으)로 복구되었습니다!`,
-          embeds: [rolledEmbed],
-          components: []
-        })
-      });
+      if (auditData.discord_via_bot && auditData.discord_channel_id && botToken) {
+        await fetch(`https://discord.com/api/v10/channels/${auditData.discord_channel_id}/messages/${auditData.discord_message_id}`, {
+          method: "PATCH",
+          headers: {
+            "Authorization": `Bot ${botToken}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(patchPayload)
+        });
+      } else if (webhookUrl) {
+        const cleanWebhook = webhookUrl.split("?")[0];
+        await fetch(`${cleanWebhook}/messages/${auditData.discord_message_id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patchPayload)
+        });
+      }
     } catch (e) {
-      console.warn("[Rollback Webhook Patch Failed]", e);
+      console.warn("[Rollback Message Patch Failed]", e);
     }
   }
 
@@ -1151,8 +1192,8 @@ async function handleAuditLinkRollback(request, env, corsHeaders) {
     <body style="font-family: sans-serif; background: #18181b; color: #f4f4f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0;">
       <div style="background: #27272a; padding: 32px; border-radius: 12px; text-align: center; max-width: 480px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);">
         <h2 style="color: #34d399; margin-top: 0;">✅ 롤백이 성공적으로 완료되었습니다!</h2>
-        <p style="font-size: 16px; margin: 16px 0;"><strong>${auditData.src}</strong></p>
-        <p style="color: #a1a1aa;">수정 번역: <del style="color: #f87171;">${auditData.new_tgt}</del><br>복구 번역: <strong style="color: #34d399;">${auditData.old_tgt || "(삭제)"}</strong></p>
+        <p style="font-size: 16px; margin: 16px 0;"><strong>${escapeHtml(auditData.src)}</strong></p>
+        <p style="color: #a1a1aa;">수정 번역: <del style="color: #f87171;">${escapeHtml(auditData.new_tgt)}</del><br>복구 번역: <strong style="color: #34d399;">${escapeHtml(auditData.old_tgt || "(삭제)")}</strong></p>
         <p style="color: #71717a; font-size: 13px; margin-top: 24px;">${isTest ? "🧪 [테스트 모드] 임시 파일이 복구되었습니다." : "클라우드 DB에 원복 커밋이 반영되었습니다."}</p>
       </div>
     </body>
@@ -1168,6 +1209,17 @@ async function handleAuditReport(request, env, corsHeaders) {
     const now = Date.now();
     const isTest = !!data.is_test;
 
+    const sanitizedBatchItems = Array.isArray(data.batch_items)
+      ? data.batch_items
+          .filter(it => it && typeof it === "object")
+          .map(it => ({
+            cat: String(it.cat || "").trim(),
+            src: String(it.src || "").trim(),
+            old_tgt: String(it.old_tgt || "").trim(),
+          }))
+          .filter(it => AUDIT_VALID_CATEGORIES.has(it.cat) && it.src && it.old_tgt && it.src !== it.old_tgt)
+      : [];
+
     const auditRecord = {
       audit_id: auditId,
       timestamp: now,
@@ -1180,6 +1232,7 @@ async function handleAuditReport(request, env, corsHeaders) {
       validity: Number(data.validity || 0),
       verdict: String(data.verdict || "pass"),
       details: String(data.details || ""),
+      batch_items: sanitizedBatchItems,
       is_test: isTest,
       rolled_back: false
     };
@@ -1201,17 +1254,22 @@ async function handleAuditReport(request, env, corsHeaders) {
       ? "테스트 모드(샌드박스)에서 임시 단어 수정이 발생했습니다.\n운영 파일은 보호되며, 아래 초록색 [롤백] 버튼으로 **롤백 시뮬레이션**을 검증할 수 있습니다."
       : "인게임 오역 수정기에서 번역 데이터가 수정되었습니다.\n원복이 필요하시면 아래 초록색 [롤백] 버튼을 클릭하세요.";
 
+    const safeField = (val, fallback = "(없음)", maxLen = 900) => {
+      const cleaned = String(val || "").replace(/`/g, "'").trim();
+      return (cleaned || fallback).slice(0, maxLen);
+    };
+
     const embed = {
       title: titleText,
       color: embedColor,
       description: descText,
       fields: [
-        { name: "📌 영어 원문 (src)", value: `\`${auditRecord.src}\``, inline: false },
-        { name: "⬅️ 이전 번역 (old)", value: `\`${auditRecord.old_tgt || (auditRecord.category && auditRecord.category.includes("일괄 치환") ? "일괄 치환" : "(없음)")}\``, inline: true },
-        { name: "➡️ 수정 번역 (new)", value: `\`${auditRecord.new_tgt}\``, inline: true },
+        { name: "📌 영어 원문 (src)", value: `\`${safeField(auditRecord.src, "(없음)", 900)}\``, inline: false },
+        { name: "⬅️ 이전 번역 (old)", value: `\`${safeField(auditRecord.old_tgt, auditRecord.category && auditRecord.category.includes("일괄 치환") ? "일괄 치환" : "(없음)", 900)}\``, inline: true },
+        { name: "➡️ 수정 번역 (new)", value: `\`${safeField(auditRecord.new_tgt, "(삭제)", 900)}\``, inline: true },
         { name: "📊 오역률 / 판정", value: `\`${auditRecord.error_rate.toFixed(1)}%\` (${auditRecord.verdict.toUpperCase()})`, inline: true },
-        { name: "🏷️ 카테고리", value: `\`${auditRecord.category}\`${isTest ? " (🧪 테스트)" : ""}`, inline: true },
-        { name: "🔍 분석 사유", value: auditRecord.details || "정상 수정", inline: false }
+        { name: "🏷️ 카테고리", value: `\`${safeField(auditRecord.category, "items", 120)}\`${isTest ? " (🧪 테스트)" : ""}`, inline: true },
+        { name: "🔍 분석 사유", value: safeField(auditRecord.details, "정상 수정", 950), inline: false }
       ],
       footer: { text: `QuestTranslator Audit | ID: ${auditId}${isTest ? " | [TEST MODE]" : ""}` },
       timestamp: new Date().toISOString()
@@ -1247,23 +1305,46 @@ async function handleAuditReport(request, env, corsHeaders) {
       } catch (_) {}
     }
 
+    const logText = typeof data.log_text === "string" ? data.log_text.trim() : "";
+
     if (botToken && targetChannelId) {
       try {
-        const botResp = await fetch(`https://discord.com/api/v10/channels/${targetChannelId}/messages`, {
-          method: "POST",
-          headers: {
-            "Authorization": `Bot ${botToken}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            embeds: [embed],
-            components: components
-          })
-        });
+        const botPayload = {
+          embeds: [embed],
+          components: components
+        };
+        let botResp;
+        if (logText) {
+          const formData = new FormData();
+          formData.append("payload_json", JSON.stringify(botPayload));
+          formData.append(
+            "files[0]",
+            new Blob([logText], { type: "text/plain; charset=utf-8" }),
+            `${auditId}_changes.txt`
+          );
+          botResp = await fetch(`https://discord.com/api/v10/channels/${targetChannelId}/messages`, {
+            method: "POST",
+            headers: {
+              "Authorization": `Bot ${botToken}`
+            },
+            body: formData
+          });
+        } else {
+          botResp = await fetch(`https://discord.com/api/v10/channels/${targetChannelId}/messages`, {
+            method: "POST",
+            headers: {
+              "Authorization": `Bot ${botToken}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(botPayload)
+          });
+        }
         if (botResp.ok) {
           const msgJson = await botResp.json();
           if (msgJson && msgJson.id) {
             auditRecord.discord_message_id = msgJson.id;
+            auditRecord.discord_channel_id = targetChannelId;
+            auditRecord.discord_via_bot = true;
             postSucceeded = true;
             if (env.R2_BUCKET) {
               await env.R2_BUCKET.put(`audit/${auditId}.json`, JSON.stringify(auditRecord), {
@@ -1280,27 +1361,35 @@ async function handleAuditReport(request, env, corsHeaders) {
     }
 
     // 2순위 폴백: Bot API 실패 시 일반 웹훅으로 전송
-    if (!postSucceeded) {
-      let postResp = await fetch(`${webhookUrl}?wait=true`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          embeds: [embed],
-          components: components
-        })
-      });
-
-      if (!postResp.ok) {
-        postResp = await fetch(`${webhookUrl}?wait=true`, {
+    let discordError = "";
+    if (!postSucceeded && webhookUrl) {
+      const waitUrl = webhookUrl.includes("?") ? `${webhookUrl}&wait=true` : `${webhookUrl}?wait=true`;
+      const sendWebhook = async (withComponents) => {
+        const whPayload = withComponents ? { embeds: [embed], components: components } : { embeds: [embed] };
+        if (logText) {
+          const formData = new FormData();
+          formData.append("payload_json", JSON.stringify(whPayload));
+          formData.append(
+            "files[0]",
+            new Blob([logText], { type: "text/plain; charset=utf-8" }),
+            `${auditId}_changes.txt`
+          );
+          return await fetch(waitUrl, { method: "POST", body: formData });
+        }
+        return await fetch(waitUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            embeds: [embed]
-          })
+          body: JSON.stringify(whPayload)
         });
+      };
+
+      let postResp = await sendWebhook(true);
+      if (!postResp.ok) {
+        postResp = await sendWebhook(false);
       }
 
       if (postResp.ok) {
+        postSucceeded = true;
         try {
           const msgJson = await postResp.json();
           if (msgJson && msgJson.id) {
@@ -1312,10 +1401,18 @@ async function handleAuditReport(request, env, corsHeaders) {
             }
           }
         } catch (_) {}
+      } else {
+        try {
+          discordError = `HTTP ${postResp.status}: ${(await postResp.text()).slice(0, 200)}`;
+        } catch (_) {
+          discordError = `HTTP ${postResp.status}`;
+        }
       }
+    } else if (!postSucceeded) {
+      discordError = "DISCORD_BOT_TOKEN / DISCORD_AUDIT_WEBHOOK_URL 미설정";
     }
 
-    return new Response(JSON.stringify({ ok: true, audit_id: auditId, is_test: isTest }), {
+    return new Response(JSON.stringify({ ok: true, audit_id: auditId, is_test: isTest, discord_ok: postSucceeded, discord_error: discordError }), {
       status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
@@ -1381,21 +1478,8 @@ async function handleDiscordInteractions(request, env, corsHeaders) {
       const isTest = !!auditData.is_test;
 
       if (!isTest) {
-        const commitId = `${now.toString().padStart(16, "0")}_${crypto.randomUUID()}`;
-        const commitKey = `commits/${commitId}.json`;
-        const rollbackItem = {
-          cat: auditData.category || "items",
-          lang: auditData.lang || "한국어 (Korean)",
-          src: auditData.src,
-          tgt: auditData.old_tgt
-        };
-
-        await env.R2_BUCKET.put(commitKey, JSON.stringify({
-          timestamp: now,
-          items: [rollbackItem]
-        }), {
-          httpMetadata: { contentType: "application/json; charset=utf-8" }
-        });
+        const rollbackItems = buildValidRollbackItems(auditData);
+        await writeRollbackCommitsToR2(env, now, rollbackItems);
       }
 
       const adminName = interaction.member?.user?.username || interaction.user?.username || "관리자";
@@ -1640,6 +1724,19 @@ async function handleUserReply(request, env, corsHeaders) {
       });
     }
 
+    // R2에 정식 등록된 피드백 스레드인지 검증 (임의 채널 Bot 대리 발송 차단)
+    if (env.R2_BUCKET) {
+      const tmFile = await env.R2_BUCKET.get(`feedback/thread_map/${threadId}.json`);
+      if (!tmFile) {
+        return new Response(JSON.stringify({ ok: false, error: "등록되지 않은 피드백 스레드입니다." }), {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+    }
+
+    const safeReplyText = replyText.slice(0, 1900);
+
     const headers = {
       "Authorization": `Bot ${botToken}`,
       "Content-Type": "application/json"
@@ -1659,7 +1756,7 @@ async function handleUserReply(request, env, corsHeaders) {
       method: "POST",
       headers,
       body: JSON.stringify({
-        content: `💬 **[사용자 답장]**\n>>> ${replyText}`
+        content: `💬 **[사용자 답장]**\n>>> ${safeReplyText}`
       })
     });
 
@@ -1694,10 +1791,10 @@ async function handleUserReply(request, env, corsHeaders) {
 async function handleFeedbackRetract(request, env, corsHeaders) {
   try {
     const data = await request.json();
-    const ticketId = data.ticket_id;
-    let channelId = data.channel_id;
-    let messageId = data.message_id;
-    let threadId = data.thread_id;
+    const ticketId = String(data.ticket_id || "").trim();
+    let channelId = null;
+    let messageId = null;
+    let threadId = null;
 
     if (!ticketId) {
       return new Response(JSON.stringify({ ok: false, error: "ticket_id required" }), {
@@ -1708,18 +1805,22 @@ async function handleFeedbackRetract(request, env, corsHeaders) {
 
     const botToken = env.DISCORD_BOT_TOKEN || DEFAULT_BOT_TOKEN;
 
-    // 1. R2 큐에서 정보 보충 및 큐 파일 삭제
+    // 1. R2 큐에 정식 등록된 티켓만 조회하여 저장된 Discord ID로만 삭제 (임의 ID 삭제 악용 차단)
     if (env.R2_BUCKET) {
       const qKey = `feedback/queue/${ticketId}.json`;
       const qFile = await env.R2_BUCKET.get(qKey);
-      if (qFile) {
-        try {
-          const qData = await qFile.json();
-          channelId = channelId || qData.channel_id;
-          messageId = messageId || qData.message_id;
-          threadId = threadId || qData.thread_id;
-        } catch (_) {}
+      if (!qFile) {
+        return new Response(JSON.stringify({ ok: false, error: "등록되지 않은 티켓입니다." }), {
+          status: 404,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
       }
+      try {
+        const qData = await qFile.json();
+        channelId = qData.channel_id || null;
+        messageId = qData.message_id || null;
+        threadId = qData.thread_id || null;
+      } catch (_) {}
 
       await env.R2_BUCKET.delete(qKey);
       if (threadId) {
@@ -1775,7 +1876,7 @@ async function verifyDiscordSignature(request, env) {
 
   const rawKey = (env.DISCORD_PUBLIC_KEY || "").trim();
   if (!rawKey) {
-    return { isValid: true, body };
+    return { isValid: false, body: "" };
   }
 
   try {
@@ -1818,6 +1919,12 @@ function hexToUint8Array(hex) {
 async function handleSetupDiscordCommands(request, env, corsHeaders) {
   try {
     const botToken = env.DISCORD_BOT_TOKEN || DEFAULT_BOT_TOKEN;
+    if (!botToken) {
+      return new Response(JSON.stringify({ ok: false, error: "DISCORD_BOT_TOKEN 미설정" }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
     const appId = "1563511542568452157";
 
     const commands = [

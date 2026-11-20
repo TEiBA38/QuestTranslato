@@ -17,6 +17,7 @@ TODO (구현 예정):
 import os
 import json
 import sys
+import time
 import threading
 import translation_memory
 import logging
@@ -134,6 +135,12 @@ if ctk is not None and TkinterDnD is not None:
                     format='%(asctime)s - %(levelname)s - %(message)s'
                 )
             logging.info("================ QuestTranslatorPro Started ================")
+            try:
+                import session_logger
+                session_logger.install_crash_hooks(tk_app=self)
+                session_logger.log_event("OK", "APP_START", f"runtime={'EXE' if getattr(sys, 'frozen', False) else 'Python'}")
+            except Exception:
+                pass
             try:
                 from translation_core import cleanup_old_temp_files
                 threading.Thread(target=cleanup_old_temp_files, kwargs={"max_age_seconds": 1800}, daemon=True).start()
@@ -303,6 +310,7 @@ if ctk is not None and TkinterDnD is not None:
                     res.append(info)
                 except Exception as e:
                     logging.debug(f"백그라운드 업데이트 확인 실패: {e}")
+                    res.append({})
             threading.Thread(target=_worker, daemon=True).start()
 
             def _poll_bg():
@@ -310,7 +318,7 @@ if ctk is not None and TkinterDnD is not None:
                     self.after(200, _poll_bg)
                     return
                 info = res[0]
-                if info.get("has_update"):
+                if info and info.get("has_update"):
                     self.pending_update_info = info
                     self._show_update_banner()
 
@@ -927,14 +935,19 @@ if ctk is not None and TkinterDnD is not None:
                     self.on_engine_change("Google AI (Gemini)")
 
             saved_plan = settings.get("plan_name", "")
-            if saved_plan and "Gemini" in (saved_engine or self.engine_combo.get()):
-                if "유료" in saved_plan:
-                    saved_plan = "유료 계정 (초고속·고품질 번역 / 제한없음)"
-                elif "무료" in saved_plan:
-                    saved_plan = "무료 계정 (안전대기 / 10 RPM 속도제한)"
-                self.plan_combo.set(saved_plan)
+            gemini_free_label = "무료 계정 (안전대기 / 10 RPM 속도제한)"
+            gemini_paid_label = "유료 계정 (초고속·고품질 번역 / 제한없음)"
+            if saved_plan == gemini_paid_label:
+                self._last_gemini_plan = gemini_paid_label
+            else:
+                # 구버전 기본값("유료 API (기본)")이나 타 엔진 표시값("유료 전용 (선불 크레딧 충전 필수)")은
+                # 무료 계정(10 RPM 안전대기)으로 초기화하여 의도치 않은 8스레드 병렬 호출을 원천 차단
+                self._last_gemini_plan = gemini_free_label
+
+            if "Gemini" in (saved_engine or self.engine_combo.get()):
+                self.plan_combo.set(self._last_gemini_plan)
                 if hasattr(self, "on_plan_change"):
-                    self.on_plan_change(saved_plan)
+                    self.on_plan_change(self._last_gemini_plan)
 
             saved_model = settings.get("ai_model", "")
             if saved_model == "gemini-3.5-flash":
@@ -1010,6 +1023,17 @@ if ctk is not None and TkinterDnD is not None:
         def save_user_settings(self):
             try:
                 os.makedirs(os.path.dirname(self.settings_path), exist_ok=True)
+                gemini_plans = (
+                    "무료 계정 (안전대기 / 10 RPM 속도제한)",
+                    "유료 계정 (초고속·고품질 번역 / 제한없음)",
+                )
+                current_plan = self.plan_combo.get() if hasattr(self, 'plan_combo') else ""
+                if current_plan in gemini_plans:
+                    self._last_gemini_plan = current_plan
+                saved_plan_val = getattr(self, "_last_gemini_plan", gemini_plans[0])
+                if saved_plan_val not in gemini_plans:
+                    saved_plan_val = gemini_plans[0]
+
                 settings = {
                     "instance_root": self.instance_path_entry.get().strip(),
                     "api_key": self.api_entry.get().strip(),
@@ -1019,7 +1043,7 @@ if ctk is not None and TkinterDnD is not None:
                     "ai_model": self.model_combo.get(),
                     "target_lang": self.target_lang_combo.get(),
                     "engine_name": self.engine_combo.get(),
-                    "plan_name": self.plan_combo.get() if hasattr(self, 'plan_combo') else "",
+                    "plan_name": saved_plan_val,
                     "auto_apply_resourcepack": bool(self.auto_apply_rp_var.get()) if hasattr(self, "auto_apply_rp_var") else True,
                     "translated_history": self.app_state.translated_history,
                     "glossaries_by_lang": self.app_state.glossaries_by_lang
@@ -1298,27 +1322,49 @@ if ctk is not None and TkinterDnD is not None:
             except Exception:
                 pass
 
+            self._is_closing = True
+            try:
+                if getattr(getattr(self, "app_state", None), "is_translating", False):
+                    self.app_state.cancel_requested = True
+            except Exception:
+                pass
+
             try:
                 self.save_user_settings()
                 # 창을 즉시 숨겨 윈도우 '(응답 없음)' 프리징 현상 원천 차단
                 self.withdraw()
+                self.update_idletasks()
+            except Exception:
+                pass
+
+            # 로컬 디스크 저장(4개 캐시 + pending_commits.json + 단어사전)은 네트워크 대기 없이 즉시 동기 실행
+            try:
+                translation_memory.save_memory(flush_now=False)
             except Exception:
                 pass
 
             def _final_flush():
                 try:
-                    translation_memory.save_memory(flush_now=True)
                     translation_memory.flush_commit_queue(sync_wait=True)
-                    pack_t = getattr(translation_memory, "_active_pack_thread", None)
-                    if pack_t is not None and pack_t.is_alive():
-                        pack_t.join(timeout=20.0)
                 except Exception:
                     pass
 
             flush_thread = threading.Thread(target=_final_flush, daemon=True)
             flush_thread.start()
-            flush_thread.join(timeout=22.0)
 
+            deadline = time.monotonic() + 1.5
+            while flush_thread.is_alive() and time.monotonic() < deadline:
+                try:
+                    self.update_idletasks()
+                except Exception:
+                    pass
+                time.sleep(0.05)
+
+            try:
+                import session_logger
+                session_logger.mark_exit("정상 종료")
+            except Exception:
+                pass
             try:
                 self.destroy()
             except Exception:

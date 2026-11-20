@@ -183,7 +183,7 @@ def upload_words_to_cloudflare(sync_wait=False):
 
     t = threading.Thread(target=_do_upload, daemon=True)
     t.start()
-    if sync_wait:
+    if sync_wait and threading.current_thread() is not threading.main_thread():
         t.join(timeout=10.0)
 
 
@@ -194,6 +194,9 @@ def sync_words_from_cloudflare(force=False):
     """
     global _words_etag, _proper_nouns, _common_words
     try:
+        import temp_session_logger
+        if temp_session_logger.is_debug_mode():
+            return False
         import translation_memory
         worker_url = translation_memory.get_worker_url()
         if not worker_url:
@@ -220,14 +223,13 @@ def sync_words_from_cloudflare(force=False):
                     except Exception:
                         pass
 
-                temp_path = filepath + ".tmp"
-                with open(temp_path, "w", encoding="utf-8") as f:
-                    f.write(r.text)
-                os.replace(temp_path, filepath)
-
                 p_dict = data.get("proper_nouns", {})
                 c_dict = data.get("common_words", {})
                 with _lock:
+                    temp_path = filepath + ".tmp"
+                    with open(temp_path, "w", encoding="utf-8") as f:
+                        f.write(r.text)
+                    os.replace(temp_path, filepath)
                     if isinstance(p_dict, dict):
                         _proper_nouns.update({str(k).lower().strip(): str(v).strip() for k, v in p_dict.items() if k and v})
                     if isinstance(c_dict, dict):
@@ -527,6 +529,10 @@ def register_word(en_word: str, ko_word: str, is_official: bool = False):
                 if _proper_nouns.get(en_clean) != ko_clean:
                     _proper_nouns[en_clean] = ko_clean
                     _dirty = True
+            # 기존 후보 투표 버퍼의 오역 잔여물 제거
+            stale_votes = [vk for vk in _candidate_votes if vk[0] == en_clean and vk[1] != ko_clean]
+            for vk in stale_votes:
+                del _candidate_votes[vk]
             return True
         else:
             # 이미 등록된 단어는 AI 번역으로 덮어쓰지 않음 (기존 사전/한글패치 보호)

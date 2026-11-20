@@ -2,15 +2,33 @@ import json
 import re
 import time
 import requests
+from dataclasses import dataclass
+from typing import Optional
+from requests.adapters import HTTPAdapter
 import threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from constants import LANG_CODES
 import translation_memory
 
-try:
-    from deep_translator import GoogleTranslator
-except Exception:
-    GoogleTranslator = None
+_http_session = None
+_http_session_lock = threading.Lock()
+_gemini_client_cache = {}
+_gemini_client_lock = threading.Lock()
+
+
+def _get_http_session() -> requests.Session:
+    """병렬 스레드에서 TCP/TLS 연결을 재사용할 수 있도록 공용 HTTP 세션을 반환합니다."""
+    global _http_session
+    if _http_session is None:
+        with _http_session_lock:
+            if _http_session is None:
+                sess = requests.Session()
+                adapter = HTTPAdapter(pool_connections=32, pool_maxsize=32)
+                sess.mount("https://", adapter)
+                sess.mount("http://", adapter)
+                _http_session = sess
+    return _http_session
 
 try:
     from google import genai
@@ -20,14 +38,100 @@ except Exception:
     types = None
 
 
-_google_cache = {}
-_GOOGLE_CACHE_MAX = 4000
 _gemini_cache = {}
 _gemini_cache_lock = threading.Lock()
 _GEMINI_CACHE_MAX = 8000
 
-_last_gemini_api_call = 0
+_last_gemini_api_start = 0.0
+_last_gemini_api_call = 0.0
+_gemini_backoff_until = 0.0
+_gemini_call_timestamps = deque()
 _gemini_api_rate_lock = threading.Lock()
+_unsupported_config_models = set()
+
+
+# 무료 계정 기본 보호 파라미터 (미등록 모델용 안전 기본값 / 테스트 오버라이드용)
+_GEMINI_FREE_MIN_INTERVAL = 12.8
+_GEMINI_FREE_WINDOW_SECONDS = 64.0
+_GEMINI_FREE_MAX_CALLS_PER_WINDOW = 5
+
+
+class GeminiRateLimiter:
+    """Gemini 무료 계정의 모델별 RPM 프로파일, 슬라이딩 윈도우 슬롯 예약, 429/503 병렬 백오프 공유를 전담합니다."""
+
+    def get_profile(self, model_name: str):
+        """모델별 RPM 한도에 맞춘 (min_start_interval, min_post_cooldown, window_seconds, max_calls) 반환.
+        - 3.5-flash-lite / 3.1-flash-lite (무료 15 RPM): 11~12 RPM 목표 (시작 간격 4.9초, 응답 후 0.3초, 62초/12회, 2스레드 파이프라이닝)
+        - 3.8-flash / 4-hydrogen (무료 5 RPM): 4.5 RPM 이하 보호 (시작 간격 12.8초, 응답 후 1.0초, 64초/5회)"""
+        m = str(model_name or "").lower()
+        if "flash-lite" in m or "lite" in m:
+            return (4.9, 0.3, 62.0, 12)
+        if "3.8-flash" in m or "hydrogen" in m or "argon" in m or "pro" in m:
+            return (12.8, 1.0, 64.0, 5)
+        return (
+            _GEMINI_FREE_MIN_INTERVAL,
+            min(0.8, _GEMINI_FREE_MIN_INTERVAL),
+            _GEMINI_FREE_WINDOW_SECONDS,
+            _GEMINI_FREE_MAX_CALLS_PER_WINDOW,
+        )
+
+    def notify_backoff(self, wait_seconds: float):
+        """병렬 워커 중 하나가 429/503을 수신했을 때 다른 형제 워커들도 동일 쿨다운을 공유하도록 전파합니다."""
+        global _gemini_backoff_until
+        if wait_seconds <= 0:
+            return
+        with _gemini_api_rate_lock:
+            target = time.monotonic() + float(wait_seconds)
+            if target > _gemini_backoff_until:
+                _gemini_backoff_until = target
+
+    def acquire_slot(self, model_name: str, cancel_checker=None):
+        """락 안에서 다음 호출 슬롯만 예약합니다(실제 HTTP 요청은 락 밖에서 실행해 파이프라이닝 허용)."""
+        global _last_gemini_api_start
+        min_start_interval, min_post_cooldown, window_sec, max_calls = self.get_profile(model_name)
+        with _gemini_api_rate_lock:
+            now = time.monotonic()
+            while _gemini_call_timestamps and (now - _gemini_call_timestamps[0]) >= window_sec:
+                _gemini_call_timestamps.popleft()
+
+            window_wait = 0.0
+            if len(_gemini_call_timestamps) >= max_calls:
+                window_wait = (_gemini_call_timestamps[0] + window_sec) - now
+
+            start_wait = 0.0
+            if _last_gemini_api_start > 0:
+                start_wait = (_last_gemini_api_start + min_start_interval) - now
+            post_wait = 0.0
+            if _last_gemini_api_call > 0:
+                post_wait = (_last_gemini_api_call + min_post_cooldown) - now
+            backoff_wait = max(0.0, _gemini_backoff_until - now)
+
+            wait_needed = max(window_wait, start_wait, post_wait, backoff_wait)
+            if wait_needed > 0:
+                _sleep_with_cancel(wait_needed, cancel_checker)
+
+            call_start = time.monotonic()
+            _last_gemini_api_start = call_start
+            _gemini_call_timestamps.append(call_start)
+
+    def mark_finished(self):
+        """응답 완료 시각을 갱신해 최소 응답 후 쿨다운 기준점을 유지합니다."""
+        global _last_gemini_api_call
+        with _gemini_api_rate_lock:
+            _last_gemini_api_call = time.monotonic()
+
+
+_default_rate_limiter = GeminiRateLimiter()
+
+
+def _notify_gemini_backoff(wait_seconds: float):
+    """병렬 워커 중 하나가 429/503을 수신했을 때 다른 형제 워커들도 동일 쿨다운을 공유하도록 전파합니다."""
+    _default_rate_limiter.notify_backoff(wait_seconds)
+
+
+def _get_gemini_free_rpm_profile(model_name: str):
+    """하위 호환용 래퍼: GeminiRateLimiter.get_profile() 위임."""
+    return _default_rate_limiter.get_profile(model_name)
 
 # ============================================================
 # Mock Mode: API 호출 없이 테스트할 수 있는 모의 번역 모드
@@ -107,55 +211,6 @@ def apply_builtin_quest_style_translation(text):
     return text
 
 
-def _translate_wrapper(text, api_key, translate_fn, reference_map=None, target_lang="한국어 (Korean)", is_item=False, is_book=False, ai_model=None):
-    if not text or not str(text).strip():
-        return text
-    if MOCK_MODE:
-        return _mock_translate(text)
-
-    # 서식 코드 분리 (Google, DeepL 등 특수문자 오류 엔진 보호)
-    prefix, clean_text, suffix = translation_memory._extract_formatting(text)
-    if not clean_text:
-        return text
-
-    cached_translation = get_reference_translation(clean_text, reference_map) or get_reference_translation(text, reference_map)
-    if cached_translation is not None:
-        return translation_memory._restore_formatting(cached_translation, prefix, suffix)
-        
-    if is_item:
-        global_cached = translation_memory.get_cached_item_translation(clean_text, target_lang) or translation_memory.get_cached_item_translation(text, target_lang)
-    elif is_book:
-        global_cached = translation_memory.get_cached_book_translation(clean_text, target_lang) or translation_memory.get_cached_book_translation(text, target_lang)
-    else:
-        global_cached = translation_memory.get_cached_translation(clean_text, target_lang) or translation_memory.get_cached_translation(text, target_lang)
-        
-    if global_cached is not None:
-        return translation_memory._restore_formatting(global_cached, prefix, suffix)
-
-    translated = translate_fn(clean_text, api_key)
-    if translated is None or not str(translated).strip():
-        return text
-
-    if str(translated).strip() == str(clean_text).strip():
-        if target_lang == "한국어 (Korean)":
-            translated = apply_builtin_quest_style_translation(clean_text)
-        else:
-            translated = clean_text
-        
-    final_res = translation_memory._restore_formatting(translated, prefix, suffix)
-
-    if not MOCK_MODE:
-        m_tier = translation_memory.get_model_tier(ai_model)
-        if is_item:
-            translation_memory.add_item_to_memory(clean_text, translated, target_lang, tier=m_tier)
-        elif is_book:
-            translation_memory.add_book_to_memory(clean_text, translated, target_lang, tier=m_tier)
-        else:
-            translation_memory.add_to_memory(clean_text, translated, target_lang, tier=m_tier)
-
-    return final_res
-
-
 KNOWN_GAME_UNITS = {
     'cf', 'cft', 'cf/t', 'rf', 'rft', 'rf/t', 'fe', 'fet', 'fe/t', 'eu', 'eut', 'eu/t',
     'mj', 'mjt', 'mj/t', 'mj/s', 'gp', 'ae', 'mb', 'mb/t', 'mb/s', 't', 'tick', 'ticks',
@@ -228,79 +283,211 @@ def is_code_or_id(text):
     return False
 
 
-def translate_deepl(text, api_key, is_pro=False, reference_map=None, target_lang="한국어 (Korean)", is_item=False, is_book=False):
-    def do_translate(t, key):
-        translation_memory.record_api_call(1)
-        url = "https://api.deepl.com/v2/translate" if is_pro else "https://api-free.deepl.com/v2/translate"
-        headers = {"Authorization": f"DeepL-Auth-Key {key}", "Content-Type": "application/json"}
-        lang_code = "KO" if "Korean" in target_lang or "한국어" in target_lang else "EN-US"
-        data = {"text": [t], "target_lang": lang_code, "tag_handling": "xml"}
-        response = requests.post(url, headers=headers, json=data, timeout=10)
-        response.raise_for_status()
-        return response.json()["translations"][0]["text"]
-    return _translate_wrapper(text, api_key, do_translate, reference_map, target_lang, is_item, is_book)
+def _sleep_with_cancel(duration: float, cancel_checker=None):
+    """소수점 버림(truncation) 없이 정확한 시간(duration 초)만큼 대기하며 취소 요청을 0.1초 주기로 감지합니다."""
+    if duration <= 0:
+        return
+    deadline = time.monotonic() + duration
+    while True:
+        if cancel_checker and cancel_checker():
+            raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.1, remaining))
 
 
-def translate_google(text, api_key, reference_map=None, target_lang="한국어 (Korean)", is_item=False, is_book=False):
-    def do_translate(t, key):
-        if GoogleTranslator is None:
-            return t
-        translation_memory.record_api_call(1)
-        target_code = LANG_CODES.get(target_lang, ("KO", "ko", "natural Korean"))[1]
-        translator = GoogleTranslator(source='en', target=target_code)
-        translated = translator.translate(t)
-        return translated if translated else t
-    return _translate_wrapper(text, api_key, do_translate, reference_map, target_lang, is_item, is_book)
+def _create_gemini_client(api_key: str):
+    """google-genai SDK 자체의 내부 자동 재시도(기본 attempts=5)를 비활성화(attempts=1)하고,
+    API 키별 Client 인스턴스를 캐싱하여 병렬 호출 시 HTTP/TLS 커넥션 풀을 재사용합니다."""
+    if genai is None:
+        return None
+    with _gemini_client_lock:
+        cached_client = _gemini_client_cache.get(api_key)
+        if cached_client is not None:
+            return cached_client
+
+        if types is not None and hasattr(types, "HttpOptions") and hasattr(types, "HttpRetryOptions"):
+            try:
+                http_opts = types.HttpOptions(
+                    retry_options=types.HttpRetryOptions(attempts=1)
+                )
+                client = genai.Client(api_key=api_key, http_options=http_opts)
+                _gemini_client_cache[api_key] = client
+                return client
+            except Exception:
+                pass
+        client = genai.Client(api_key=api_key)
+        _gemini_client_cache[api_key] = client
+        return client
 
 
-def translate_openai(text, api_key, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)", is_item=False, is_book=False):
-    def do_translate(t, key):
-        translation_memory.record_api_call(1)
-        url = "https://api.openai.com/v1/chat/completions"
-        model = ai_model if ai_model else "gpt-6-luna"
-        target_prompt = LANG_CODES.get(target_lang, ("KO", "ko", "natural Korean"))[2]
-        system_prompt = (
-            f"You are a professional Minecraft quest translator. Translate the given text from English to {target_prompt}.\n"
-            "Rules:\n"
-            "- Preserve Minecraft formatting and color codes (e.g., &a, §c) exactly without changing them.\n"
-            "- NEVER use square brackets [] around translated words (e.g., WRONG: '[철] [검]', RIGHT: '철 검').\n"
-            "- Preserve game abbreviations and formats exactly without translating (e.g., 'Lv.', 'HP', 'MP', 'ATK', 'DEF', 'x2', '+10%').\n"
-            "- Output ONLY the translated text without explanation."
-        )
-        if glossary:
-            clean_glossary = [f"'{k}' as '{v.split('#')[0].strip()}'" for k, v in glossary.items()]
-            glossary_text = ", ".join(clean_glossary)
-            system_prompt += f"\nGlossary (Strictly replace these words): {glossary_text}"
-
+def _build_gemini_config(model_name: str):
+    """모델별 호환성을 고려하여 GenerateContentConfig를 생성합니다.
+    이전에 400(설정 미지원) 에러가 발생한 모델은 캐싱하여 불필요한 이중 호출을 방지합니다."""
+    if not types or model_name in _unsupported_config_models:
+        return None
+    config_params = {"response_mime_type": "application/json"}
+    if hasattr(types, "ThinkingConfig") and ("2.5" in model_name or "thinking" in model_name):
         try:
-            few_shots = translation_memory.find_few_shot_examples([t], target_lang, max_examples=2)
-            if few_shots:
-                system_prompt += "\nStyle Reference Examples from previous quests (Follow this tone and style):\n"
-                for src_ex, tgt_ex in few_shots:
-                    system_prompt += f"- \"{src_ex}\" -> \"{tgt_ex}\"\n"
+            config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        except Exception:
+            pass
+    try:
+        return types.GenerateContentConfig(**config_params)
+    except Exception:
+        return None
+
+
+def _invoke_gemini_generate_content(client, model_name: str, prompt: str, is_paid: bool = False, cancel_checker=None):
+    """단일 Gemini generate_content 호출을 수행하며:
+    1) 무료 계정(not is_paid)일 때 _gemini_api_rate_lock 내부에서
+       - 직전 응답 완료(_last_gemini_api_call) 이후 최소 6.8초 간격 보장 (소수점 버림 없음)
+       - 62초 슬라이딩 윈도우 내 최대 9회 요청 제한 보장 (구글 서버 60초 윈도우 10 RPM 절대 초과 방지)
+       - 응답이 완전히 끝난 시점(finally)에 _last_gemini_api_call 및 슬라이딩 윈도우 타임스탬프 갱신
+    2) 400(설정 미지원) 에러 발생 시 해당 모델을 _unsupported_config_models에 등록하고,
+       재호출 전에도 동일하게 무료 속도 제한 대기를 거친 뒤 안전하게 호출합니다."""
+    def _do_single_http_call(use_config: bool):
+        cfg = _build_gemini_config(model_name) if use_config else None
+        if not is_paid:
+            _default_rate_limiter.acquire_slot(model_name, cancel_checker)
+            try:
+                translation_memory.record_api_call(1)
+                if cfg is not None:
+                    return client.models.generate_content(model=model_name, contents=prompt, config=cfg)
+                else:
+                    return client.models.generate_content(model=model_name, contents=prompt)
+            finally:
+                _default_rate_limiter.mark_finished()
+        else:
+            if cancel_checker and cancel_checker():
+                raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+            translation_memory.record_api_call(1)
+            if cfg is not None:
+                return client.models.generate_content(model=model_name, contents=prompt, config=cfg)
+            else:
+                return client.models.generate_content(model=model_name, contents=prompt)
+
+    use_cfg = model_name not in _unsupported_config_models
+    try:
+        return _do_single_http_call(use_config=use_cfg)
+    except Exception as call_err:
+        err_msg = str(call_err)
+        if use_cfg and ("400" in err_msg or "INVALID_ARGUMENT" in err_msg or "not supported" in err_msg):
+            # 해당 모델은 config 미지원으로 캐싱하여 이후 배치에서는 400 재발 원천 차단
+            _unsupported_config_models.add(model_name)
+            # 폴백 재호출 역시 무료 속도 제한(_do_single_http_call)을 정식으로 통과한 뒤 호출!
+            return _do_single_http_call(use_config=False)
+        raise call_err
+
+
+def _execute_batch_with_retry(
+    engine_label: str,
+    attempt_fn,
+    fallback_result,
+    *,
+    is_paid: bool = False,
+    model_name: str = "",
+    log_callback=None,
+    cancel_checker=None,
+    rate_limit_wait_fn=None,
+    quota_exceeded_msg: str = "",
+    auth_error_msg: str = "",
+):
+    """모든 클라우드 배치 엔진(Gemini/OpenAI/Claude/DeepSeek)이 공유하는 통합 재시도·백오프·예외 처리 실행기.
+    - 취소(TranslationCancelledError) 및 인증/모델 미지원 오류(401/404)는 즉시 상위로 전파
+    - 일시적 서버 과부하(500/502/503/504/529/UNAVAILABLE/timeout)는 일반 재시도 횟수를 소모하지 않고 최대 4회 백오프 재시도
+    - 429 한도 초과는 대기 후 재시도하고 한도 소진 시 QuotaExceededError 발생
+    - 복구 불가 통신/서버 오류는 원문을 슬쩍 통과시키지 않고 예외를 상위로 전파하여 후속 단계 오동작 방지"""
+    max_retries = 3
+    max_overload_attempts = 4
+    overload_attempts = 0
+    attempt = 0
+
+    def _diag(status: str, stage: str, detail: str):
+        try:
+            import session_logger
+            session_logger.log_event(status, stage, f"{engine_label}({model_name or 'default'}) {detail}")
         except Exception:
             pass
 
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": t}
-            ],
-        }
-        if any(model.startswith(p) for p in ("o1", "o3", "o4")):
-            payload["reasoning_effort"] = "low"
-        else:
-            payload["temperature"] = 0.2
-        res = requests.post(url, headers={"Authorization": f"Bearer {key}"}, json=payload, timeout=15)
-        if res.status_code == 429:
-            raise QuotaExceededError("OpenAI API 할당량이 초과되었거나 요청이 너무 빠릅니다.")
-        elif res.status_code == 401:
-            raise Exception("OpenAI API 키가 유효하지 않습니다.")
-        elif res.status_code == 200:
-            return res.json()["choices"][0]["message"]["content"].strip()
-        return t
-    return _translate_wrapper(text, api_key, do_translate, reference_map, target_lang, is_item, is_book, ai_model=ai_model)
+    while attempt < max_retries:
+        attempt += 1
+        if cancel_checker and cancel_checker():
+            raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+        try:
+            return attempt_fn()
+        except TranslationCancelledError:
+            raise
+        except QuotaExceededError as qe:
+            if attempt < max_retries:
+                wait_time = rate_limit_wait_fn(attempt) if rate_limit_wait_fn else (8.0 * attempt)
+                if engine_label == "Gemini":
+                    _notify_gemini_backoff(wait_time)
+                _diag("WARN", "API_429", f"retry={attempt}/{max_retries}, wait={wait_time:.0f}s")
+                if log_callback:
+                    log_callback(f"⚠️ [{engine_label} 요청 제한(429)] {wait_time:.0f}초 동안 대기 후 자동 재시도합니다... ({attempt}/{max_retries})")
+                _sleep_with_cancel(wait_time, cancel_checker)
+            else:
+                _diag("FAIL", "API_QUOTA", str(qe)[:160])
+                raise QuotaExceededError(quota_exceeded_msg or str(qe))
+        except json.JSONDecodeError as je:
+            if attempt < max_retries:
+                _diag("WARN", "API_JSON_PARSE", f"retry={attempt}/{max_retries}")
+                if log_callback:
+                    log_callback(f"⚠️ [응답 파싱 실패] {engine_label} 응답이 올바른 JSON 형식이 아닙니다. 재시도합니다... ({attempt}/{max_retries})")
+                _sleep_with_cancel(2.0, cancel_checker)
+            else:
+                _diag("FAIL", "API_JSON_PARSE", f"fallback_to_source: {str(je)[:120]}")
+                if log_callback:
+                    log_callback(f"⚠️ [번역 건너뜀] 응답 파싱에 계속 실패해 이 구간은 원문 그대로 둡니다. ({je})")
+                return fallback_result
+        except Exception as e:
+            err = str(e)
+            if "API_KEY_INVALID" in err or "401" in err or "UNAUTHENTICATED" in err or "유효하지 않습니다" in err:
+                _diag("FAIL", "API_AUTH", "HTTP 401 / invalid key")
+                raise Exception(auth_error_msg or f"{engine_label} API 키가 유효하지 않습니다. 올바른 API 키인지 확인해주세요.")
+            if "404" in err or "NOT_FOUND" in err:
+                _diag("FAIL", "API_MODEL_404", "model not found")
+                raise Exception(f"선택한 {engine_label} AI 모델({model_name})을 찾을 수 없습니다. 지원되는 모델명을 선택해주세요.")
+            if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                if attempt < max_retries:
+                    wait_time = rate_limit_wait_fn(attempt) if rate_limit_wait_fn else (8.0 * attempt)
+                    if engine_label == "Gemini":
+                        _notify_gemini_backoff(wait_time)
+                    _diag("WARN", "API_429", f"retry={attempt}/{max_retries}, wait={wait_time:.0f}s")
+                    if log_callback:
+                        log_callback(f"⚠️ [{engine_label} 요청 제한(429)] {wait_time:.0f}초 동안 대기 후 자동 재시도합니다... ({attempt}/{max_retries})")
+                    _sleep_with_cancel(wait_time, cancel_checker)
+                else:
+                    _diag("FAIL", "API_QUOTA", "429 exhausted")
+                    raise QuotaExceededError(quota_exceeded_msg or f"{engine_label} API 한도(429) 초과로 작업을 중단합니다.")
+            elif any(k in err.lower() for k in ("503", "unavailable", "500", "502", "504", "529", "overloaded", "high demand", "timed out", "timeout", "connection")):
+                if overload_attempts < max_overload_attempts:
+                    overload_attempts += 1
+                    attempt = max(0, attempt - 1)
+                    wait_time = min(30, 8 * overload_attempts)
+                    if engine_label == "Gemini":
+                        _notify_gemini_backoff(wait_time)
+                    _diag("WARN", "API_OVERLOAD", f"attempt={overload_attempts}/{max_overload_attempts}, wait={wait_time}s")
+                    if log_callback:
+                        log_callback(f"⚠️ [{engine_label} 서버 일시 과부하/지연] {wait_time}초 대기 후 자동 재시도합니다... ({overload_attempts}/{max_overload_attempts})")
+                    _sleep_with_cancel(wait_time, cancel_checker)
+                else:
+                    _diag("FAIL", "API_OVERLOAD", f"exhausted: {err[:160]}")
+                    raise Exception(f"{engine_label} 서버 일시 과부하/응답 지연으로 계속 실패하고 있습니다. 잠시 후 다시 시도해주세요. ({err})")
+            else:
+                if attempt < max_retries:
+                    wait_time = 4.0 * attempt
+                    _diag("WARN", "API_COMM", f"retry={attempt}/{max_retries}, wait={wait_time:.0f}s")
+                    if log_callback:
+                        log_callback(f"⚠️ [{engine_label} 통신 오류] {wait_time:.0f}초 대기 후 재시도합니다... ({attempt}/{max_retries})")
+                    _sleep_with_cancel(wait_time, cancel_checker)
+                else:
+                    _diag("FAIL", "API_ERROR", err[:160])
+                    raise Exception(f"{engine_label} 번역 실패 ({err})")
+
+    return fallback_result
 
 
 def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)"):
@@ -352,17 +539,17 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
     if genai is None:
         return [item if item is not None else text for item, text in zip(resolved, text_list)]
 
-    max_retries = 3
-    client = genai.Client(api_key=api_key)
-    input_json = json.dumps(unique_unresolved, ensure_ascii=False)
+    client = _create_gemini_client(api_key)
+    indexed_payload = {str(idx): txt for idx, txt in enumerate(unique_unresolved)}
+    input_json = json.dumps(indexed_payload, ensure_ascii=False)
     
     target_prompt = LANG_CODES.get(target_lang, ("KO", "ko", "natural Korean"))[2]
     
     prompt = (
-        f"Translate the input JSON array from English to {target_prompt} for Minecraft quests.\n"
+        f"Translate every string value in the input JSON object from English to {target_prompt} for Minecraft quests.\n"
         "Rules:\n"
-        "- Return ONLY a valid JSON array (no explanation, no markdown).\n"
-        "- Keep array order and length exactly the same.\n"
+        "- Return ONLY a valid JSON object with the exact same numeric string keys (\"0\", \"1\", ...) (no explanation, no markdown).\n"
+        "- Do NOT skip, merge, or renumber any keys.\n"
         "- Preserve formatting/placeholders exactly (&a, §c, {color:...}, %s, {0}, <...>).\n"
         "- NEVER use square brackets [] around translated words (e.g., WRONG: '[철] [검]', RIGHT: '철 검').\n"
         "- Preserve game abbreviations and formats exactly without translating (e.g., 'Lv.', 'HP', 'MP', 'ATK', 'DEF', 'x2', '+10%').\n"
@@ -391,139 +578,146 @@ def translate_gemini_batch(text_list, api_key, is_paid=False, log_callback=None,
 
     model_name = ai_model if ai_model else 'gemini-3.5-flash-lite'
 
-    for attempt in range(1, max_retries + 1):
-        if cancel_checker and cancel_checker():
-            raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-
-        if not is_paid:
-            with _gemini_api_rate_lock:
-                global _last_gemini_api_call
-                elapsed = time.time() - _last_gemini_api_call
-                if elapsed < 6.5:
-                    sleep_time = 6.5 - elapsed
-                    for _ in range(int(sleep_time * 10)):
-                        if cancel_checker and cancel_checker():
-                            raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                        time.sleep(0.1)
-                _last_gemini_api_call = time.time()
-
-        try:
-            config = None
-            if types:
-                config_params = {"response_mime_type": "application/json"}
-                if hasattr(types, "ThinkingConfig") and ("2.5" in model_name or "thinking" in model_name or "2.0-flash" in model_name):
-                    try:
-                        config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-                    except Exception:
-                        pass
-                try:
-                    config = types.GenerateContentConfig(**config_params)
-                except Exception:
-                    config = None
-
+    def _parse_gemini_json_response(raw_text: str):
+        text_clean = (raw_text or "").strip()
+        if text_clean.startswith("```"):
+            text_clean = re.sub(r"^```[a-zA-Z]*\s*", "", text_clean)
+            text_clean = re.sub(r"\s*```$", "", text_clean).strip()
+        # 1차: 전체 텍스트 직접 파싱 시도 (텍스트 내 {color:...} 등 중괄호 오탐 방지)
+        for candidate in (text_clean, re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', text_clean)):
             try:
-                translation_memory.record_api_call(1)
-                res = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=config,
-                )
-            except Exception as call_err:
-                err_msg = str(call_err)
-                if ("400" in err_msg or "INVALID_ARGUMENT" in err_msg or "not supported" in err_msg) and config is not None:
-                    # 설정 호환성 문제일 경우 설정 없이 기본 호출로 자동 재시도
-                    res = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                    )
-                else:
-                    raise call_err
-
-            raw_text = res.text.strip() if res.text else ""
-            if raw_text.startswith("```"):
-                raw_text = re.sub(r"^```[a-zA-Z]*\s*", "", raw_text)
-                raw_text = re.sub(r"\s*```$", "", raw_text).strip()
-            match = re.search(r'\[.*\]', raw_text, re.DOTALL)
-            if match:
-                raw_text = match.group(0)
-            
-            try:
-                translated_array = json.loads(raw_text, strict=False)
+                return json.loads(candidate, strict=False)
             except Exception:
-                # 불완전한 제어 문자나 이스케이프 오류 방어
-                cleaned = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', raw_text)
-                translated_array = json.loads(cleaned, strict=False)
-            if isinstance(translated_array, list) and len(translated_array) == len(unique_unresolved):
+                pass
+        # 2차: 앞뒤 설명문 제거 후 JSON Object / Array 추출
+        obj_match = re.search(r'\{.*\}', text_clean, re.DOTALL)
+        arr_match = re.search(r'\[.*\]', text_clean, re.DOTALL)
+        extracted = None
+        if obj_match and (not arr_match or obj_match.start() <= arr_match.start()):
+            extracted = obj_match.group(0)
+        elif arr_match:
+            extracted = arr_match.group(0)
+        if extracted:
+            try:
+                return json.loads(extracted, strict=False)
+            except Exception:
+                cleaned = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', extracted)
+                return json.loads(cleaned, strict=False)
+        return json.loads(text_clean, strict=False)
+
+    def _attempt_gemini():
+        res = _invoke_gemini_generate_content(
+            client=client,
+            model_name=model_name,
+            prompt=prompt,
+            is_paid=is_paid,
+            cancel_checker=cancel_checker,
+        )
+
+        raw_text = res.text.strip() if res.text else ""
+        parsed = _parse_gemini_json_response(raw_text)
+
+        # 1) ID 매핑 JSON Object 응답 처리 (인덱스 밀림 원천 차단)
+        if isinstance(parsed, dict):
+                translated_unique = [None] * len(unique_unresolved)
+                missing_indices = []
+                for idx_u in range(len(unique_unresolved)):
+                    val = parsed.get(str(idx_u))
+                    if val is None and idx_u in parsed:
+                        val = parsed.get(idx_u)
+                    if val is not None and str(val).strip() != "":
+                        translated_unique[idx_u] = str(val)
+                    else:
+                        missing_indices.append(idx_u)
+
+                # 매칭 성공한 항목은 즉시 메모리 캐시에 보존
                 with _gemini_cache_lock:
                     if len(_gemini_cache) >= _GEMINI_CACHE_MAX:
                         _gemini_cache.clear()
-                    for src, dst in zip(unique_unresolved, translated_array):
-                        _gemini_cache[(src, target_lang)] = str(dst)
+                    for idx_u, dst_val in enumerate(translated_unique):
+                        if dst_val is not None:
+                            _gemini_cache[(unique_unresolved[idx_u], target_lang)] = dst_val
+
+                # 일부 누락된 키가 있을 경우 누락된 항목만 별도로 1회 복구 호출
+                if missing_indices and len(missing_indices) < len(unique_unresolved):
+                    if log_callback:
+                        log_callback(f"⚠️ [일부 키 누락] {len(unique_unresolved)}개 중 {len(missing_indices)}개 누락 → 누락분만 재번역합니다.")
+                    missing_texts = [unique_unresolved[m_i] for m_i in missing_indices]
+                    rescued = translate_gemini_batch(
+                        missing_texts, api_key, is_paid=is_paid,
+                        log_callback=log_callback, cancel_checker=cancel_checker,
+                        reference_map=reference_map, glossary=glossary,
+                        ai_model=ai_model, target_lang=target_lang
+                    )
+                    for m_i, r_val in zip(missing_indices, rescued):
+                        translated_unique[m_i] = r_val
+                elif missing_indices and len(missing_indices) == len(unique_unresolved):
+                    raise json.JSONDecodeError("All keys missing in Gemini JSON object", raw_text, 0)
 
                 merged = list(resolved)
                 for original_pos, resolved_idx in enumerate(unresolved_indices):
                     unique_pos = unresolved_to_unique[original_pos]
-                    merged[resolved_idx] = translated_array[unique_pos]
+                    val_out = translated_unique[unique_pos]
+                    merged[resolved_idx] = val_out if val_out is not None else unique_unresolved[unique_pos]
                 return merged
-            return [item if item is not None else text for item, text in zip(resolved, text_list)]
 
-        except json.JSONDecodeError as e:
-            if attempt < max_retries:
-                if log_callback:
-                    log_callback(f"⚠️ [응답 파싱 실패] Gemini 응답이 올바른 JSON 형식이 아닙니다. 재시도합니다... ({attempt}/{max_retries})")
-                for _ in range(20):
-                    if cancel_checker and cancel_checker():
-                        raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                    time.sleep(0.1)
-            else:
-                if log_callback:
-                    log_callback(f"⚠️ [번역 건너뜀] 응답 파싱에 계속 실패해 이 구간은 원문 그대로 둡니다. ({str(e)})")
-                return [item if item is not None else text for item, text in zip(resolved, text_list)]
+        # 2) 하위 호환: 모델이 JSON Array로 응답한 경우에도 안전하게 처리
+        if isinstance(parsed, list) and len(parsed) == len(unique_unresolved):
+            with _gemini_cache_lock:
+                if len(_gemini_cache) >= _GEMINI_CACHE_MAX:
+                    _gemini_cache.clear()
+                for src, dst in zip(unique_unresolved, parsed):
+                    _gemini_cache[(src, target_lang)] = str(dst)
 
-        except Exception as e:
-            err = str(e)
-            if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                if attempt < max_retries:
-                    wait_time = 15 * attempt if is_paid else 65 * attempt
-                    if log_callback:
-                        log_callback(f"⚠️ [요청 제한 발생] {wait_time}초 동안 대기 후 자동 재시도합니다... ({attempt}/{max_retries})")
-                    for _ in range(wait_time * 10):
-                        if cancel_checker and cancel_checker():
-                            raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                        time.sleep(0.1)
-                else:
-                    raise QuotaExceededError("Gemini API 한도(RPM/RPD) 초과로 더 이상 진행할 수 없습니다. 작업을 중단합니다.")
-            elif any(k in err for k in ("503", "UNAVAILABLE", "500", "502", "504", "overloaded", "high demand")):
-                if attempt < max_retries:
-                    wait_time = 8 * attempt
-                    if log_callback:
-                        log_callback(f"⚠️ [서버 일시 과부하(503)] {wait_time}초 대기 후 자동 재시도합니다... ({attempt}/{max_retries})")
-                    for _ in range(wait_time * 10):
-                        if cancel_checker and cancel_checker():
-                            raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-                        time.sleep(0.1)
-                else:
-                    raise Exception(f"Gemini 서버 일시 과부하(503)로 응답이 지연되고 있습니다. 잠시 후 다시 시도해주세요. ({err})")
-            elif "API_KEY_INVALID" in err or "401" in err or "UNAUTHENTICATED" in err:
-                raise Exception("Gemini API 키가 유효하지 않습니다. 올바른 API 키인지 확인해주세요.")
-            elif "404" in err or "NOT_FOUND" in err:
-                raise Exception(f"선택한 AI 모델({model_name})을 찾을 수 없습니다. 지원되는 모델명을 선택해주세요.")
-            else:
-                if attempt == max_retries:
-                    raise Exception(f"Gemini 번역 실패 ({err})")
+            merged = list(resolved)
+            for original_pos, resolved_idx in enumerate(unresolved_indices):
+                unique_pos = unresolved_to_unique[original_pos]
+                merged[resolved_idx] = parsed[unique_pos]
+            return merged
 
-    return [item if item is not None else text for item, text in zip(resolved, text_list)]
+        # 대용량 배치에서 배열 길이가 어긋난 경우 절반씩 분할 재시도하여 번역 유실 방지
+        if len(unique_unresolved) >= 4:
+            if log_callback:
+                got_len = len(parsed) if isinstance(parsed, list) else 0
+                log_callback(f"⚠️ [배치 개수 불일치] 요청 {len(unique_unresolved)}개 / 응답 {got_len}개 → 절반으로 분할하여 안전하게 재시도합니다.")
+            mid = len(unique_unresolved) // 2
+            left_res = translate_gemini_batch(
+                unique_unresolved[:mid], api_key, is_paid=is_paid,
+                log_callback=log_callback, cancel_checker=cancel_checker,
+                reference_map=reference_map, glossary=glossary,
+                ai_model=ai_model, target_lang=target_lang
+            )
+            right_res = translate_gemini_batch(
+                unique_unresolved[mid:], api_key, is_paid=is_paid,
+                log_callback=log_callback, cancel_checker=cancel_checker,
+                reference_map=reference_map, glossary=glossary,
+                ai_model=ai_model, target_lang=target_lang
+            )
+            combined_unique = list(left_res) + list(right_res)
+            merged = list(resolved)
+            for original_pos, resolved_idx in enumerate(unresolved_indices):
+                unique_pos = unresolved_to_unique[original_pos]
+                merged[resolved_idx] = combined_unique[unique_pos]
+            return merged
+        return [item if item is not None else text for item, text in zip(resolved, text_list)]
+
+    fallback_result = [item if item is not None else text for item, text in zip(resolved, text_list)]
+    return _execute_batch_with_retry(
+        "Gemini",
+        _attempt_gemini,
+        fallback_result,
+        is_paid=is_paid,
+        model_name=model_name,
+        log_callback=log_callback,
+        cancel_checker=cancel_checker,
+        rate_limit_wait_fn=lambda att: (15 * att if is_paid else 65 * att),
+        quota_exceeded_msg="Gemini API 한도(RPM/RPD) 초과로 더 이상 진행할 수 없습니다. 작업을 중단합니다.",
+        auth_error_msg="Gemini API 키가 유효하지 않습니다. 올바른 API 키인지 확인해주세요.",
+    )
 
 
-def translate_local_ai(text_list, base_url, model_name, api_key=None, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, target_lang="한국어 (Korean)"):
-    if not text_list:
-        return []
-    if MOCK_MODE:
-        if log_callback:
-            log_callback(f"🧪 [Mock Mode] {len(text_list)}개 텍스트를 모의 번역합니다.")
-        time.sleep(0.1)
-        return _mock_translate_batch(text_list)
-
+def _resolve_batch_cache(text_list, reference_map=None, target_lang="한국어 (Korean)"):
+    """배치 번역 전 용어집/메모리/인메모리 캐시를 조회하고 고유 미번역 항목을 추출합니다."""
     resolved = []
     unresolved_indices = []
     unresolved_raw = []
@@ -532,23 +726,20 @@ def translate_local_ai(text_list, base_url, model_name, api_key=None, log_callba
         cached = get_reference_translation(text, reference_map)
         if cached is not None:
             resolved.append(cached)
+            continue
+        mem_cached = translation_memory.get_cached_translation(text, target_lang)
+        if mem_cached is not None:
+            resolved.append(mem_cached)
+            continue
+        cache_key = (text, target_lang)
+        with _gemini_cache_lock:
+            cached_local = _gemini_cache.get(cache_key)
+        if cached_local is not None:
+            resolved.append(cached_local)
         else:
-            mem_cached = translation_memory.get_cached_translation(text, target_lang)
-            if mem_cached is not None:
-                resolved.append(mem_cached)
-            else:
-                cache_key = (text, target_lang)
-                with _gemini_cache_lock:
-                    cached_local = _gemini_cache.get(cache_key)
-                if cached_local is not None:
-                    resolved.append(cached_local)
-                else:
-                    resolved.append(None)
-                    unresolved_indices.append(len(resolved) - 1)
-                    unresolved_raw.append(text)
-
-    if not unresolved_raw:
-        return resolved
+            resolved.append(None)
+            unresolved_indices.append(len(resolved) - 1)
+            unresolved_raw.append(text)
 
     unique_unresolved = []
     unique_map = {}
@@ -561,102 +752,404 @@ def translate_local_ai(text_list, base_url, model_name, api_key=None, log_callba
             unique_unresolved.append(text)
         unresolved_to_unique.append(pos)
 
-    input_json = json.dumps(unique_unresolved, ensure_ascii=False)
+    return resolved, unresolved_indices, unique_unresolved, unresolved_to_unique
+
+
+def _build_chat_batch_prompt(unique_unresolved, target_lang, glossary=None, use_id_mapping=True):
+    """Claude / DeepSeek / Local AI 배치 호출용 시스템 프롬프트와 입력 JSON 문자열을 생성합니다."""
     target_prompt = LANG_CODES.get(target_lang, ("KO", "ko", "natural Korean"))[2]
-    
-    system_prompt = (
-        f"Translate the input JSON array from English to {target_prompt} for Minecraft quests.\n"
-        "Rules:\n"
-        "- Return ONLY a valid JSON array matching the exact order and length of the input.\n"
-        "- Output MUST start with '[' and end with ']'.\n"
-        "- Preserve formatting/placeholders exactly (&a, §c, {{color:...}}, %s, {{0}}, <...>).\n"
-        "- NEVER use square brackets [] around translated words.\n"
-        "- Preserve abbreviations like 'Lv.', 'HP', 'MP', 'ATK', 'x2'.\n"
-    )
+    if use_id_mapping:
+        input_json = json.dumps({str(i): t for i, t in enumerate(unique_unresolved)}, ensure_ascii=False)
+        system_prompt = (
+            f"Translate every string value in the input JSON object from English to {target_prompt} for Minecraft quests.\n"
+            "Rules:\n"
+            "- Return ONLY a valid JSON object with the exact same numeric string keys (\"0\", \"1\", ...) (no explanation, no markdown).\n"
+            "- Do NOT skip, merge, or renumber any keys.\n"
+            "- Preserve formatting/placeholders exactly (&a, §c, {color:...}, %s, {0}, <...>).\n"
+            "- NEVER use square brackets [] around translated words.\n"
+            "- Preserve abbreviations like 'Lv.', 'HP', 'MP', 'ATK', 'x2'.\n"
+        )
+    else:
+        input_json = json.dumps(unique_unresolved, ensure_ascii=False)
+        system_prompt = (
+            f"Translate the input JSON array from English to {target_prompt} for Minecraft quests.\n"
+            "Rules:\n"
+            "- Return ONLY a valid JSON array matching the exact order and length of the input.\n"
+            "- Output MUST start with '[' and end with ']'.\n"
+            "- Preserve formatting/placeholders exactly (&a, §c, {color:...}, %s, {0}, <...>).\n"
+            "- NEVER use square brackets [] around translated words.\n"
+            "- Preserve abbreviations like 'Lv.', 'HP', 'MP', 'ATK', 'x2'.\n"
+        )
     if glossary:
         clean_glossary = [f"'{k}' as '{v.split('#')[0].strip()}'" for k, v in glossary.items()]
-        glossary_text = ", ".join(clean_glossary)
-        system_prompt += f"- Glossary (Strictly apply): {glossary_text}\n"
+        system_prompt += f"- Glossary (Strictly apply): {', '.join(clean_glossary)}\n"
+    return system_prompt, input_json
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Input JSON: {input_json}"}
-    ]
-    
+
+def _merge_batch_json_response(raw_text, text_list, resolved, unresolved_indices, unique_unresolved, unresolved_to_unique, target_lang, log_callback=None, retry_fn=None):
+    """JSON Object(ID 매핑) 또는 JSON Array 응답을 파싱하여 캐시에 저장하고 최종 결과 리스트를 반환합니다."""
+    text_clean = (raw_text or "").strip()
+    if text_clean.startswith("```"):
+        text_clean = re.sub(r"^```[a-zA-Z]*\s*", "", text_clean)
+        text_clean = re.sub(r"\s*```$", "", text_clean).strip()
+
+    parsed = None
+    for cand in (text_clean, re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', text_clean)):
+        try:
+            parsed = json.loads(cand, strict=False)
+            break
+        except Exception:
+            pass
+    if parsed is None:
+        obj_m = re.search(r'\{.*\}', text_clean, re.DOTALL)
+        arr_m = re.search(r'\[.*\]', text_clean, re.DOTALL)
+        extracted = obj_m.group(0) if (obj_m and (not arr_m or obj_m.start() <= arr_m.start())) else (arr_m.group(0) if arr_m else None)
+        if extracted:
+            parsed = json.loads(re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', extracted), strict=False)
+
+    if isinstance(parsed, dict):
+        translated_unique = [None] * len(unique_unresolved)
+        missing_indices = []
+        for idx_u in range(len(unique_unresolved)):
+            val = parsed.get(str(idx_u))
+            if val is None and idx_u in parsed:
+                val = parsed.get(idx_u)
+            if val is not None and str(val).strip() != "":
+                translated_unique[idx_u] = str(val)
+            else:
+                missing_indices.append(idx_u)
+
+        with _gemini_cache_lock:
+            if len(_gemini_cache) >= _GEMINI_CACHE_MAX:
+                _gemini_cache.clear()
+            for idx_u, dst_val in enumerate(translated_unique):
+                if dst_val is not None:
+                    _gemini_cache[(unique_unresolved[idx_u], target_lang)] = dst_val
+
+        if missing_indices and len(missing_indices) < len(unique_unresolved) and retry_fn is not None:
+            if log_callback:
+                log_callback(f"⚠️ [일부 키 누락] {len(unique_unresolved)}개 중 {len(missing_indices)}개 누락 → 누락분만 재번역합니다.")
+            rescued = retry_fn([unique_unresolved[m_i] for m_i in missing_indices])
+            for m_i, r_val in zip(missing_indices, rescued):
+                translated_unique[m_i] = r_val
+
+        merged = list(resolved)
+        for original_pos, resolved_idx in enumerate(unresolved_indices):
+            unique_pos = unresolved_to_unique[original_pos]
+            val_out = translated_unique[unique_pos]
+            merged[resolved_idx] = val_out if val_out is not None else unique_unresolved[unique_pos]
+        return merged
+
+    if isinstance(parsed, list) and len(parsed) == len(unique_unresolved):
+        with _gemini_cache_lock:
+            if len(_gemini_cache) >= _GEMINI_CACHE_MAX:
+                _gemini_cache.clear()
+            for src, dst in zip(unique_unresolved, parsed):
+                _gemini_cache[(src, target_lang)] = str(dst)
+
+        merged = list(resolved)
+        for original_pos, resolved_idx in enumerate(unresolved_indices):
+            unique_pos = unresolved_to_unique[original_pos]
+            merged[resolved_idx] = parsed[unique_pos]
+        return merged
+
+    if log_callback:
+        log_callback("⚠️ [응답 파싱 실패] AI 응답이 올바른 JSON 형식이 아니어 원문으로 대체됩니다.")
+    return [item if item is not None else text for item, text in zip(resolved, text_list)]
+
+
+def translate_openai_batch(text_list, api_key, reference_map=None, glossary=None, ai_model=None, target_lang="한국어 (Korean)", log_callback=None, cancel_checker=None):
+    """OpenAI (ChatGPT) 전용 ID 매핑 JSON Object 배치 번역 엔진.
+    단건 호출 대비 고정 프롬프트·용어집 중복 과금을 수십 분의 1로 줄이고 커넥션 풀을 재사용합니다."""
+    if not text_list:
+        return []
+    if MOCK_MODE:
+        if log_callback:
+            log_callback(f"🧪 [Mock Mode] {len(text_list)}개 텍스트를 모의 번역합니다.")
+        time.sleep(0.1)
+        return _mock_translate_batch(text_list)
+
+    resolved, unresolved_indices, unique_unresolved, unresolved_to_unique = _resolve_batch_cache(
+        text_list, reference_map=reference_map, target_lang=target_lang
+    )
+    if not unique_unresolved:
+        return resolved
+
+    model_name = ai_model if ai_model else "gpt-6-luna"
+    system_prompt, input_json = _build_chat_batch_prompt(unique_unresolved, target_lang, glossary=glossary, use_id_mapping=True)
+
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key or ''}",
+    }
     payload = {
         "model": model_name,
-        "messages": messages,
-        "temperature": 0.1
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Input JSON: {input_json}"},
+        ],
+        "response_format": {"type": "json_object"},
     }
-    
+    if any(model_name.startswith(p) for p in ("o1", "o3", "o4")):
+        payload["reasoning_effort"] = "low"
+    else:
+        payload["temperature"] = 0.2
+
+    sess = _get_http_session()
+
+    def _attempt_openai():
+        translation_memory.record_api_call(1)
+        res = sess.post(url, headers=headers, json=payload, timeout=180)
+        if res.status_code == 429:
+            raise QuotaExceededError("OpenAI API 할당량이 초과되었거나 요청이 너무 빠릅니다.")
+        if res.status_code == 401:
+            raise Exception("OpenAI API 키가 유효하지 않습니다.")
+        if res.status_code in (500, 502, 503, 504):
+            raise Exception(f"HTTP {res.status_code} unavailable")
+        res.raise_for_status()
+        raw_text = res.json()["choices"][0]["message"]["content"].strip()
+
+        return _merge_batch_json_response(
+            raw_text, text_list, resolved, unresolved_indices, unique_unresolved, unresolved_to_unique,
+            target_lang, log_callback=log_callback,
+            retry_fn=lambda missing: translate_openai_batch(
+                missing, api_key, reference_map=reference_map, glossary=glossary,
+                ai_model=model_name, target_lang=target_lang,
+                log_callback=log_callback, cancel_checker=cancel_checker
+            )
+        )
+
+    fallback_result = [item if item is not None else text for item, text in zip(resolved, text_list)]
+    return _execute_batch_with_retry(
+        "OpenAI",
+        _attempt_openai,
+        fallback_result,
+        is_paid=True,
+        model_name=model_name,
+        log_callback=log_callback,
+        cancel_checker=cancel_checker,
+        rate_limit_wait_fn=lambda att: 6.0 * att,
+        quota_exceeded_msg="OpenAI API 할당량이 초과되었거나 요청이 너무 빠릅니다.",
+        auth_error_msg="OpenAI API 키가 유효하지 않습니다.",
+    )
+
+
+def translate_claude(text_list, api_key, ai_model=None, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, target_lang="한국어 (Korean)"):
+    """Anthropic (Claude) 전용 배치 번역 엔진.
+    Prompt Caching(ephemeral), 429/529 과부하 백오프 재시도, 커넥션 풀링을 적용합니다."""
+    if not text_list:
+        return []
+    if MOCK_MODE:
+        if log_callback:
+            log_callback(f"🧪 [Mock Mode] {len(text_list)}개 텍스트를 모의 번역합니다.")
+        time.sleep(0.1)
+        return _mock_translate_batch(text_list)
+
+    resolved, unresolved_indices, unique_unresolved, unresolved_to_unique = _resolve_batch_cache(
+        text_list, reference_map=reference_map, target_lang=target_lang
+    )
+    if not unique_unresolved:
+        return resolved
+
+    model_name = ai_model or "claude-haiku-5-5"
+    system_prompt, input_json = _build_chat_batch_prompt(unique_unresolved, target_lang, glossary=glossary, use_id_mapping=True)
+
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": api_key or "",
+        "anthropic-version": "2023-06-01",
+    }
+    payload = {
+        "model": model_name,
+        "max_tokens": 8192,
+        "system": [
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        "messages": [{"role": "user", "content": f"Input JSON: {input_json}"}],
+        "temperature": 0.1,
+    }
+
+    sess = _get_http_session()
+
+    def _attempt_claude():
+        translation_memory.record_api_call(1)
+        response = sess.post(url, headers=headers, json=payload, timeout=180)
+        if response.status_code == 429:
+            raise QuotaExceededError("Anthropic (Claude) API 요청 한도(429)에 도달했습니다.")
+        if response.status_code == 401:
+            raise Exception("Anthropic (Claude) API 키가 유효하지 않습니다.")
+        if response.status_code in (500, 502, 503, 504, 529):
+            raise Exception(f"HTTP {response.status_code} overloaded")
+        response.raise_for_status()
+        data = response.json()
+        raw_text = data["content"][0]["text"].strip()
+
+        return _merge_batch_json_response(
+            raw_text, text_list, resolved, unresolved_indices, unique_unresolved, unresolved_to_unique,
+            target_lang, log_callback=log_callback,
+            retry_fn=lambda missing: translate_claude(
+                missing, api_key, ai_model=model_name, log_callback=log_callback,
+                cancel_checker=cancel_checker, reference_map=reference_map,
+                glossary=glossary, target_lang=target_lang
+            )
+        )
+
+    fallback_result = [item if item is not None else text for item, text in zip(resolved, text_list)]
+    return _execute_batch_with_retry(
+        "Claude",
+        _attempt_claude,
+        fallback_result,
+        is_paid=True,
+        model_name=model_name,
+        log_callback=log_callback,
+        cancel_checker=cancel_checker,
+        rate_limit_wait_fn=lambda att: 8.0 * att,
+        quota_exceeded_msg="Anthropic (Claude) API 요청 한도(429)에 도달했습니다.",
+        auth_error_msg="Anthropic (Claude) API 키가 유효하지 않습니다.",
+    )
+
+
+def translate_deepseek(text_list, api_key, ai_model=None, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, target_lang="한국어 (Korean)"):
+    """DeepSeek 전용 배치 번역 엔진.
+    고정 시스템 프롬프트(Prefix Cache 할인), 429/503 백오프 재시도, 커넥션 풀링을 적용합니다."""
+    if not text_list:
+        return []
+    if MOCK_MODE:
+        if log_callback:
+            log_callback(f"🧪 [Mock Mode] {len(text_list)}개 텍스트를 모의 번역합니다.")
+        time.sleep(0.1)
+        return _mock_translate_batch(text_list)
+
+    resolved, unresolved_indices, unique_unresolved, unresolved_to_unique = _resolve_batch_cache(
+        text_list, reference_map=reference_map, target_lang=target_lang
+    )
+    if not unique_unresolved:
+        return resolved
+
+    model_name = ai_model or "deepseek-flash"
+    system_prompt, input_json = _build_chat_batch_prompt(unique_unresolved, target_lang, glossary=glossary, use_id_mapping=True)
+
+    url = "https://api.deepseek.com/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key or ''}",
+    }
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Input JSON: {input_json}"},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1,
+    }
+
+    sess = _get_http_session()
+
+    def _attempt_deepseek():
+        translation_memory.record_api_call(1)
+        response = sess.post(url, headers=headers, json=payload, timeout=180)
+        if response.status_code == 429:
+            raise QuotaExceededError("DeepSeek API 요청 한도(429)에 도달했습니다.")
+        if response.status_code == 401:
+            raise Exception("DeepSeek API 키가 유효하지 않습니다.")
+        if response.status_code in (500, 502, 503, 504):
+            raise Exception(f"HTTP {response.status_code} unavailable")
+        response.raise_for_status()
+        data = response.json()
+        raw_text = data["choices"][0]["message"]["content"].strip()
+
+        return _merge_batch_json_response(
+            raw_text, text_list, resolved, unresolved_indices, unique_unresolved, unresolved_to_unique,
+            target_lang, log_callback=log_callback,
+            retry_fn=lambda missing: translate_deepseek(
+                missing, api_key, ai_model=model_name, log_callback=log_callback,
+                cancel_checker=cancel_checker, reference_map=reference_map,
+                glossary=glossary, target_lang=target_lang
+            )
+        )
+
+    fallback_result = [item if item is not None else text for item, text in zip(resolved, text_list)]
+    return _execute_batch_with_retry(
+        "DeepSeek",
+        _attempt_deepseek,
+        fallback_result,
+        is_paid=True,
+        model_name=model_name,
+        log_callback=log_callback,
+        cancel_checker=cancel_checker,
+        rate_limit_wait_fn=lambda att: 6.0 * att,
+        quota_exceeded_msg="DeepSeek API 요청 한도(429)에 도달했습니다.",
+        auth_error_msg="DeepSeek API 키가 유효하지 않습니다.",
+    )
+
+
+def translate_local_ai(text_list, base_url, model_name, api_key=None, log_callback=None, cancel_checker=None, reference_map=None, glossary=None, target_lang="한국어 (Korean)"):
+    """로컬 LLM(Ollama / LM Studio 등) 및 커스텀 OpenAI 호환 서버 전용 번역 엔진."""
+    if not text_list:
+        return []
+    if MOCK_MODE:
+        if log_callback:
+            log_callback(f"🧪 [Mock Mode] {len(text_list)}개 텍스트를 모의 번역합니다.")
+        time.sleep(0.1)
+        return _mock_translate_batch(text_list)
+
+    resolved, unresolved_indices, unique_unresolved, unresolved_to_unique = _resolve_batch_cache(
+        text_list, reference_map=reference_map, target_lang=target_lang
+    )
+    if not unique_unresolved:
+        return resolved
+
+    system_prompt, input_json = _build_chat_batch_prompt(unique_unresolved, target_lang, glossary=glossary, use_id_mapping=False)
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Input JSON: {input_json}"},
+        ],
+        "temperature": 0.1,
+    }
+
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    
-    url = base_url.strip().rstrip("/")
+
+    if not base_url or not str(base_url).strip():
+        raise Exception("로컬 AI 서버 URL이 설정되지 않았습니다. 설정에서 로컬 AI 주소를 확인해주세요.")
+    url = str(base_url).strip().rstrip("/")
     if "169.254." in url:
         if log_callback:
             log_callback("⚠️ [보안 차단] 클라우드 메타데이터 IP(169.254.x.x)는 SSRF 방지를 위해 사용할 수 없습니다.")
         return [item if item is not None else text for item, text in zip(resolved, text_list)]
 
-    is_anthropic = "anthropic.com" in url
-    if is_anthropic:
-        if not url.endswith("/messages"):
-            url += "/messages"
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": api_key or "",
-            "anthropic-version": "2023-06-01",
-        }
-        payload = {
-            "model": model_name,
-            "max_tokens": 4096,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": f"Input JSON: {input_json}"}],
-            "temperature": 0.1,
-        }
-    else:
-        if not url.endswith("/chat/completions"):
-            url += "/chat/completions"
+    if not url.endswith("/chat/completions"):
+        url += "/chat/completions"
 
     try:
         if cancel_checker and cancel_checker():
             raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
-            
+
         translation_memory.record_api_call(1)
         response = requests.post(url, headers=headers, json=payload, timeout=300)
         response.raise_for_status()
         data = response.json()
-        if is_anthropic:
-            raw_text = data["content"][0]["text"].strip()
-        else:
-            raw_text = data['choices'][0]['message']['content'].strip()
-        
-        match = re.search(r'\[.*\]', raw_text, re.DOTALL)
-        if match:
-            raw_text = match.group(0)
-            
-        translated_array = json.loads(raw_text)
-        if isinstance(translated_array, list) and len(translated_array) == len(unique_unresolved):
-            with _gemini_cache_lock:
-                if len(_gemini_cache) >= _GEMINI_CACHE_MAX:
-                    _gemini_cache.clear()
-                for src, dst in zip(unique_unresolved, translated_array):
-                    _gemini_cache[(src, target_lang)] = str(dst)
+        raw_text = data["choices"][0]["message"]["content"].strip()
 
-            merged = list(resolved)
-            for original_pos, resolved_idx in enumerate(unresolved_indices):
-                unique_pos = unresolved_to_unique[original_pos]
-                merged[resolved_idx] = translated_array[unique_pos]
-            return merged
-            
-        if log_callback:
-            log_callback("⚠️ [응답 파싱 실패] AI 응답이 올바른 JSON 형식이 아니어 원문으로 대체됩니다.")
-        return [item if item is not None else text for item, text in zip(resolved, text_list)]
-
+        return _merge_batch_json_response(
+            raw_text, text_list, resolved, unresolved_indices, unique_unresolved, unresolved_to_unique,
+            target_lang, log_callback=log_callback
+        )
+    except TranslationCancelledError:
+        raise
     except Exception as e:
         if log_callback:
-            log_callback(f"⚠️ [통신/파싱 에러] AI 호출 실패: {str(e)}")
+            log_callback(f"⚠️ [통신/파싱 에러] 로컬 AI 호출 실패: {str(e)}")
         return [item if item is not None else text for item, text in zip(resolved, text_list)]
 
 
@@ -693,9 +1186,9 @@ def get_available_engines():
 
 def fetch_local_ai_models(base_url: str, api_key: str = None, timeout: float = 3.0) -> list:
     """로컬 LLM (LM Studio, Ollama, vLLM, Jan 등) 또는 OpenAI 호환 서버에서 모델 목록을 자동으로 감지합니다."""
-    if not base_url:
+    if not base_url or not str(base_url).strip():
         return []
-    url = base_url.strip().rstrip("/")
+    url = str(base_url).strip().rstrip("/")
     if "169.254." in url:
         return []
 
@@ -752,7 +1245,7 @@ def fetch_local_ai_models(base_url: str, api_key: str = None, timeout: float = 3
     return []
 
 
-def auto_extract_glossary(text_samples, engine_key, api_key, ai_model=None, target_lang="한국어 (Korean)", custom_url=None):
+def auto_extract_glossary(text_samples, engine_key, api_key, ai_model=None, target_lang="한국어 (Korean)", custom_url=None, is_paid=False, cancel_checker=None):
     if not text_samples:
         return {}
     if MOCK_MODE or engine_key == "mock":
@@ -777,28 +1270,15 @@ def auto_extract_glossary(text_samples, engine_key, api_key, ai_model=None, targ
     extracted = {}
     try:
         if engine_key == "gemini_batch":
-            client = genai.Client(api_key=api_key)
+            client = _create_gemini_client(api_key)
             model_name = ai_model if ai_model else 'gemini-3.5-flash-lite'
-            config = None
-            if types:
-                config_params = {"response_mime_type": "application/json"}
-                if hasattr(types, "ThinkingConfig"):
-                    try:
-                        config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-                    except Exception:
-                        pass
-                try:
-                    config = types.GenerateContentConfig(**config_params)
-                except Exception:
-                    config = None
-            try:
-                res = client.models.generate_content(model=model_name, contents=prompt, config=config)
-            except Exception as call_err:
-                err_msg = str(call_err)
-                if ("400" in err_msg or "INVALID_ARGUMENT" in err_msg or "not supported" in err_msg) and config is not None:
-                    res = client.models.generate_content(model=model_name, contents=prompt)
-                else:
-                    raise call_err
+            res = _invoke_gemini_generate_content(
+                client=client,
+                model_name=model_name,
+                prompt=prompt,
+                is_paid=is_paid,
+                cancel_checker=cancel_checker,
+            )
             raw_text = res.text.strip() if res.text else ""
         elif engine_key == "claude":
             model_name = ai_model if ai_model else "claude-haiku-5-5"
@@ -813,8 +1293,10 @@ def auto_extract_glossary(text_samples, engine_key, api_key, ai_model=None, targ
             res.raise_for_status()
             raw_text = res.json()["content"][0]["text"].strip()
         elif engine_key in ("openai", "deepseek", "local_ai"):
-            if engine_key == "local_ai" and custom_url:
-                url = custom_url.strip().rstrip("/")
+            if engine_key == "local_ai":
+                if not custom_url or not str(custom_url).strip():
+                    return {}
+                url = str(custom_url).strip().rstrip("/")
             elif engine_key == "deepseek":
                 url = "https://api.deepseek.com/v1"
             else:
@@ -848,8 +1330,153 @@ def auto_extract_glossary(text_samples, engine_key, api_key, ai_model=None, targ
                     clean_k = re.sub(r'[^a-zA-Z0-9\s]', '', k).lower().strip()
                     if clean_k:
                         extracted[clean_k] = v.strip()
+    except TranslationCancelledError:
+        raise
     except Exception as e:
         import logging
         logging.warning(f"Auto glossary extraction failed: {e}")
         
     return extracted
+
+
+# ============================================================
+# 1차 대분류 클래스: EngineConfig + TranslationEngine
+# ============================================================
+@dataclass
+class EngineConfig:
+    """번역 엔진 호출에 필요한 설정(엔진·키·유무료·모델·언어·로컬URL)을 하나로 묶은 불변/표준 설정 객체."""
+    engine_key: str = "gemini_batch"
+    api_key: str = ""
+    is_paid: bool = False
+    ai_model: Optional[str] = None
+    target_lang: str = "한국어 (Korean)"
+    custom_url: Optional[str] = None
+
+
+class BatchApiClient:
+    """공용 HTTP/Gemini 클라이언트 풀, 통합 재시도 실행기, 5개 엔진 배치 호출 디스패치를 전담합니다."""
+
+    def __init__(self, rate_limiter: Optional[GeminiRateLimiter] = None):
+        self.rate_limiter = rate_limiter or _default_rate_limiter
+
+    def get_http_session(self) -> requests.Session:
+        return _get_http_session()
+
+    def get_gemini_client(self, api_key: str):
+        return _create_gemini_client(api_key)
+
+    def invoke_gemini(self, client, model_name: str, prompt: str, is_paid: bool = False, cancel_checker=None):
+        return _invoke_gemini_generate_content(
+            client, model_name, prompt, is_paid=is_paid, cancel_checker=cancel_checker
+        )
+
+    def execute_with_retry(self, engine_label: str, attempt_fn, fallback_result, **kwargs):
+        return _execute_batch_with_retry(engine_label, attempt_fn, fallback_result, **kwargs)
+
+    def translate_batch(
+        self,
+        text_list,
+        config: EngineConfig,
+        *,
+        log_callback=None,
+        cancel_checker=None,
+        reference_map=None,
+        glossary=None,
+    ):
+        if not text_list:
+            return []
+        if MOCK_MODE or config.engine_key == "mock":
+            return _mock_translate_batch(text_list)
+
+        if config.engine_key == "local_ai":
+            return translate_local_ai(
+                text_list, config.custom_url, config.ai_model,
+                api_key=config.api_key, log_callback=log_callback,
+                cancel_checker=cancel_checker, reference_map=reference_map,
+                glossary=glossary, target_lang=config.target_lang,
+            )
+        if config.engine_key == "deepseek":
+            return translate_deepseek(
+                text_list, config.api_key, ai_model=config.ai_model,
+                log_callback=log_callback, cancel_checker=cancel_checker,
+                reference_map=reference_map, glossary=glossary,
+                target_lang=config.target_lang,
+            )
+        if config.engine_key == "claude":
+            return translate_claude(
+                text_list, config.api_key, ai_model=config.ai_model,
+                log_callback=log_callback, cancel_checker=cancel_checker,
+                reference_map=reference_map, glossary=glossary,
+                target_lang=config.target_lang,
+            )
+        if config.engine_key == "openai":
+            return translate_openai_batch(
+                text_list, config.api_key, reference_map=reference_map,
+                glossary=glossary, ai_model=config.ai_model,
+                target_lang=config.target_lang, log_callback=log_callback,
+                cancel_checker=cancel_checker,
+            )
+        return translate_gemini_batch(
+            text_list, config.api_key, is_paid=config.is_paid,
+            log_callback=log_callback, cancel_checker=cancel_checker,
+            reference_map=reference_map, glossary=glossary,
+            ai_model=config.ai_model, target_lang=config.target_lang,
+        )
+
+    def fetch_local_models(self, base_url: str, api_key: str = None, timeout: float = 3.0) -> list:
+        return fetch_local_ai_models(base_url, api_key=api_key, timeout=timeout)
+
+
+class TranslationEngine:
+    """모든 번역 엔진(Gemini/OpenAI/Claude/DeepSeek/Local AI)의 배치 번역·용어 추출·RPM 관리를 통합 제공하는 단일 진입점."""
+
+    def __init__(
+        self,
+        rate_limiter: Optional[GeminiRateLimiter] = None,
+        api_client: Optional[BatchApiClient] = None,
+    ):
+        self.rate_limiter = rate_limiter or _default_rate_limiter
+        self.api_client = api_client or BatchApiClient(self.rate_limiter)
+
+    def get_free_rpm_profile(self, model_name: str):
+        return self.rate_limiter.get_profile(model_name)
+
+    def notify_backoff(self, wait_seconds: float):
+        self.rate_limiter.notify_backoff(wait_seconds)
+
+    def translate_batch(
+        self,
+        text_list,
+        config: EngineConfig,
+        *,
+        log_callback=None,
+        cancel_checker=None,
+        reference_map=None,
+        glossary=None,
+    ):
+        return self.api_client.translate_batch(
+            text_list,
+            config,
+            log_callback=log_callback,
+            cancel_checker=cancel_checker,
+            reference_map=reference_map,
+            glossary=glossary,
+        )
+
+    def extract_glossary(self, text_samples, config: EngineConfig, cancel_checker=None):
+        return auto_extract_glossary(
+            text_samples,
+            config.engine_key,
+            config.api_key,
+            ai_model=config.ai_model,
+            target_lang=config.target_lang,
+            custom_url=config.custom_url,
+            is_paid=config.is_paid,
+            cancel_checker=cancel_checker,
+        )
+
+    def fetch_local_models(self, base_url: str, api_key: str = None, timeout: float = 3.0) -> list:
+        return self.api_client.fetch_local_models(base_url, api_key=api_key, timeout=timeout)
+
+
+default_engine = TranslationEngine()

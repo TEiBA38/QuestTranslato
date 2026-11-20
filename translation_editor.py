@@ -12,6 +12,7 @@ translation_editor.py - 인게임 오역 수정기 백엔드 모듈
 import os
 import re
 import sys
+import time
 import logging
 from constants import has_hangul
 
@@ -42,23 +43,32 @@ def search_memory(query, category="all", target_lang="한국어 (Korean)", limit
 
     target_lang_norm = target_lang.replace(" ", "")
     results = []
-    query_lower = query.lower()
+    query_lower = query.lower().strip()
+    terms = [t.strip() for t in query_lower.split(",") if t.strip()]
+    if not terms:
+        return results
+
+    def _term_in_text(term, raw_text, lower_text):
+        if term in lower_text:
+            return True
+        if ('§' in raw_text or '&' in raw_text) and term in _MC_COLOR_RE.sub('', lower_text):
+            return True
+        return False
 
     def _search_in_cache(cache, cat_name):
         for lang_key, entries in cache.items():
             if lang_key.replace(" ", "") != target_lang_norm:
                 continue
             for src, tgt in entries.items():
-                match = False
                 src_l = src.lower()
                 tgt_l = tgt.lower()
 
-                if search_field in ("all", "src"):
-                    if query_lower in src_l or ('§' in src or '&' in src) and query_lower in _MC_COLOR_RE.sub('', src_l):
-                        match = True
-                if not match and search_field in ("all", "tgt"):
-                    if query_lower in tgt_l or ('§' in tgt or '&' in tgt) and query_lower in _MC_COLOR_RE.sub('', tgt_l):
-                        match = True
+                if search_field == "src":
+                    match = all(_term_in_text(t, src, src_l) for t in terms)
+                elif search_field == "tgt":
+                    match = all(_term_in_text(t, tgt, tgt_l) for t in terms)
+                else:
+                    match = all((_term_in_text(t, src, src_l) or _term_in_text(t, tgt, tgt_l)) for t in terms)
 
                 if match:
                     is_vanilla = translation_memory.is_vanilla_official_key(src, cat_name)
@@ -137,7 +147,7 @@ def delete_memory_entry(category, original_src, target_lang="한국어 (Korean)"
                 break
 
     if deleted:
-        translation_memory._save_local_caches_only()
+        translation_memory._save_local_caches_only(deleted_keys={original_src})
     return True
 
 
@@ -218,8 +228,11 @@ def patch_modpack_files(modpack_dir, old_tgt, new_tgt):
     # 4. 리소스팩 ZIP 파일 내부 핫패치
     try:
         import mod_jar_extractor
-        candidates = glob.glob(os.path.join(modpack_dir, f"{mp_name}[*].zip"))
-        candidates.extend(glob.glob(os.path.join(modpack_dir, "resourcepacks", f"{mp_name}[*].zip")))
+        escaped_mp_dir = glob.escape(modpack_dir)
+        escaped_mp_name = glob.escape(mp_name)
+        zip_glob_name = f"{escaped_mp_name}[[]*[]].zip"
+        candidates = glob.glob(os.path.join(escaped_mp_dir, zip_glob_name))
+        candidates.extend(glob.glob(os.path.join(escaped_mp_dir, "resourcepacks", zip_glob_name)))
         legacy = os.path.join(modpack_dir, "QuestTranslatorPro_Pack.zip")
         if os.path.exists(legacy):
             candidates.append(legacy)
@@ -331,8 +344,11 @@ def patch_modpack_batch_files(modpack_dir, batch_changes):
     # ZIP 리소스팩 핫패치
     try:
         import mod_jar_extractor
-        candidates = glob.glob(os.path.join(modpack_dir, f"{mp_name}[*].zip"))
-        candidates.extend(glob.glob(os.path.join(modpack_dir, "resourcepacks", f"{mp_name}[*].zip")))
+        escaped_mp_dir = glob.escape(modpack_dir)
+        escaped_mp_name = glob.escape(mp_name)
+        zip_glob_name = f"{escaped_mp_name}[[]*[]].zip"
+        candidates = glob.glob(os.path.join(escaped_mp_dir, zip_glob_name))
+        candidates.extend(glob.glob(os.path.join(escaped_mp_dir, "resourcepacks", zip_glob_name)))
         legacy = os.path.join(modpack_dir, "QuestTranslatorPro_Pack.zip")
         if os.path.exists(legacy):
             candidates.append(legacy)
@@ -361,6 +377,257 @@ def patch_modpack_batch_files(modpack_dir, batch_changes):
 _CHOSUNG_LIST = ['ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ']
 _JUNGSUNG_LIST = ['ㅏ', 'ㅐ', 'ㅑ', 'ㅒ', 'ㅓ', 'ㅔ', 'ㅕ', 'ㅖ', 'ㅗ', 'ㅘ', 'ㅙ', 'ㅚ', 'ㅛ', 'ㅜ', 'ㅝ', 'ㅞ', 'ㅟ', 'ㅠ', 'ㅡ', 'ㅢ', 'ㅣ']
 _JONGSUNG_LIST = ['', 'ㄱ', 'ㄲ', 'ㄳ', 'ㄴ', 'ㄵ', 'ㄶ', 'ㄷ', 'ㄹ', 'ㄺ', 'ㄻ', 'ㄼ', 'ㄽ', 'ㄾ', 'ㄿ', 'ㅀ', 'ㅁ', 'ㅂ', 'ㅄ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ']
+
+
+_KOREAN_JOSA_SUFFIXES = (
+    "에서는", "에서도", "으로는", "으로도", "에게는", "에게서",
+    "에서", "으로", "에게", "한테", "까지", "부터", "처럼", "같이", "보다",
+    "은", "는", "이", "가", "을", "를", "의", "에", "로", "와", "과", "도", "만",
+)
+
+
+_HOMONYM_WARNING_MAP = {
+    "log": "나무(통나무/원목) ↔ 기록/일지(로그)",
+    "lead": "금속(납) ↔ 끈/이끌다(리드)",
+    "chest": "보관함(상자) ↔ 갑옷(흉갑/가슴)",
+    "bow": "무기(활) ↔ 인사/뱃머리",
+    "bat": "동물(박쥐) ↔ 무기(방망이/배트)",
+    "mine": "채굴/광산 ↔ 폭발물(지뢰) ↔ 나의 것",
+    "sign": "블록(표지판) ↔ 기호/서명",
+    "spring": "부품(스프링/용수철) ↔ 계절(봄) ↔ 샘물",
+    "bar": "주괴/막대(바) ↔ 상태바(게이지)",
+    "block": "건축 블록 ↔ 막다(차단/방어)",
+    "stick": "아이템(막대기) ↔ 붙다(고정)",
+    "charge": "전력(충전) ↔ 돌격/비용",
+    "cell": "저장소(셀/전지) ↔ 감방/세포",
+    "key": "열쇠(키) ↔ 단축키/핵심",
+    "watch": "시계 ↔ 지켜보다",
+    "match": "성냥 ↔ 일치/시합",
+    "staff": "무기(지팡이) ↔ 직원",
+    "tank": "액체 탱크(저장조) ↔ 전차(탱크)",
+    "well": "우물 ↔ 잘(부사)",
+    "iron": "금속(철) ↔ 다리미",
+    "로그": "기록/일지(log) ↔ 원목/통나무 오역(log)",
+    "통나무": "원목/통나무(log) ↔ 시스템 로그(log)와 영단어 공유",
+    "원목": "통나무/원목(log) ↔ 시스템 로그(log)와 영단어 공유",
+    "리드": "납(lead) ↔ 끈/이끌다(lead)",
+    "납": "금속(lead) ↔ 리드(lead)와 영단어 공유",
+    "상자": "보관함(chest) ↔ 흉갑(chestplate) 문맥 주의",
+}
+
+
+def check_homonym_warning(term: str) -> str:
+    """검색어나 치환어가 동음의이어/다의어로 감지되면 경고 메시지를 반환하고, 아니면 빈 문자열을 반환합니다."""
+    if not term:
+        return ""
+    clean = str(term).strip()
+    low = clean.lower()
+
+    if low in _HOMONYM_WARNING_MAP:
+        return (
+            f"⚠️ [동음의이어 주의] '{clean}'은(는) 문맥에 따라 여러 뜻({_HOMONYM_WARNING_MAP[low]})으로 쓰입니다. "
+            f"데이터 오염을 막으려면 '분류: items' 필터를 쓰거나 치환 전 목록을 꼭 확인하세요."
+        )
+
+    # 영단어인 경우 단어 사전/캐시에 서로 다른 한글 뜻 후보가 2개 이상 등록돼 있어도 동음의이어 주의 안내
+    if re.search(r'[A-Za-z]', clean) and not has_hangul(clean) and " " not in clean:
+        cands = _get_known_korean_candidates(clean)
+        if len(cands) >= 2:
+            preview = ", ".join(cands[:3])
+            return (
+                f"⚠️ [다의어 감지] '{clean}'은(는) 기존 데이터에서 여러 뜻({preview})으로 매칭됩니다. "
+                f"치환 시 다른 문맥이 섞이지 않는지 확인하세요."
+            )
+    return ""
+
+
+def _has_batchim(word: str) -> bool:
+    """마지막 한글 글자의 받침(종성) 유무를 반환합니다."""
+    if not word:
+        return False
+    ch = word[-1]
+    code = ord(ch)
+    if 0xAC00 <= code <= 0xD7A3:
+        return ((code - 0xAC00) % 28) != 0
+    return False
+
+
+def _adjust_korean_josa(new_stem: str, josa_and_trail: str) -> str:
+    """새 어간의 받침 유무에 따라 뒤따르는 한국어 조사(은/는, 이/가, 을/를, 와/과)를 자연스럽게 보정합니다."""
+    if not new_stem or not josa_and_trail:
+        return josa_and_trail
+    pairs = [
+        ("은", "는"), ("이", "가"), ("을", "를"), ("과", "와"),
+    ]
+    has_bat = _has_batchim(new_stem)
+    for with_bat, no_bat in pairs:
+        if josa_and_trail.startswith(with_bat) or josa_and_trail.startswith(no_bat):
+            chosen = with_bat if has_bat else no_bat
+            return chosen + josa_and_trail[1:]
+    return josa_and_trail
+
+
+def _split_token_affixes(token: str):
+    """어절에서 앞/뒤 문장부호와 한국어 조사를 분리하여 (접두부호, 어간, 조사+접미부호)를 반환합니다."""
+    m = re.match(r'^([^\w가-힣]*)(.*?)([^\w가-힣]*)$', token)
+    if not m:
+        return "", token, ""
+    lead, core, trail = m.group(1), m.group(2), m.group(3)
+    josa = ""
+    if core and has_hangul(core):
+        for j in _KOREAN_JOSA_SUFFIXES:
+            if len(core) > len(j) and core.endswith(j):
+                core = core[:-len(j)]
+                josa = j
+                break
+    return lead, core, josa + trail
+
+
+_candidates_memo_cache = {}  # en_low -> (timestamp, list_of_candidates)
+
+
+def _get_known_korean_candidates(en_term: str) -> list:
+    """영단어(en_term)에 대응하는 기존 한국어 번역 후보들(예: log -> ['통나무', '로그'])을
+    사전(_CORE_MINECRAFT_DICT, translation_word, DEFAULT_GLOSSARY, translation_memory)에서 수집합니다.
+    (대량 일괄 치환 시 반복 전체 스캔 병목을 방지하기 위해 3초 TTL 메모 캐시 적용)"""
+    en_low = en_term.lower().strip()
+    now_ts = time.monotonic()
+    cached_entry = _candidates_memo_cache.get(en_low)
+    if cached_entry is not None and (now_ts - cached_entry[0]) < 3.0:
+        return cached_entry[1]
+    candidates = []
+    seen = set()
+
+    def _add(val):
+        if not val:
+            return
+        v = str(val).split("#")[0].strip()
+        if v and has_hangul(v) and v not in seen:
+            seen.add(v)
+            candidates.append(v)
+
+    # 1. 내장 마인크래프트 핵심 단어 사전
+    for ko_item in _CORE_MINECRAFT_DICT.get(en_low, []):
+        _add(ko_item)
+
+    # 2. 단어 학습 사전 (translation_word._proper_nouns / _common_words / _candidate_votes)
+    if translation_word is not None:
+        try:
+            with translation_word._lock:
+                _add(translation_word._proper_nouns.get(en_low))
+                _add(translation_word._common_words.get(en_low))
+                for (w_en, w_ko), _cnt in translation_word._candidate_votes.items():
+                    if w_en == en_low:
+                        _add(w_ko)
+        except Exception:
+            pass
+
+    # 3. 기본 용어집 (DEFAULT_GLOSSARY)
+    try:
+        from constants import DEFAULT_GLOSSARY
+        for g_k, g_v in DEFAULT_GLOSSARY.items():
+            if g_k.lower() == en_low:
+                _add(g_v)
+    except Exception:
+        pass
+
+    # 4. 번역 메모리 캐시 직접 일치 (단독 단어 항목)
+    try:
+        import translation_memory
+        for cache_obj in (translation_memory._items_cache, translation_memory._global_cache):
+            for entries in cache_obj.values():
+                for key_variant in (en_term, en_low, en_low.capitalize(), en_low.title()):
+                    if key_variant in entries:
+                        _add(entries[key_variant])
+    except Exception:
+        pass
+
+    # 긴 후보부터 먼저 매칭되도록 길이 내림차순 정렬
+    candidates.sort(key=len, reverse=True)
+    _candidates_memo_cache[en_low] = (now_ts, candidates)
+    return candidates
+
+
+def replace_term_in_translation(src_text: str, tgt_text: str, find_term: str, repl_term: str, is_deletion: bool = False) -> str:
+    """
+    일괄 치환용 스마트 단어 치환기:
+    1) 번역문(tgt_text)에 find_term이 직접 존재하면(한글 오역 단어 또는 미번역 영단어) 대소문자 무시로 즉시 치환합니다.
+    2) find_term이 영단어일 때는 어순이 다른 긴 문장에서도 오동작하지 않도록 아래 순서로 정밀 매칭합니다:
+       - 1순위(단어 사전 매칭): log -> ['통나무', '로그'] 등 영한 단어 매핑 후보를 찾아 어순과 무관하게 정확히 치환
+       - 2순위(음운 유사도 매칭): Mekanism -> '매카니즘/메카니슴' 등 외래어 표기 편차 어절을 조사 유지하며 치환
+       - 3순위(짧은 명사구 위치 매칭): 3어절 이하 짧은 아이템/블록명(어절 수 일치)에 한해 위치 기반 치환
+    """
+    if not tgt_text or not find_term:
+        return tgt_text
+
+    pattern = re.compile(re.escape(find_term), re.IGNORECASE)
+    if pattern.search(tgt_text):
+        res = pattern.sub(lambda _m: "" if is_deletion else repl_term, tgt_text)
+        return re.sub(r'\s+', ' ', res).strip() if is_deletion else res
+
+    # 영단어 -> 한국어 정밀 매칭 치환
+    if re.search(r'[A-Za-z]', find_term) and not has_hangul(find_term) and src_text:
+        word_pat = re.compile(r'\b' + re.escape(find_term) + r'\b', re.IGNORECASE)
+        if not word_pat.search(src_text):
+            return tgt_text
+
+        repl_clean = "" if is_deletion else repl_term
+
+        # 1순위: 단어 매핑 사전(log -> 통나무 등) 기반 매칭 (어순이 달라도 정확히 해당 단어만 치환)
+        known_candidates = _get_known_korean_candidates(find_term)
+        for cand_ko in known_candidates:
+            if not is_deletion and cand_ko == repl_clean:
+                continue
+            if cand_ko in tgt_text:
+                if is_deletion:
+                    res = tgt_text.replace(cand_ko, "")
+                else:
+                    def _sub_with_josa(m):
+                        tail = m.group(1) or ""
+                        return repl_clean + (_adjust_korean_josa(repl_clean, tail) if tail else "")
+                    # 조사([은는이가을를과와])는 뒤에 공백/문장끝/비한글 기호가 올 때만 보정하여 복합어('통나무가공기') 훼손 방지
+                    res = re.sub(re.escape(cand_ko) + r'(?:([은는이가을를과와])(?=\s|$|[^\w가-힣]))?', _sub_with_josa, tgt_text)
+                return re.sub(r'\s+', ' ', res).strip() if is_deletion else res
+
+        src_tokens = src_text.split()
+        tgt_tokens = tgt_text.split()
+        if not src_tokens or not tgt_tokens:
+            return tgt_text
+
+        # 2순위: 음운 유사도 매칭 (Mekanism -> 매카니즘/메카니슴 등 외래어 표기 편차 통일)
+        updated_tokens = list(tgt_tokens)
+        if repl_clean and has_hangul(repl_clean):
+            best_idx = -1
+            best_score = 0.0
+            for t_i, t_tok in enumerate(updated_tokens):
+                _, core, _ = _split_token_affixes(t_tok)
+                if core and has_hangul(core):
+                    _, _, score = _compare_syllables_phonetic(repl_clean, core)
+                    if score > best_score:
+                        best_score = score
+                        best_idx = t_i
+            if best_idx >= 0 and best_score >= 0.40:
+                lead, _, suffix = _split_token_affixes(updated_tokens[best_idx])
+                updated_tokens[best_idx] = "" if is_deletion else f"{lead}{repl_clean}{_adjust_korean_josa(repl_clean, suffix)}"
+                joined = " ".join(tok for tok in updated_tokens if tok != "")
+                return re.sub(r'\s+', ' ', joined).strip()
+
+        # 3순위: 3어절 이하 짧은 아이템/블록명(어절 수 일치, 문장 부호 없음)에 한해 안전하게 위치 매칭
+        if len(src_tokens) <= 3 and len(src_tokens) == len(tgt_tokens) and not any(p in src_text for p in ('.', '!', '?', ',')):
+            src_indices = [
+                idx for idx, tok in enumerate(src_tokens)
+                if re.sub(r'^[^\w]+|[^\w]+$', '', tok).lower() == find_term.lower()
+            ]
+            changed = False
+            for s_i in src_indices:
+                lead, _, suffix = _split_token_affixes(updated_tokens[s_i])
+                updated_tokens[s_i] = "" if is_deletion else f"{lead}{repl_clean}{_adjust_korean_josa(repl_clean, suffix)}"
+                changed = True
+            if changed:
+                joined = " ".join(tok for tok in updated_tokens if tok != "")
+                return re.sub(r'\s+', ' ', joined).strip()
+
+    return tgt_text
 
 
 def _decompose_korean(text):
@@ -453,6 +720,9 @@ _CORE_MINECRAFT_DICT = {
     'charged certus quartz': ['충전된 서투스 석영', '충전된 서투스 쿼츠'],
     'certus quartz dust': ['서투스 석영 가루', '서투스 쿼츠 가루'],
     'create': ['크리에이트'],
+    'log': ['통나무', '원목', '로그'],
+    'plank': ['판자', '목재'],
+    'planks': ['판자', '목재'],
     'mekanism': ['메카니즘'],
     'farmer\'s delight': ['파머스 딜라이트'],
 }
@@ -744,6 +1014,7 @@ def dispatch_audit_report(category, src, old_tgt, new_tgt, error_rate=0.0, valid
     def _send_and_listen():
         audit_id = None
         try:
+            import requests
             import translation_memory
             worker_url = translation_memory.get_worker_url()
             if not worker_url:
@@ -751,29 +1022,28 @@ def dispatch_audit_report(category, src, old_tgt, new_tgt, error_rate=0.0, valid
 
             endpoint = f"{worker_url}/audit/report"
             payload = {
-                "category": category,
-                "src": src,
-                "old_tgt": old_tgt,
-                "new_tgt": new_tgt,
+                "category": str(category)[:100],
+                "src": str(src)[:900],
+                "old_tgt": str(old_tgt)[:900],
+                "new_tgt": str(new_tgt)[:900],
                 "error_rate": float(error_rate),
                 "validity": float(validity),
                 "verdict": str(verdict),
-                "details": str(details),
+                "details": str(details)[:950],
                 "is_test": is_test
             }
-            data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            req = urllib.request.Request(
+            resp = requests.post(
                 endpoint,
-                data=data_bytes,
-                headers={
-                    "Content-Type": "application/json; charset=utf-8",
-                    "User-Agent": "QuestTranslator-Audit/1.0"
-                },
-                method="POST"
+                json=payload,
+                headers={"User-Agent": "QuestTranslator-Audit/1.0"},
+                timeout=12
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                resp_data = json.loads(resp.read().decode("utf-8"))
-                audit_id = resp_data.get("audit_id")
+            resp.raise_for_status()
+            resp_data = resp.json()
+            audit_id = resp_data.get("audit_id")
+            if resp_data.get("discord_ok") is False:
+                logging.warning(f"⚠️ [감사 로그] Worker 수신 완료(ID: {audit_id})했으나 디스코드 전달 실패: {resp_data.get('discord_error', '')}")
+            else:
                 logging.info(f"📤 [감사 로그] 디스코드 감사 로그 전송 완료 (ID: {audit_id})")
         except Exception as e:
             logging.warning(f"⚠️ [감사 로그 발송 실패]: {e}")
@@ -788,10 +1058,11 @@ def dispatch_audit_report(category, src, old_tgt, new_tgt, error_rate=0.0, valid
             time.sleep(3)
             poll_count += 1
             try:
+                import requests
                 status_url = f"{worker_url}/audit/status?audit_id={audit_id}"
-                req_status = urllib.request.Request(status_url, headers={"User-Agent": "QuestTranslator-Audit/1.0"})
-                with urllib.request.urlopen(req_status, timeout=5) as st_resp:
-                    st_data = json.loads(st_resp.read().decode("utf-8"))
+                st_resp = requests.get(status_url, headers={"User-Agent": "QuestTranslator-Audit/1.0"}, timeout=5)
+                if st_resp.status_code == 200:
+                    st_data = st_resp.json()
                     if st_data.get("rolled_back"):
                         admin_user = st_data.get("rolled_back_by", "관리자")
                         # 메모리 캐시도 이전 번역으로 원복 동기화 및 클라우드 커밋 큐 반영
@@ -823,10 +1094,10 @@ def dispatch_audit_report(category, src, old_tgt, new_tgt, error_rate=0.0, valid
     threading.Thread(target=_send_and_listen, daemon=True).start()
 
 
-def dispatch_batch_audit_report(batch_changes, error_rate=0.0, validity=0.0, verdict="pass", details=""):
+def dispatch_batch_audit_report(batch_changes, error_rate=0.0, validity=0.0, verdict="pass", details="", find_term="", repl_term=""):
     """
-    일괄 치환 시 수십~수백 건의 변경 사항을 단 1개의 디스코드 감사 로그로 묶어 발송합니다.
-    디스코드 레이트리밋을 방지하고, 단 한 번의 롤백 클릭으로 전체 항목을 일괄 원복합니다.
+    일괄 치환 시 수십~수천 건의 변경 사항을 단 1개의 디스코드 감사 로그로 묶어 발송하며,
+    전체 상세 수정 내역은 피드백 로그와 동일하게 .txt 첨부 파일로 함께 전송합니다.
     """
     if not batch_changes:
         return
@@ -867,44 +1138,84 @@ def dispatch_batch_audit_report(batch_changes, error_rate=0.0, validity=0.0, ver
     def _send_and_listen():
         audit_id = None
         try:
+            import requests
             import translation_memory
             worker_url = translation_memory.get_worker_url()
             if not worker_url:
                 return
 
             preview_lines = []
-            for ch in batch_changes[:6]:
-                preview_lines.append(f"• {ch['src']}: '{ch['old_tgt']}' ➡️ '{ch['new_tgt']}'")
-            if len(batch_changes) > 6:
-                preview_lines.append(f"...외 {len(batch_changes) - 6}개 항목")
+            for ch in batch_changes[:3]:
+                s_short = str(ch['src']).replace('\n', ' ')[:60]
+                o_short = str(ch['old_tgt']).replace('\n', ' ')[:40]
+                n_short = str(ch['new_tgt']).replace('\n', ' ')[:40]
+                preview_lines.append(f"• {s_short}: '{o_short}' ➡️ '{n_short}'")
+            if len(batch_changes) > 3:
+                preview_lines.append(f"...외 {len(batch_changes) - 3:,}건 (전체 상세 내역은 첨부 .txt 파일 참조)")
 
-            combined_details = f"{details}\n" + "\n".join(preview_lines)
+            combined_details = (f"{details}\n" + "\n".join(preview_lines))[:950]
+
+            # 전체 상세 수정 내역 .txt 로그 생성 (디스코드 첨부파일 전송용)
+            log_header = [
+                "============================================================",
+                f"QuestTranslator Pro 일괄 치환 상세 로그 ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})",
+                f"요약: {details}",
+                f"찾을 단어: {find_term or '(없음)'}  ->  바꿀 단어: {repl_term or '(없음)'}",
+                f"총 변경 건수: {len(batch_changes):,}건",
+                "============================================================",
+                ""
+            ]
+            detail_rows = []
+            for idx_ch, ch in enumerate(batch_changes, 1):
+                cat_s = str(ch.get("category", "general"))
+                src_s = str(ch.get("src", "")).replace("\r", " ").replace("\n", "\\n")
+                old_s = str(ch.get("old_tgt", "")).replace("\r", " ").replace("\n", "\\n")
+                new_s = str(ch.get("new_tgt", "")).replace("\r", " ").replace("\n", "\\n")
+                detail_rows.append(f"{idx_ch}. [{cat_s}] {src_s}\n   OLD: {old_s}\n   NEW: {new_s}")
+            full_log_text = "\n".join(log_header + detail_rows)
+            # Worker 페이로드 안전 상한 (약 900KB) 초과 시 안전 절삭
+            if len(full_log_text.encode("utf-8")) > 900_000:
+                full_log_text = full_log_text[:300_000] + f"\n\n... (용량 제한으로 일부 생략, 총 {len(batch_changes):,}건)"
+
+            clean_find = str(find_term or "").strip()
+            clean_repl = str(repl_term or "").strip()
+            src_display = clean_find if clean_find else f"일괄 치환 {len(batch_changes)}개 항목"
+            old_display = clean_find if clean_find else "일괄 치환"
+            new_display = clean_repl if clean_repl else f"총 {len(batch_changes)}개 항목 변경"
 
             endpoint = f"{worker_url}/audit/report"
             payload = {
                 "category": f"일괄 치환 ({len(batch_changes)}건)",
-                "src": f"일괄 치환 {len(batch_changes)}개 항목",
-                "old_tgt": "일괄 치환",
-                "new_tgt": f"총 {len(batch_changes)}개 항목 변경",
+                "src": src_display,
+                "old_tgt": old_display,
+                "new_tgt": new_display,
                 "error_rate": float(error_rate),
                 "validity": float(validity),
                 "verdict": str(verdict),
                 "details": combined_details,
+                "log_text": full_log_text,
+                "batch_items": [
+                    {
+                        "cat": str(ch.get("category", "general")),
+                        "src": str(ch.get("src", "")),
+                        "old_tgt": str(ch.get("old_tgt", "")),
+                    }
+                    for ch in batch_changes
+                ],
                 "is_test": is_test
             }
-            data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            req = urllib.request.Request(
+            resp = requests.post(
                 endpoint,
-                data=data_bytes,
-                headers={
-                    "Content-Type": "application/json; charset=utf-8",
-                    "User-Agent": "QuestTranslator-Audit/1.0"
-                },
-                method="POST"
+                json=payload,
+                headers={"User-Agent": "QuestTranslator-Audit/1.0"},
+                timeout=12
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                resp_data = json.loads(resp.read().decode("utf-8"))
-                audit_id = resp_data.get("audit_id")
+            resp.raise_for_status()
+            resp_data = resp.json()
+            audit_id = resp_data.get("audit_id")
+            if resp_data.get("discord_ok") is False:
+                logging.warning(f"⚠️ [일괄 감사 로그] Worker 수신 완료(ID: {audit_id})했으나 디스코드 전달 실패: {resp_data.get('discord_error', '')}")
+            else:
                 logging.info(f"📤 [일괄 감사 로그] 디스코드 일괄 감사 로그 전송 완료 (총 {len(batch_changes)}건 / ID: {audit_id})")
         except Exception as e:
             logging.warning(f"⚠️ [일괄 감사 로그 발송 실패]: {e}")
@@ -919,21 +1230,20 @@ def dispatch_batch_audit_report(batch_changes, error_rate=0.0, validity=0.0, ver
             time.sleep(3)
             poll_count += 1
             try:
+                import requests
                 status_url = f"{worker_url}/audit/status?audit_id={audit_id}"
-                req_status = urllib.request.Request(status_url, headers={"User-Agent": "QuestTranslator-Audit/1.0"})
-                with urllib.request.urlopen(req_status, timeout=5) as st_resp:
-                    st_data = json.loads(st_resp.read().decode("utf-8"))
+                st_resp = requests.get(status_url, headers={"User-Agent": "QuestTranslator-Audit/1.0"}, timeout=5)
+                if st_resp.status_code == 200:
+                    st_data = st_resp.json()
                     if st_data.get("rolled_back"):
                         admin_user = st_data.get("rolled_back_by", "관리자")
                         import translation_memory
-                        with translation_memory._lock:
-                            for ch in batch_changes:
-                                c_dict = (
-                                    translation_memory._items_cache if ch["category"] == "items" else
-                                    (translation_memory._books_cache if ch["category"] == "books" else translation_memory._global_cache)
-                                )
-                                translation_memory._store(c_dict, ch["src"], ch["old_tgt"], "한국어(Korean)")
-                        translation_memory.save_memory(flush_now=True)
+                        translation_memory.default_memory_store.bulk_update(
+                            [(ch["category"], ch["src"], ch["old_tgt"]) for ch in batch_changes],
+                            target_lang="한국어(Korean)",
+                            force_override=True,
+                        )
+                        translation_memory.default_memory_store.save(flush_now=True)
 
                         if is_test and temp_edit_path and os.path.exists(temp_edit_path):
                             with open(temp_edit_path, "r", encoding="utf-8") as f:
@@ -967,33 +1277,18 @@ def retranslate_texts(texts, engine_key, api_key, is_paid=False, ai_model=None, 
     if getattr(translation_engines, "MOCK_MODE", False) or engine_key == "mock":
         return [f"[AI 재번역] {t}" for t in texts]
 
-    # 엔진별 재번역 호출
-    if engine_key == "local_ai":
-        raw_res = translation_engines.translate_local_ai(
-            texts, custom_url, ai_model, api_key=api_key,
-            glossary=glossary, target_lang=target_lang, log_callback=log_callback
-        )
-    elif engine_key == "deepseek":
-        raw_res = translation_engines.translate_local_ai(
-            texts, "https://api.deepseek.com/v1", ai_model or "deepseek-flash", api_key=api_key,
-            glossary=glossary, target_lang=target_lang, log_callback=log_callback
-        )
-    elif engine_key == "claude":
-        raw_res = translation_engines.translate_local_ai(
-            texts, "https://api.anthropic.com/v1", ai_model or "claude-haiku-5-5", api_key=api_key,
-            glossary=glossary, target_lang=target_lang, log_callback=log_callback
-        )
-    elif engine_key == "deepl":
-        raw_res = [translation_engines.translate_deepl(t, api_key, is_pro=is_paid, target_lang=target_lang) for t in texts]
-    elif engine_key == "openai":
-        raw_res = [translation_engines.translate_openai(t, api_key, glossary=glossary, ai_model=ai_model, target_lang=target_lang) for t in texts]
-    elif engine_key == "google":
-        raw_res = [translation_engines.translate_google(t, api_key, target_lang=target_lang) for t in texts]
-    else:
-        raw_res = translation_engines.translate_gemini_batch(
-            texts, api_key, is_paid=is_paid, glossary=glossary,
-            ai_model=ai_model, target_lang=target_lang, log_callback=log_callback
-        )
+    # 통합 TranslationEngine + EngineConfig 단일 진입점으로 재번역 호출
+    cfg = translation_engines.EngineConfig(
+        engine_key=engine_key,
+        api_key=api_key or "",
+        is_paid=is_paid,
+        ai_model=ai_model,
+        target_lang=target_lang,
+        custom_url=custom_url,
+    )
+    raw_res = translation_engines.default_engine.translate_batch(
+        texts, cfg, glossary=glossary, log_callback=log_callback
+    )
 
     cleaned_res = []
     for orig, res in zip(texts, raw_res):

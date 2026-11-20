@@ -715,6 +715,7 @@ class FeedbackDialog(ctk.CTkToplevel):
             text="🐞 버그 제보",
             variable=self.category_var,
             value="bug",
+            command=self._on_category_change,
             font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
             text_color="#f87171",
             fg_color="#ef4444"
@@ -726,6 +727,7 @@ class FeedbackDialog(ctk.CTkToplevel):
             text="💡 기능 건의 및 피드백",
             variable=self.category_var,
             value="feedback",
+            command=self._on_category_change,
             font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
             text_color="#60a5fa",
             fg_color="#3b82f6"
@@ -774,17 +776,33 @@ class FeedbackDialog(ctk.CTkToplevel):
         opts_inner = ctk.CTkFrame(opts_card, fg_color="transparent")
         opts_inner.pack(fill="x", padx=12, pady=10)
 
+        opts_top_row = ctk.CTkFrame(opts_inner, fg_color="transparent")
+        opts_top_row.pack(fill="x")
+
         self.attach_log_var = tk.BooleanVar(value=True)
         self.attach_log_cb = ctk.CTkCheckBox(
-            opts_inner,
-            text="최근 실행/에러 로그 및 기본 사양 정보 함께 전송 (권장)",
+            opts_top_row,
+            text="세션 진단 로그(.txt) 및 기본 사양 함께 전송 (API키·계정명 자동 마스킹)",
             variable=self.attach_log_var,
             font=ctk.CTkFont(family=FONT_NAME, size=11),
             text_color="#cbd5e1",
             fg_color="#f97316",
             hover_color="#fb923c"
         )
-        self.attach_log_cb.pack(anchor="w")
+        self.attach_log_cb.pack(side="left")
+
+        self.preview_log_btn = ctk.CTkButton(
+            opts_top_row,
+            text="🔍 로그 미리보기",
+            width=104,
+            height=24,
+            fg_color="#272732",
+            hover_color="#3f3f4e",
+            text_color="#e2e8f0",
+            font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
+            command=self._open_log_preview
+        )
+        self.preview_log_btn.pack(side="right")
 
         info_preview = self._get_system_info_summary()
         self.info_label = ctk.CTkLabel(
@@ -794,6 +812,18 @@ class FeedbackDialog(ctk.CTkToplevel):
             text_color="#64748b"
         )
         self.info_label.pack(anchor="w", padx=(24, 0), pady=(3, 0))
+
+        try:
+            import session_logger
+            if session_logger.has_previous_crash():
+                ctk.CTkLabel(
+                    opts_inner,
+                    text="⚠️ 직전 비정상 종료(크래시) 세션 로그가 감지되어 버그 제보 시 함께 첨부됩니다.",
+                    font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
+                    text_color="#fbbf24"
+                ).pack(anchor="w", padx=(24, 0), pady=(2, 0))
+        except Exception:
+            pass
 
         btn_row = ctk.CTkFrame(self.new_report_frame, fg_color="transparent")
         btn_row.pack(fill="x", side="bottom")
@@ -1154,30 +1184,106 @@ class FeedbackDialog(ctk.CTkToplevel):
         else:
             messagebox.showinfo("확인 완료", "새로운 답변이나 상태 변경이 없습니다. 현재 최신 상태입니다.", parent=self)
 
+    def _on_category_change(self):
+        """버그 제보는 로그 첨부 기본 ON, 기능 건의/피드백은 기본 OFF로 전환합니다."""
+        try:
+            self.attach_log_var.set(self.category_var.get() == "bug")
+        except Exception:
+            pass
+
+    def _open_log_preview(self):
+        """마스킹 완료된 첨부용 세션 진단 로그(.txt) 전문을 팝업으로 미리 확인합니다."""
+        try:
+            sys_info = self._collect_system_info()
+            preview_text = self._collect_recent_logs(sys_info)
+        except Exception as e:
+            preview_text = f"(로그 수집 중 오류: {e})"
+
+        win = ctk.CTkToplevel(self)
+        win.title("🔍 첨부 로그 미리보기 (민감정보 마스킹 적용됨)")
+        win.geometry("760x520")
+        win.minsize(600, 380)
+        win.transient(self)
+        win.grab_set()
+
+        byte_kb = len(preview_text.encode("utf-8")) / 1024.0
+        ctk.CTkLabel(
+            win,
+            text=f"전송될 진단 로그 미리보기 ({byte_kb:.1f} KB · API 키/토큰/계정 경로 자동 마스킹 완료)",
+            font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+            text_color="#38bdf8"
+        ).pack(anchor="w", padx=14, pady=(12, 6))
+
+        box = ctk.CTkTextbox(
+            win,
+            font=ctk.CTkFont(family="Consolas" if os.name == "nt" else FONT_NAME, size=11),
+            fg_color="#121216",
+            text_color="#e2e8f0",
+            wrap="none"
+        )
+        box.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        box.insert("1.0", preview_text or "(기록된 세션 로그가 없습니다.)")
+        box.configure(state="disabled")
+
+        ctk.CTkButton(
+            win, text="닫기", width=90, height=30,
+            fg_color="#27272a", hover_color="#3f3f46",
+            command=win.destroy
+        ).pack(pady=(0, 12))
+
     def _get_system_info_summary(self):
         os_str = f"{platform.system()} {platform.release()}"
         engine_str = getattr(self.parent.app_state, 'selected_engine', 'Gemini')
         return f"OS: {os_str} | v{APP_VERSION} | 엔진: {engine_str}"
 
     def _collect_system_info(self):
-        engine_name = getattr(self.parent.app_state, 'selected_engine', 'None')
-        ai_model = getattr(self.parent.app_state, 'selected_ai_model', '')
+        import sys as _sys
+        app_state = getattr(self.parent, 'app_state', None)
+        engine_name = getattr(app_state, 'selected_engine', 'None') if app_state else 'None'
+        ai_model = getattr(app_state, 'selected_ai_model', '') if app_state else ''
+        is_paid = bool(getattr(app_state, 'is_paid_mode', False)) if app_state else False
+        target_lang = "한국어 (Korean)"
+        if hasattr(self.parent, "target_lang_combo"):
+            try:
+                target_lang = self.parent.target_lang_combo.get()
+            except Exception:
+                pass
         modpack_dir = getattr(self.parent, 'selected_modpack_path', '')
         modpack_name = os.path.basename(modpack_dir.rstrip(os.sep)) if modpack_dir else "선택 안 됨"
+
+        cache_summary = "N/A"
+        cloud_sync = "N/A"
+        try:
+            import translation_memory
+            with translation_memory._lock:
+                g_cnt = sum(len(v) for v in translation_memory._global_cache.values() if isinstance(v, dict))
+                i_cnt = sum(len(v) for v in translation_memory._items_cache.values() if isinstance(v, dict))
+                b_cnt = sum(len(v) for v in translation_memory._books_cache.values() if isinstance(v, dict))
+                q_cnt = len(translation_memory._commit_queue)
+            cache_summary = f"global={g_cnt:,} / items={i_cnt:,} / books={b_cnt:,} / pending_commits={q_cnt}"
+            synced = translation_memory._cloud_sync_done.is_set()
+            safe, safe_msg = translation_memory.is_cloud_upload_safe()
+            cloud_sync = f"done={synced}, upload_safe={safe}" + ("" if safe else f" ({safe_msg})")
+        except Exception:
+            pass
 
         return {
             "os": f"{platform.system()} {platform.release()} ({platform.machine()})",
             "version": APP_VERSION,
+            "runtime": "EXE" if getattr(_sys, "frozen", False) else f"Python {platform.python_version()}",
             "engine": f"{engine_name} ({ai_model})" if ai_model else engine_name,
-            "modpack": modpack_name
+            "tier": "Paid" if is_paid else "Free",
+            "target_lang": target_lang,
+            "modpack": modpack_name,
+            "cache_summary": cache_summary,
+            "cloud_sync": cloud_sync,
         }
 
-    def _collect_recent_logs(self):
+    def _collect_recent_logs(self, sys_info=None):
         try:
-            if hasattr(self.parent, "log_textbox"):
-                full_text = self.parent.log_textbox.get("1.0", "end")
-                lines = [l for l in full_text.splitlines() if l.strip()]
-                return "\n".join(lines[-60:])
+            import session_logger
+            info = sys_info if sys_info is not None else self._collect_system_info()
+            return session_logger.build_report_bundle(system_info=info)
         except Exception:
             pass
         return ""
@@ -1199,7 +1305,7 @@ class FeedbackDialog(ctk.CTkToplevel):
         category = self.category_var.get()
         ticket_id = generate_ticket_id(category)
         sys_info = self._collect_system_info()
-        recent_log = self._collect_recent_logs() if self.attach_log_var.get() else ""
+        recent_log = self._collect_recent_logs(sys_info) if self.attach_log_var.get() else ""
 
         self.submit_btn.configure(state="disabled", text="개발자에게 메시지 전달 중...")
         self.cancel_btn.configure(state="disabled")
