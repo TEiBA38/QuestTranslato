@@ -811,18 +811,43 @@ if ctk is not None and TkinterDnD is not None:
                 font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
                 height=36, fg_color="#10b981", hover_color="#059669",
                 command=self.run_all_modpack_translations)
-            self.btn_translate_all_guidebooks.pack(side="left", fill="x", expand=True, padx=(0, 12))
+            self.btn_translate_all_guidebooks.pack(fill="x", expand=True)
+
+            options_check_row = ctk.CTkFrame(config_frame, fg_color="transparent")
+            options_check_row.pack(fill="x", padx=12, pady=(0, 8))
 
             self.auto_apply_rp_var = tk.BooleanVar(value=True)
             self.chk_auto_apply_rp = ctk.CTkCheckBox(
-                guidebook_row, text="리소스팩 자동 적용",
+                options_check_row, text="리소스팩 자동 적용",
                 variable=self.auto_apply_rp_var,
-                font=ctk.CTkFont(family=FONT_NAME, size=12, weight="bold"),
+                font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
                 text_color="#e4e4e7",
                 fg_color="#10b981", hover_color="#059669",
-                checkbox_width=20, checkbox_height=20,
+                checkbox_width=18, checkbox_height=18,
                 command=self.on_toggle_auto_apply_rp)
-            self.chk_auto_apply_rp.pack(side="right")
+            self.chk_auto_apply_rp.pack(side="left", padx=(0, 14))
+
+            self.append_english_var = tk.BooleanVar(value=True)
+            self.chk_append_english = ctk.CTkCheckBox(
+                options_check_row, text="영어 원문 병기",
+                variable=self.append_english_var,
+                font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+                text_color="#e4e4e7",
+                fg_color="#3b82f6", hover_color="#2563eb",
+                checkbox_width=18, checkbox_height=18,
+                command=self.on_toggle_append_english)
+            self.chk_append_english.pack(side="left", padx=(0, 14))
+
+            self.long_text_upgrade_var = tk.BooleanVar(value=True)
+            self.chk_long_text_upgrade = ctk.CTkCheckBox(
+                options_check_row, text="장문 상위 모델 번역 (무료 전용)",
+                variable=self.long_text_upgrade_var,
+                font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold"),
+                text_color="#e4e4e7",
+                fg_color="#a855f7", hover_color="#9333ea",
+                checkbox_width=18, checkbox_height=18,
+                command=self.on_toggle_long_text_upgrade)
+            self.chk_long_text_upgrade.pack(side="left")
 
             self.btn_edit_glossary = ctk.CTkButton(
                 config_frame, text="📖 용어집 편집 (Glossary)",
@@ -949,6 +974,21 @@ if ctk is not None and TkinterDnD is not None:
                 if hasattr(self, "on_plan_change"):
                     self.on_plan_change(self._last_gemini_plan)
 
+            from constants import PAID_TIER_PLANS, parse_paid_tier
+            saved_tier_plan = settings.get("paid_tier_plan", PAID_TIER_PLANS[0])
+            if saved_tier_plan not in PAID_TIER_PLANS:
+                saved_tier_plan = PAID_TIER_PLANS[0]
+            self._last_paid_tier_plan = saved_tier_plan
+            active_eng = saved_engine or self.engine_combo.get()
+            if "OpenAI" in active_eng or "Claude" in active_eng:
+                self.plan_combo.configure(state="normal", values=PAID_TIER_PLANS)
+                self.plan_combo.set(self._last_paid_tier_plan)
+                if hasattr(self, "on_plan_change"):
+                    self.on_plan_change(self._last_paid_tier_plan)
+            else:
+                import translation_engines
+                translation_engines.set_paid_api_tier(parse_paid_tier(self._last_paid_tier_plan))
+
             saved_model = settings.get("ai_model", "")
             if saved_model == "gemini-3.5-flash":
                 saved_model = "gemini-3.5-flash-lite"
@@ -965,6 +1005,16 @@ if ctk is not None and TkinterDnD is not None:
             self.app_state.glossaries_by_lang = settings.get("glossaries_by_lang", {})
             if hasattr(self, "auto_apply_rp_var"):
                 self.auto_apply_rp_var.set(bool(settings.get("auto_apply_resourcepack", True)))
+            if hasattr(self, "append_english_var"):
+                self.append_english_var.set(bool(settings.get("append_english", True)))
+            if hasattr(self, "long_text_upgrade_var"):
+                saved_ul = bool(settings.get("long_text_upgrade", True))
+                self._saved_free_long_text_upgrade = saved_ul
+                self.long_text_upgrade_var.set(saved_ul)
+                import translation_engines
+                translation_engines.set_free_long_text_upgrade(saved_ul)
+                if hasattr(self, "_update_long_text_upgrade_checkbox_state"):
+                    self._update_long_text_upgrade_checkbox_state()
 
             # Migrate old single glossary format if present
             if "glossary" in settings and not self.app_state.glossaries_by_lang:
@@ -1016,6 +1066,24 @@ if ctk is not None and TkinterDnD is not None:
             else:
                 self.log("ℹ️ 리소스팩 자동 적용 꺼짐: 전체 한글화 완료 후 수동 확인 창이 표시됩니다.")
 
+        def on_toggle_append_english(self):
+            self.save_user_settings()
+            if bool(self.append_english_var.get()):
+                self.log("✅ 영어 원문 병기 켜짐: 모드 아이템/블록 이름에 영어 원문을 병기하여 '[..._원문병기].zip'으로 생성합니다.")
+            else:
+                self.log("ℹ️ 영어 원문 병기 꺼짐: 순수 한글 이름만 깔끔하게 표시되는 '[...].zip' 리소스팩으로 생성합니다.")
+
+        def on_toggle_long_text_upgrade(self):
+            is_on = bool(self.long_text_upgrade_var.get())
+            self._saved_free_long_text_upgrade = is_on
+            import translation_engines
+            translation_engines.set_free_long_text_upgrade(is_on)
+            self.save_user_settings()
+            if is_on:
+                self.log("✅ 장문 상위 모델 번역 켜짐 (무료 전용): 500자 이상 장문은 gemini-4-hydrogen → gemini-3.8-flash 순으로 15,000자 단위 일괄 번역합니다.")
+            else:
+                self.log("ℹ️ 장문 상위 모델 번역 꺼짐: 모든 문장을 현재 선택한 기본 모델로 번역합니다.")
+
         def _sync_glossary_to_current_lang(self):
             lang = self.target_lang_combo.get()
             self.app_state.sync_glossary(lang)
@@ -1027,12 +1095,18 @@ if ctk is not None and TkinterDnD is not None:
                     "무료 계정 (안전대기 / 10 RPM 속도제한)",
                     "유료 계정 (초고속·고품질 번역 / 제한없음)",
                 )
+                from constants import PAID_TIER_PLANS
                 current_plan = self.plan_combo.get() if hasattr(self, 'plan_combo') else ""
                 if current_plan in gemini_plans:
                     self._last_gemini_plan = current_plan
+                elif current_plan in PAID_TIER_PLANS:
+                    self._last_paid_tier_plan = current_plan
                 saved_plan_val = getattr(self, "_last_gemini_plan", gemini_plans[0])
                 if saved_plan_val not in gemini_plans:
                     saved_plan_val = gemini_plans[0]
+                saved_tier_val = getattr(self, "_last_paid_tier_plan", PAID_TIER_PLANS[0])
+                if saved_tier_val not in PAID_TIER_PLANS:
+                    saved_tier_val = PAID_TIER_PLANS[0]
 
                 settings = {
                     "instance_root": self.instance_path_entry.get().strip(),
@@ -1044,7 +1118,10 @@ if ctk is not None and TkinterDnD is not None:
                     "target_lang": self.target_lang_combo.get(),
                     "engine_name": self.engine_combo.get(),
                     "plan_name": saved_plan_val,
+                    "paid_tier_plan": saved_tier_val,
                     "auto_apply_resourcepack": bool(self.auto_apply_rp_var.get()) if hasattr(self, "auto_apply_rp_var") else True,
+                    "append_english": bool(self.append_english_var.get()) if hasattr(self, "append_english_var") else True,
+                    "long_text_upgrade": bool(getattr(self, "_saved_free_long_text_upgrade", self.long_text_upgrade_var.get())) if hasattr(self, "long_text_upgrade_var") else True,
                     "translated_history": self.app_state.translated_history,
                     "glossaries_by_lang": self.app_state.glossaries_by_lang
                 }
@@ -1055,8 +1132,12 @@ if ctk is not None and TkinterDnD is not None:
 
         def open_feedback_dialog(self, default_tab="new"):
             try:
+                if hasattr(self, "_log_user_action"):
+                    self._log_user_action(f"피드백/버그 제보 창 열기 (tab={default_tab})")
                 from feedback_manager import FeedbackDialog
                 self.feedback_dialog = FeedbackDialog(self, default_tab=default_tab)
+                if hasattr(self, "_bind_window_close_log"):
+                    self._bind_window_close_log(self.feedback_dialog, "피드백/버그 제보")
                 # 피드백 창이 열릴 때 즉시 빠른 폴링 모드로 전환
                 self._schedule_feedback_poll(300)
             except Exception as e:

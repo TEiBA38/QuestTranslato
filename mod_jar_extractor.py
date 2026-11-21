@@ -591,26 +591,62 @@ def create_lang_resource_pack(translated_langs, output_zip_path, modpack_dir=Non
                 written_paths.add(ko_kr_path)
                 zf.writestr(ko_kr_path, translated_content)
 
-def create_combined_resource_pack(translated_langs, translated_books_map, output_zip_path, modpack_dir=None, custom_map=None):
+def _get_pack_icon_png_bytes():
+    """프로그램 아이콘(icon.ico)을 마인크래프트 리소스팩용 pack.png 바이트로 변환합니다. 실패 시 1x1 투명 PNG 폴백."""
+    import base64
+    import io
+    import sys
+
+    blank_png = base64.b64decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+    )
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, "icon.ico"))
+    if getattr(sys, "frozen", False):
+        candidates.append(os.path.join(os.path.dirname(sys.executable), "icon.ico"))
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico"))
+    candidates.append(os.path.abspath("icon.ico"))
+
+    icon_path = next((p for p in candidates if p and os.path.isfile(p)), None)
+    if not icon_path:
+        return blank_png
+
+    try:
+        from PIL import Image
+        with Image.open(icon_path) as img:
+            rgba = img.convert("RGBA")
+            if rgba.width > 128 or rgba.height > 128:
+                rgba = rgba.resize((128, 128), Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS)
+            buf = io.BytesIO()
+            rgba.save(buf, format="PNG")
+            data = buf.getvalue()
+            if data:
+                return data
+    except Exception:
+        pass
+    return blank_png
+
+
+def create_combined_resource_pack(translated_langs, translated_books_map, output_zip_path, modpack_dir=None, custom_map=None, append_english=True):
     """
     .lang 번역본과 Patchouli 가이드북 번역본을 하나의 리소스팩 zip으로 통합 생성합니다.
     translated_langs: { "jar_name": { "assets/modid/lang/en_us.lang": "번역내용" } }
     translated_books_map: { "jar_name": { "zip_path": json_data } }
     """
-    import base64
-    BLANK_PNG = base64.b64decode(
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
-    )
+    pack_png_bytes = _get_pack_icon_png_bytes()
     p_format = get_pack_format(modpack_dir)
+    pack_desc = "QuestTranslatorPro Korean Translation (EN)" if append_english else "QuestTranslatorPro Korean Translation"
     with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
         pack_mcmeta = {
             "pack": {
                 "pack_format": p_format,
-                "description": "QuestTranslatorPro Korean Translation"
+                "description": pack_desc
             }
         }
         zf.writestr("pack.mcmeta", json.dumps(pack_mcmeta, indent=2, ensure_ascii=True))
-        zf.writestr("pack.png", BLANK_PNG)
+        zf.writestr("pack.png", pack_png_bytes)
 
         written_paths = set()
 
@@ -946,9 +982,19 @@ def apply_resource_pack_to_options(modpack_dir, pack_filename=None):
             if not packs and use_file_prefix:
                 packs = ["vanilla", "mod_resources"]
 
+            # 동일 모드팩의 이전 자사 번역 리소스팩(예: 원문병기 <-> 순수한글)이 동시에 켜져 충돌하지 않도록 정리 후 교체
+            same_pack_prefix = f"{mp_name}["
             packs = [
                 p for p in packs
                 if p not in (entry_name, pack_filename, f"file/{pack_filename}")
+                and not (
+                    isinstance(p, str)
+                    and (
+                        p.startswith(same_pack_prefix)
+                        or p.startswith(f"file/{same_pack_prefix}")
+                    )
+                    and p.lower().endswith(".zip")
+                )
             ]
             packs.append(entry_name)
             new_lines.append("resourcePacks:" + json.dumps(packs, ensure_ascii=False, separators=(",", ":")))
@@ -1025,10 +1071,10 @@ def restore_modpack_backups(modpack_dir):
                 except Exception:
                     pass
 
-    # 2. 퀘스트 및 설정/언어 파일 원본 백업(.bak 및 .bak.gz) 복원
+    # 2. 퀘스트 및 설정/언어 파일 원본 백업(.bak 및 .bak.gz) 복원 (.json5 포함)
     quest_bak_exts = (
-        ".snbt.bak", ".json.bak", ".hqm.bak", ".lang.bak", ".cfg.bak", ".txt.bak",
-        ".snbt.bak.gz", ".json.bak.gz", ".hqm.bak.gz", ".lang.bak.gz", ".cfg.bak.gz", ".txt.bak.gz"
+        ".snbt.bak", ".json.bak", ".json5.bak", ".hqm.bak", ".lang.bak", ".cfg.bak", ".txt.bak",
+        ".snbt.bak.gz", ".json.bak.gz", ".json5.bak.gz", ".hqm.bak.gz", ".lang.bak.gz", ".cfg.bak.gz", ".txt.bak.gz"
     )
     for root, dirs, files_list in os.walk(modpack_dir):
         dirs[:] = [d for d in dirs if d.lower() not in SCAN_IGNORE_DIRS]

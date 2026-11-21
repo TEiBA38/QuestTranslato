@@ -151,6 +151,8 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
         )
 
 
+    unique_used_model = {}  # unique_pos -> 실제 번역에 성공한 모델명 (초장문 상위 모델 티어 정확 반영용)
+
     def _flush_completed_to_memory():
         """현재까지 번역 완료된 항목들을 실시간으로 translation_memory에 안전하게 기록 (취소 시 유실 방지)"""
         import translation_engines
@@ -162,7 +164,8 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                 if not is_mock:
                     is_item = is_item_flags[idx_in_global] if is_item_flags else False
                     is_book = is_book_flags[idx_in_global] if is_book_flags else False
-                    m_tier = translation_memory.get_model_tier(ai_model)
+                    actual_model = unique_used_model.get(unique_pos, ai_model)
+                    m_tier = translation_memory.get_model_tier(actual_model)
                     if is_item:
                         translation_memory.add_item_to_memory(orig, res, target_lang, tier=m_tier)
                     elif is_book:
@@ -183,36 +186,145 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
             translation_memory.save_memory(flush_now=True)
         return translated_results
 
-    def _chunk_entries_by_points(entries, max_points=240, word_pts=1, sentence_pts=3, long_pts=10, long_char_threshold=250, overflow_tolerance=2):
-        """가중치 점수 기반으로 배치 청크를 분할합니다.
-        - 단어/아이템(is_item=True, 250자 미만): 1점 (무료 최대 240개)
-        - 일반 문장(is_item=False, 250자 미만): 3점 (무료 최대 80개)
-        - 장문/가이드북(250자 이상): 10점 (무료 최대 24개)
-        - 문장(3점)/장문(10점) 조합으로 정확히 max_points에 안 떨어질 때는 +overflow_tolerance(+2점)까지 수용"""
-        chunks_out = []
-        cur_chunk = []
-        cur_points = 0
-        for entry in entries:
+    def _chunk_entries_by_points(entries, max_points=200, max_chars=6500, word_pts=1, sentence_pts=3, long_pts=10, long_char_threshold=250, overflow_tolerance=2):
+        """점수 상한(max_points) + TPM 보호 글자수 상한(max_chars) 이중 기준과
+        짧은 항목 우선 First-Fit 빈 패킹으로 청크를 분할합니다.
+        - 단어/아이템(is_item=True, 250자 미만): 1점
+        - 일반 문장(is_item=False, 250자 미만): 3점
+        - 장문/가이드북(250자 이상): 기본 10점 + 초과 50자당 +2점 (예: 250자=10점, 500자=20점)
+        - 짧은 단어·문장을 앞쪽 청크에 먼저 배치하고, 남은 자투리 공간도 채워 청크 수 낭비를 최소화"""
+        scored = []
+        for orig_order, entry in enumerate(entries):
             u_idx, txt = entry[0], str(entry[1])
+            txt_len = len(txt)
             is_word = bool(unique_is_item[u_idx]) if u_idx < len(unique_is_item) else False
-            if len(txt) >= long_char_threshold:
-                # 250~600자는 10점, 초장문(1,200~3,000자 등)은 길이에 비례해 가중치 상향하여 출력 토큰 잘림 방지
-                pts = long_pts * max(1, (len(txt) + 599) // 600)
+            if txt_len >= long_char_threshold:
+                pts = long_pts + 2 * ((txt_len - long_char_threshold) // 50)
             elif is_word:
                 pts = word_pts
             else:
                 pts = sentence_pts
+            scored.append((pts, txt_len, orig_order, entry))
 
-            if cur_chunk and (cur_points >= max_points or (cur_points + pts) > (max_points + overflow_tolerance)):
-                chunks_out.append(cur_chunk)
-                cur_chunk = [entry]
-                cur_points = pts
+        # 적은 점수(단어 -> 짧은 문장 -> 장문) 순으로 정렬해 빠른 청크부터 먼저 전송
+        scored.sort(key=lambda item: (item[0], item[1], item[2]))
+
+        bins = []  # list of [chunk_entries, cur_points, cur_chars]
+        limit_pts = max_points + overflow_tolerance
+        for pts, txt_len, _, entry in scored:
+            placed = False
+            # 최근 열린 청크들 중 여유 공간이 있는 곳에 First-Fit 패킹 (단, 빈 청크가 아닌 기존 청크 대상)
+            for b in bins:
+                if b[1] < max_points and (b[1] + pts) <= limit_pts and (b[2] + txt_len) <= max_chars:
+                    b[0].append(entry)
+                    b[1] += pts
+                    b[2] += txt_len
+                    placed = True
+                    break
+            if not placed:
+                bins.append([[entry], pts, txt_len])
+
+        return [b[0] for b in bins]
+
+    # 무료 Gemini 전용: 원문 500자 이상 장문을 분리하여 상위 모델(gemini-4-hydrogen -> gemini-3.8-flash -> 기본 모델)로
+    # 15,000자 단위(문장 끊김 없음) 일괄 라우팅하여 RPD/RPM 절약 + 장문 번역 품질 향상
+    import translation_engines as _te
+    ultra_long_entries = []
+    if (not is_paid) and engine_key == "gemini_batch" and _te.is_free_long_text_upgrade_enabled():
+        regular_entries = []
+        for entry in llm_target_entries:
+            if len(str(entry[1])) >= 500:
+                ultra_long_entries.append(entry)
             else:
-                cur_chunk.append(entry)
-                cur_points += pts
+                regular_entries.append(entry)
+        llm_target_entries = regular_entries
+
+    def _chunk_ultra_long_entries(entries, target_chars=15000):
+        """초장문(1,000자 이상)을 문장 끊김 없이 채우되, 누적 글자수가 target_chars(15,000자)에 도달/초과한 항목까지 포함해 1회 배치로 묶습니다."""
+        chunks_out = []
+        cur_chunk = []
+        cur_chars = 0
+        for entry in entries:
+            txt_len = len(str(entry[1]))
+            cur_chunk.append(entry)
+            cur_chars += txt_len
+            if cur_chars >= target_chars:
+                chunks_out.append(cur_chunk)
+                cur_chunk = []
+                cur_chars = 0
         if cur_chunk:
             chunks_out.append(cur_chunk)
         return chunks_out
+
+    def _process_ultra_long_with_fallback(entries, completed_start):
+        """무료 Gemini 초장문 배치를 gemini-4-hydrogen -> gemini-3.8-flash -> 원래 기본 모델 순으로 자동 폴백 번역합니다."""
+        if not entries:
+            return completed_start
+        ul_chunks = _chunk_ultra_long_entries(entries, target_chars=15000)
+        base_model = ai_model or "gemini-3.5-flash-lite"
+        chain = []
+        for candidate in ("gemini-4-hydrogen", "gemini-3.8-flash", base_model):
+            if candidate not in chain:
+                chain.append(candidate)
+        exhausted_models = set()
+        completed_now = completed_start
+        if log_callback:
+            log_callback(f"🌟 [장문 상위 모델 번역] 500자 이상 장문 {len(entries)}개 → {len(ul_chunks)}개 배치(15,000자 단위)로 상위 모델({' → '.join(chain)}) 번역 시작")
+
+        for entry_chunk in ul_chunks:
+            if cancel_checker and cancel_checker():
+                _flush_completed_to_memory()
+                translation_memory.save_memory()
+                raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
+
+            texts_chunk = [entry[1] for entry in entry_chunk]
+            chunk_glossary = _build_chunk_glossary(texts_chunk, glossary)
+            res_texts = None
+            used_model_name = base_model
+            last_quota_err = None
+
+            for idx_m, model_cand in enumerate(chain):
+                if model_cand in exhausted_models:
+                    continue
+                try:
+                    res_texts = translate_gemini_batch(
+                        texts_chunk, api_key, False, log_callback, cancel_checker,
+                        reference_map=reference_map, glossary=chunk_glossary,
+                        ai_model=model_cand, target_lang=target_lang
+                    )
+                    used_model_name = model_cand
+                    break
+                except _te.QuotaExceededError as qe:
+                    last_quota_err = qe
+                    # 402(결제 잔액 소진)은 모델 전환으로 해결 불가하므로 즉시 전파
+                    if "크레딧" in str(qe) or "402" in str(qe):
+                        raise
+                    exhausted_models.add(model_cand)
+                    next_candidates = [m for m in chain[idx_m + 1:] if m not in exhausted_models]
+                    if next_candidates and log_callback:
+                        log_callback(f"🔄 [장문 모델 자동 전환] {model_cand} 무료 한도 도달 → {next_candidates[0]}로 자동 전환하여 이어서 번역합니다.")
+                    continue
+
+            if res_texts is None:
+                if last_quota_err is not None:
+                    raise last_quota_err
+                res_texts = texts_chunk
+
+            for (u_idx, orig_txt), res in zip(entry_chunk, res_texts):
+                clean_res = sanitize_minecraft_formatting(orig_txt, translation_word.post_validate_proper_nouns(orig_txt, res, chunk_glossary))
+                unique_translated[u_idx] = clean_res
+                unique_used_model[u_idx] = used_model_name
+                translation_word.learn_from_pair(orig_txt, clean_res, is_official=False)
+                temp_session_logger.record_case_b(orig_txt, clean_res, chunk_glossary, "items" if unique_is_item[u_idx] else "general")
+
+            _flush_completed_to_memory()
+            completed_now += len(entry_chunk)
+            if progress_callback:
+                progress_callback(completed_now, total_unique)
+            if log_callback:
+                log_callback(f"⏳ {log_prefix} [{completed_now}/{total_unique}]")
+
+        return completed_now
 
     total_llm = len(llm_target_entries)
     is_free_gemini_lite = (
@@ -222,15 +334,17 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
     )
 
     try:
-        if is_paid or is_free_gemini_lite:
+        completed_items = assembled_count
+        if llm_target_entries and (is_paid or is_free_gemini_lite):
             if is_free_gemini_lite:
-                # 무료 Gemini Flash-Lite (15 RPM): 최대 240점(+2 허용) + 2스레드 파이프라이닝으로 11~12 RPM 확보
-                chunks = _chunk_entries_by_points(llm_target_entries, max_points=240, word_pts=1, sentence_pts=3, long_pts=10, long_char_threshold=250, overflow_tolerance=2)
+                # 무료 Gemini Flash-Lite (15 RPM): 200점 + 6,500자 TPM 보호 + 2스레드 파이프라이닝
+                chunks = _chunk_entries_by_points(llm_target_entries, max_points=200, max_chars=6500)
                 worker_count = min(2, len(chunks) or 1)
             elif engine_key in ("gemini_batch", "openai", "claude", "deepseek"):
-                # 유료 클라우드 LLM: 최대 배치 150점(+2 허용) + 10스레드 병렬
-                chunks = _chunk_entries_by_points(llm_target_entries, max_points=150, word_pts=1, sentence_pts=3, long_pts=10, long_char_threshold=250, overflow_tolerance=2)
-                worker_count = min(10, len(chunks) or 1)
+                # 유료 클라우드 LLM: 엔진 및 계정 티어별 429-free 최적 병렬 워커 수 + 200점/6,500자 TPM 보호
+                import translation_engines
+                chunks = _chunk_entries_by_points(llm_target_entries, max_points=200, max_chars=6500)
+                worker_count = min(translation_engines.get_paid_worker_limit(engine_key), len(chunks) or 1)
             else:
                 batch_size = 50
                 chunks = [llm_target_entries[i:i + batch_size] for i in range(0, total_llm, batch_size)]
@@ -282,14 +396,14 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                     if progress_callback:
                         progress_callback(completed_items, total_unique)
                     if log_callback:
-                        log_callback(f"⏳ {log_prefix} (병렬) [{completed_items}/{total_unique}]")
+                        log_callback(f"⏳ {log_prefix} [{completed_items}/{total_unique}]")
             finally:
                 abort_event.set()
                 executor.shutdown(wait=False, cancel_futures=True)
-        else:
+        elif llm_target_entries:
             # 무료 5 RPM 제미나이(3.8-flash/4-hydrogen), Local AI, 또는 순차 번역
             if engine_key == "gemini_batch":
-                seq_chunks = _chunk_entries_by_points(llm_target_entries, max_points=240, word_pts=1, sentence_pts=3, long_pts=10, long_char_threshold=250, overflow_tolerance=2)
+                seq_chunks = _chunk_entries_by_points(llm_target_entries, max_points=200, max_chars=6500)
             else:
                 batch_size = 40 if engine_key in ("local_ai", "deepseek", "claude") else 15
                 seq_chunks = [llm_target_entries[i:i + batch_size] for i in range(0, total_llm, batch_size)]
@@ -329,6 +443,9 @@ def _run_batch_jobs(items, text_extractor, engine_key, api_key, is_paid, log_cal
                 _flush_completed_to_memory()
                 if progress_callback:
                     progress_callback(completed_items, total_unique)
+
+        if ultra_long_entries:
+            completed_items = _process_ultra_long_with_fallback(ultra_long_entries, completed_items)
 
         # 최종 전파 확인
         _flush_completed_to_memory()

@@ -61,11 +61,11 @@ class GeminiRateLimiter:
 
     def get_profile(self, model_name: str):
         """모델별 RPM 한도에 맞춘 (min_start_interval, min_post_cooldown, window_seconds, max_calls) 반환.
-        - 3.5-flash-lite / 3.1-flash-lite (무료 15 RPM): 11~12 RPM 목표 (시작 간격 4.9초, 응답 후 0.3초, 62초/12회, 2스레드 파이프라이닝)
+        - 3.5-flash-lite / 3.1-flash-lite (무료 15 RPM): 10 RPM 이하 보수적 보호 (시작 간격 5.8초, 응답 후 0.4초, 62초/10회, 2스레드 파이프라이닝)
         - 3.8-flash / 4-hydrogen (무료 5 RPM): 4.5 RPM 이하 보호 (시작 간격 12.8초, 응답 후 1.0초, 64초/5회)"""
         m = str(model_name or "").lower()
         if "flash-lite" in m or "lite" in m:
-            return (4.9, 0.3, 62.0, 12)
+            return (5.8, 0.4, 62.0, 10)
         if "3.8-flash" in m or "hydrogen" in m or "argon" in m or "pro" in m:
             return (12.8, 1.0, 64.0, 5)
         return (
@@ -122,6 +122,87 @@ class GeminiRateLimiter:
 
 
 _default_rate_limiter = GeminiRateLimiter()
+
+
+class _FixedWindowRateLimiter:
+    """유료 API 중 Tier 1 RPM이 빡빡한 엔진(예: Claude 50 RPM)의 429 방지를 위한 초경량 슬라이딩 윈도우 리미터."""
+
+    def __init__(self, min_start_interval: float, window_seconds: float, max_calls: int):
+        self._lock = threading.Lock()
+        self._timestamps = deque()
+        self._last_start = 0.0
+        self._min_start_interval = float(min_start_interval)
+        self._window_seconds = float(window_seconds)
+        self._max_calls = int(max_calls)
+
+    def acquire_slot(self, cancel_checker=None):
+        with self._lock:
+            now = time.monotonic()
+            while self._timestamps and (now - self._timestamps[0]) >= self._window_seconds:
+                self._timestamps.popleft()
+
+            window_wait = 0.0
+            if len(self._timestamps) >= self._max_calls:
+                window_wait = (self._timestamps[0] + self._window_seconds) - now
+
+            start_wait = 0.0
+            if self._last_start > 0:
+                start_wait = (self._last_start + self._min_start_interval) - now
+
+            wait_needed = max(window_wait, start_wait)
+            if wait_needed > 0:
+                _sleep_with_cancel(wait_needed, cancel_checker)
+
+            call_start = time.monotonic()
+            self._last_start = call_start
+            self._timestamps.append(call_start)
+
+
+# Claude Tier 1 (50 RPM) 보수적 보호: 5스레드 기준 시작 간격 1.35초, 62초당 최대 42회 (429 0% 목표)
+_claude_rate_limiter = _FixedWindowRateLimiter(min_start_interval=1.35, window_seconds=62.0, max_calls=42)
+
+# OpenAI / Claude 유료 계정 티어 상태 (1: Tier 1, 2: Tier 2, 3: Tier 3+)
+_paid_api_tier = 1
+
+# 무료 Gemini 전용 초장문(1,000자 이상) 상위 모델 자동 라우팅 활성화 여부 (유료에서는 자동 비활성)
+_free_long_text_upgrade = True
+
+
+def set_free_long_text_upgrade(enabled: bool):
+    global _free_long_text_upgrade
+    _free_long_text_upgrade = bool(enabled)
+
+
+def is_free_long_text_upgrade_enabled() -> bool:
+    return _free_long_text_upgrade
+
+
+def set_paid_api_tier(tier: int):
+    """현재 선택된 유료 API 계정 티어(1/2/3)를 설정합니다."""
+    global _paid_api_tier
+    try:
+        t = int(tier)
+    except Exception:
+        t = 1
+    _paid_api_tier = max(1, min(3, t))
+
+
+def get_paid_api_tier() -> int:
+    return _paid_api_tier
+
+
+def get_paid_worker_limit(engine_key: str) -> int:
+    """엔진 및 현재 유료 계정 티어에 맞춘 429-free 최적 병렬 스레드 수를 반환합니다."""
+    tier = _paid_api_tier
+    if engine_key == "gemini_batch":
+        return 10
+    if engine_key == "openai":
+        return {1: 8, 2: 10, 3: 12}.get(tier, 8)
+    if engine_key == "claude":
+        return {1: 5, 2: 10, 3: 12}.get(tier, 5)
+    if engine_key == "deepseek":
+        return 6
+    return 5
 
 
 def _notify_gemini_backoff(wait_seconds: float):
@@ -238,8 +319,11 @@ def is_code_or_id(text):
     if t.startswith("/") and not t.startswith("//"):
         return True
 
-    # 4. 마크다운 링크 및 시스템 태그 ($[...](...), <tag...>, {placeholder}, &color&, (PM2.5))
+    # 4. 마크다운 링크 및 시스템 태그 ($[...](...), <tag...>, {ftbquests.chapter...}, &color&, (PM2.5))
     if (t.startswith("$[") and "](" in t) or (t.startswith("<") and t.endswith(">") and " " not in t):
+        return True
+    # 중괄호로 감싸진 다국어 번역 키 / 플레이스홀더 (예: {ftbquests.chapter.6.quests0.title}, {image:...})
+    if t.startswith("{") and t.endswith("}") and " " not in t and ("." in t or ":" in t or "_" in t):
         return True
     if re.match(r'^(?:[&§][0-9a-fk-orA-FK-OR])+[a-zA-Z0-9]?$', t):
         return True
@@ -328,9 +412,18 @@ def _build_gemini_config(model_name: str):
     if not types or model_name in _unsupported_config_models:
         return None
     config_params = {"response_mime_type": "application/json"}
-    if hasattr(types, "ThinkingConfig") and ("2.5" in model_name or "thinking" in model_name):
+    m_low = str(model_name or "").lower()
+    if hasattr(types, "ThinkingConfig"):
         try:
-            config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+            if "2.5" in m_low or "thinking" in m_low:
+                config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+            elif any(v in m_low for v in ("gemini-3", "gemini-4", "hydrogen", "argon")):
+                if hasattr(types, "ThinkingLevel"):
+                    # Pro/Argon 계열은 MINIMAL 미지원 시 LOW 사용, Flash/Hydrogen 계열은 MINIMAL로 초고속 번역
+                    lvl = types.ThinkingLevel.LOW if ("pro" in m_low or "argon" in m_low) else types.ThinkingLevel.MINIMAL
+                    config_params["thinking_config"] = types.ThinkingConfig(thinking_level=lvl)
+                else:
+                    config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
         except Exception:
             pass
     try:
@@ -354,9 +447,18 @@ def _invoke_gemini_generate_content(client, model_name: str, prompt: str, is_pai
             try:
                 translation_memory.record_api_call(1)
                 if cfg is not None:
-                    return client.models.generate_content(model=model_name, contents=prompt, config=cfg)
+                    resp = client.models.generate_content(model=model_name, contents=prompt, config=cfg)
                 else:
-                    return client.models.generate_content(model=model_name, contents=prompt)
+                    resp = client.models.generate_content(model=model_name, contents=prompt)
+                try:
+                    um = getattr(resp, "usage_metadata", None)
+                    if um is not None:
+                        in_t = getattr(um, "prompt_token_count", 0) or 0
+                        out_t = (getattr(um, "candidates_token_count", 0) or 0) + (getattr(um, "thoughts_token_count", 0) or 0)
+                        translation_memory.record_token_usage(in_t, out_t, model_name=model_name, is_paid=False)
+                except Exception:
+                    pass
+                return resp
             finally:
                 _default_rate_limiter.mark_finished()
         else:
@@ -364,9 +466,18 @@ def _invoke_gemini_generate_content(client, model_name: str, prompt: str, is_pai
                 raise TranslationCancelledError("사용자에 의해 번역이 취소되었습니다.")
             translation_memory.record_api_call(1)
             if cfg is not None:
-                return client.models.generate_content(model=model_name, contents=prompt, config=cfg)
+                resp = client.models.generate_content(model=model_name, contents=prompt, config=cfg)
             else:
-                return client.models.generate_content(model=model_name, contents=prompt)
+                resp = client.models.generate_content(model=model_name, contents=prompt)
+            try:
+                um = getattr(resp, "usage_metadata", None)
+                if um is not None:
+                    in_t = getattr(um, "prompt_token_count", 0) or 0
+                    out_t = (getattr(um, "candidates_token_count", 0) or 0) + (getattr(um, "thoughts_token_count", 0) or 0)
+                    translation_memory.record_token_usage(in_t, out_t, model_name=model_name, is_paid=True)
+            except Exception:
+                pass
+            return resp
 
     use_cfg = model_name not in _unsupported_config_models
     try:
@@ -379,6 +490,33 @@ def _invoke_gemini_generate_content(client, model_name: str, prompt: str, is_pai
             # 폴백 재호출 역시 무료 속도 제한(_do_single_http_call)을 정식으로 통과한 뒤 호출!
             return _do_single_http_call(use_config=False)
         raise call_err
+
+
+def _is_billing_depleted_text(text: str) -> bool:
+    """응답 본문/에러 메시지가 유료 크레딧(잔액) 소진(402/billing)인지 판별합니다."""
+    low = str(text or "").lower()
+    return any(k in low for k in (
+        "prepayment",
+        "credits are depleted",
+        "insufficient_quota",
+        "insufficient balance",
+        "credit balance is too low",
+        "exceeded your current quota",
+        "payment required",
+    ))
+
+
+def _check_http_billing_error(response, engine_label: str):
+    """HTTP 응답이 402(결제/크레딧 소진)이거나 잔액 부족 본문을 담고 있으면 즉시 402 예외를 발생시킵니다."""
+    code = getattr(response, "status_code", 0)
+    body = ""
+    if code in (400, 402, 429):
+        try:
+            body = (response.text or "")[:400]
+        except Exception:
+            body = ""
+    if code == 402 or (code in (400, 429) and _is_billing_depleted_text(body)):
+        raise Exception(f"HTTP 402 billing_depleted: {body or engine_label}")
 
 
 def _execute_batch_with_retry(
@@ -450,6 +588,11 @@ def _execute_batch_with_retry(
             if "404" in err or "NOT_FOUND" in err:
                 _diag("FAIL", "API_MODEL_404", "model not found")
                 raise Exception(f"선택한 {engine_label} AI 모델({model_name})을 찾을 수 없습니다. 지원되는 모델명을 선택해주세요.")
+            if "402" in err or _is_billing_depleted_text(err):
+                _diag("FAIL", "API_BILLING_402", err[:160])
+                if log_callback:
+                    log_callback(f"❌ [{engine_label} 결제 잔액 부족(402)] 유료 크레딧(잔액)이 모두 소진되었습니다. 결제 페이지에서 충전 후 다시 시도해주세요.")
+                raise QuotaExceededError(f"{engine_label} 유료 결제 크레딧(잔액)이 모두 소진되었습니다. 결제 페이지에서 크레딧을 충전한 뒤 다시 시도해주세요.")
             if "429" in err or "RESOURCE_EXHAUSTED" in err:
                 if attempt < max_retries:
                     wait_time = rate_limit_wait_fn(attempt) if rate_limit_wait_fn else (8.0 * attempt)
@@ -891,7 +1034,7 @@ def translate_openai_batch(text_list, api_key, reference_map=None, glossary=None
         ],
         "response_format": {"type": "json_object"},
     }
-    if any(model_name.startswith(p) for p in ("o1", "o3", "o4")):
+    if any(model_name.startswith(p) for p in ("o1", "o3", "o4", "gpt-5", "gpt-6")):
         payload["reasoning_effort"] = "low"
     else:
         payload["temperature"] = 0.2
@@ -901,6 +1044,7 @@ def translate_openai_batch(text_list, api_key, reference_map=None, glossary=None
     def _attempt_openai():
         translation_memory.record_api_call(1)
         res = sess.post(url, headers=headers, json=payload, timeout=180)
+        _check_http_billing_error(res, "OpenAI")
         if res.status_code == 429:
             raise QuotaExceededError("OpenAI API 할당량이 초과되었거나 요청이 너무 빠릅니다.")
         if res.status_code == 401:
@@ -908,7 +1052,13 @@ def translate_openai_batch(text_list, api_key, reference_map=None, glossary=None
         if res.status_code in (500, 502, 503, 504):
             raise Exception(f"HTTP {res.status_code} unavailable")
         res.raise_for_status()
-        raw_text = res.json()["choices"][0]["message"]["content"].strip()
+        res_json = res.json()
+        try:
+            u = res_json.get("usage") or {}
+            translation_memory.record_token_usage(u.get("prompt_tokens", 0), u.get("completion_tokens", 0), model_name=model_name, is_paid=True)
+        except Exception:
+            pass
+        raw_text = res_json["choices"][0]["message"]["content"].strip()
 
         return _merge_batch_json_response(
             raw_text, text_list, resolved, unresolved_indices, unique_unresolved, unresolved_to_unique,
@@ -978,8 +1128,12 @@ def translate_claude(text_list, api_key, ai_model=None, log_callback=None, cance
     sess = _get_http_session()
 
     def _attempt_claude():
+        # Tier 1(50 RPM)만 보수적 리미터 적용, Tier 2+(1,000+ RPM)는 대기 없이 고속 처리
+        if _paid_api_tier <= 1:
+            _claude_rate_limiter.acquire_slot(cancel_checker)
         translation_memory.record_api_call(1)
         response = sess.post(url, headers=headers, json=payload, timeout=180)
+        _check_http_billing_error(response, "Claude")
         if response.status_code == 429:
             raise QuotaExceededError("Anthropic (Claude) API 요청 한도(429)에 도달했습니다.")
         if response.status_code == 401:
@@ -988,6 +1142,11 @@ def translate_claude(text_list, api_key, ai_model=None, log_callback=None, cance
             raise Exception(f"HTTP {response.status_code} overloaded")
         response.raise_for_status()
         data = response.json()
+        try:
+            u = data.get("usage") or {}
+            translation_memory.record_token_usage(u.get("input_tokens", 0), u.get("output_tokens", 0), model_name=model_name, is_paid=True)
+        except Exception:
+            pass
         raw_text = data["content"][0]["text"].strip()
 
         return _merge_batch_json_response(
@@ -1055,6 +1214,7 @@ def translate_deepseek(text_list, api_key, ai_model=None, log_callback=None, can
     def _attempt_deepseek():
         translation_memory.record_api_call(1)
         response = sess.post(url, headers=headers, json=payload, timeout=180)
+        _check_http_billing_error(response, "DeepSeek")
         if response.status_code == 429:
             raise QuotaExceededError("DeepSeek API 요청 한도(429)에 도달했습니다.")
         if response.status_code == 401:
@@ -1063,6 +1223,11 @@ def translate_deepseek(text_list, api_key, ai_model=None, log_callback=None, can
             raise Exception(f"HTTP {response.status_code} unavailable")
         response.raise_for_status()
         data = response.json()
+        try:
+            u = data.get("usage") or {}
+            translation_memory.record_token_usage(u.get("prompt_tokens", 0), u.get("completion_tokens", 0), model_name=model_name, is_paid=True)
+        except Exception:
+            pass
         raw_text = data["choices"][0]["message"]["content"].strip()
 
         return _merge_batch_json_response(
@@ -1137,15 +1302,29 @@ def translate_local_ai(text_list, base_url, model_name, api_key=None, log_callba
 
         translation_memory.record_api_call(1)
         response = requests.post(url, headers=headers, json=payload, timeout=300)
+        if response.status_code == 402 or (response.status_code in (400, 429) and _is_billing_depleted_text(response.text)):
+            try:
+                import session_logger
+                session_logger.log_event("FAIL", "API_BILLING_402", f"Custom/LocalAI({model_name}) HTTP {response.status_code}")
+            except Exception:
+                pass
+            if log_callback:
+                log_callback("❌ [Custom API 결제 잔액 부족(402)] 크레딧(잔액)이 모두 소진되었습니다. 충전 후 다시 시도해주세요.")
+            raise QuotaExceededError("Custom API 유료 결제 크레딧(잔액)이 모두 소진되었습니다. 결제 페이지에서 크레딧을 충전한 뒤 다시 시도해주세요.")
         response.raise_for_status()
         data = response.json()
+        try:
+            u = data.get("usage") or {}
+            translation_memory.record_token_usage(u.get("prompt_tokens", 0), u.get("completion_tokens", 0), model_name=model_name, is_paid=False)
+        except Exception:
+            pass
         raw_text = data["choices"][0]["message"]["content"].strip()
 
         return _merge_batch_json_response(
             raw_text, text_list, resolved, unresolved_indices, unique_unresolved, unresolved_to_unique,
             target_lang, log_callback=log_callback
         )
-    except TranslationCancelledError:
+    except (TranslationCancelledError, QuotaExceededError):
         raise
     except Exception as e:
         if log_callback:

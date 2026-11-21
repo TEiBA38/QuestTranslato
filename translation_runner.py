@@ -110,7 +110,7 @@ class ModLangPipeline:
     def __init__(self, app):
         self.app = app
 
-    def translate_mod_langs(self, config: EngineConfig, modpack_dir: str) -> dict:
+    def translate_mod_langs(self, config: EngineConfig, modpack_dir: str, append_english: bool = True) -> dict:
         import session_logger
         self.app.update_progress(0.0)
         self.app.log("\n==========================================")
@@ -118,8 +118,9 @@ class ModLangPipeline:
         res = self.app._translate_lang_files(
             config.engine_key, config.api_key, config.is_paid,
             config.ai_model, config.target_lang, modpack_dir, config.custom_url,
+            append_english=append_english,
         ) or {}
-        session_logger.log_event("OK", "MOD_LANG", f"mods={len(res)}")
+        session_logger.log_event("OK", "MOD_LANG", f"mods={len(res)}, append_en={append_english}")
         return res
 
 
@@ -247,17 +248,22 @@ class TranslationJobRunner:
                         on_finally()
                     except Exception:
                         pass
-                try:
-                    translation_memory.finalize_translation_session(modpack_path=modpack_path)
-                except Exception:
-                    pass
                 self.app.app_state.is_translating = False
                 self.app._translation_out_dir = None
                 self.app.toggle_buttons(True)
+                est_krw, low_krw, high_krw, paid_flag = translation_memory.get_session_estimated_cost_krw()
+                if paid_flag and est_krw > 0:
+                    self.app.set_status(f"완료 · 예상 지출 약 {est_krw:,}원 ({low_krw:,}~{high_krw:,}원)")
+                elif reset_status_on_done:
+                    self.app.set_status("대기 중")
                 if reset_status_on_done:
                     self.app.update_progress(1.0)
-                    self.app.set_status("대기 중")
                     self.app.after(0, lambda: getattr(self.app, "show_translate_screen")(force=True))
+                # 클라우드 최종 정리는 백그라운드로 위임해 번역 완료 즉시 뒤로가기/버튼이 활성화되도록 보장
+                threading.Thread(
+                    target=lambda: translation_memory.finalize_translation_session(modpack_path=modpack_path),
+                    daemon=True,
+                ).start()
 
         threading.Thread(target=_worker, daemon=True).start()
         return True
@@ -431,7 +437,7 @@ class TranslationMixin:
     def run_selected_modpack(self):
         self._get_job_runner().run_selected_modpack(self.selected_modpack_path)
 
-    def _translate_lang_files(self, engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url=None):
+    def _translate_lang_files(self, engine_key, api_key, is_paid, ai_model, target_lang, modpack_dir, custom_url=None, append_english=True):
         try:
                 self.log("🗂️ 전체 모드(.lang) 번역 및 리소스팩 생성을 시작합니다...")
                 import mod_jar_extractor
@@ -603,39 +609,6 @@ class TranslationMixin:
                 
                 self.log(f"🧠 총 {len(all_targets):,}개의 텍스트 중 중복 제거된 {len(unique_texts):,}개의 고유 문장을 캐시 대조 및 번역합니다...")
                 
-                # 용어 자동 추출: 아이템이 아닌 일반 문장 중 새로 번역할 텍스트가 충분히 많을 때만 실행
-                uncached_for_glossary = [
-                    t for t, is_item in zip(unique_texts, is_item_flags)
-                    if not is_item and translation_memory.get_cached_translation(t, target_lang) is None
-                ]
-                try:
-                    if len(uncached_for_glossary) >= 50:
-                        samples = uncached_for_glossary.copy()
-                        random.shuffle(samples)
-                        sample_subset = samples[:100]
-                        self.log("🧠 [AI 자동 추출] 번역 시작 전 .lang 파일의 핵심 단어를 추출하여 단어장을 진화시킵니다...")
-                        from translation_engines import auto_extract_glossary
-                        extracted_glossary = auto_extract_glossary(
-                            sample_subset, engine_key, api_key, ai_model, target_lang, custom_url=custom_url,
-                            is_paid=is_paid, cancel_checker=self.is_cancelled
-                        )
-                        if extracted_glossary:
-                            clean_extracted = {k.strip(): v.split('#')[0].strip() for k, v in extracted_glossary.items() if k and v}
-                            added_keys = list(clean_extracted.keys())[:5]
-                            self.log(f"✨ 진화 완료! 새로 추가된 단어: {added_keys} 등 총 {len(clean_extracted)}개")
-                            self.app_state.glossary.update(clean_extracted)
-                            if target_lang not in self.app_state.glossaries_by_lang:
-                                self.app_state.glossaries_by_lang[target_lang] = {}
-                            self.app_state.glossaries_by_lang[target_lang].update(clean_extracted)
-                            if hasattr(self, "save_user_settings"):
-                                self.after(0, self.save_user_settings)
-                    elif len(uncached_for_glossary) > 0:
-                        self.log(f"💾 새로 번역할 텍스트가 {len(uncached_for_glossary)}개로 적어 용어 추출을 건너뜁니다.")
-                    else:
-                        self.log("💾 모든 텍스트가 캐시에 있어 용어 추출이 필요 없습니다.")
-                except Exception as e:
-                    self.log(f"⚠️ 용어 추출 중 오류가 발생했으나 번역은 계속 진행합니다: {e}")
-
                 def check_cancel():
                     return self.app_state.cancel_requested
                 
@@ -675,7 +648,7 @@ class TranslationMixin:
                     if trans_v != v and not validate_format_specifiers(v, trans_v):
                         trans_v = v
 
-                    if trans_v and is_short and str(trans_v).strip() != str(v).strip() and not str(trans_v).strip().endswith(f"({v})"):
+                    if append_english and trans_v and is_short and str(trans_v).strip() != str(v).strip() and not str(trans_v).strip().endswith(f"({v})"):
                         # 아이템 이름이면 영어 병기 (한국어 이름 (English Name))
                         # 단, 원본에 %s 등 포맷 지정자가 있으면 병기하면 안됨 (개수가 2배로 불어나서 크래시)
                         has_fmt = re.search(r'%(\d+\$)?[a-zA-Z]', v)
@@ -804,36 +777,6 @@ class TranslationMixin:
                     translation_memory.load_memory()
                     translation_memory.wait_for_cloud_sync(timeout=6.0)
 
-                    # 용어 자동 추출: 실제로 새로 번역할 텍스트가 충분히 많을 때만 실행
-                    uncached_patchouli = [t for t in unique_texts if translation_memory.get_cached_book_translation(t, target_lang) is None]
-                    try:
-                        if len(uncached_patchouli) >= 50:
-                            samples = uncached_patchouli.copy()
-                            random.shuffle(samples)
-                            sample_subset = samples[:100]
-                            self.log("🧠 [AI 자동 추출] 번역 시작 전 가이드북의 핵심 단어를 추출하여 단어장을 진화시킵니다...")
-                            from translation_engines import auto_extract_glossary
-                            extracted_glossary = auto_extract_glossary(
-                                sample_subset, engine_key, api_key, ai_model, target_lang, custom_url=custom_url,
-                                is_paid=is_paid, cancel_checker=self.is_cancelled
-                            )
-                            if extracted_glossary:
-                                clean_extracted = {k.strip(): v.split('#')[0].strip() for k, v in extracted_glossary.items() if k and v}
-                                added_keys = list(clean_extracted.keys())[:5]
-                                self.log(f"✨ 진화 완료! 새로 추가된 단어: {added_keys} 등 총 {len(clean_extracted)}개")
-                                self.app_state.glossary.update(clean_extracted)
-                                if target_lang not in self.app_state.glossaries_by_lang:
-                                    self.app_state.glossaries_by_lang[target_lang] = {}
-                                self.app_state.glossaries_by_lang[target_lang].update(clean_extracted)
-                                if hasattr(self, "save_user_settings"):
-                                    self.after(0, self.save_user_settings)
-                        elif len(uncached_patchouli) > 0:
-                            self.log(f"💾 새로 번역할 텍스트가 {len(uncached_patchouli)}개로 적어 용어 추출을 건너뜁니다.")
-                        else:
-                            self.log("💾 모든 가이드북 텍스트가 캐시에 있어 용어 추출이 필요 없습니다.")
-                    except Exception as e:
-                        self.log(f"⚠️ 용어 추출 중 오류가 발생했으나 번역은 계속 진행합니다: {e}")
-                    
                     import file_processors
                     
                     def prog_cb(c, t):
@@ -1193,7 +1136,7 @@ class TranslationMixin:
     def run_zip_file(self):
         self._get_job_runner().run_zip_file()
 
-    def _translate_jobs_parallel(self, jobs, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", on_job_completed=None):
+    def _translate_jobs_parallel(self, jobs, api_key, is_paid, ai_model=None, target_lang="한국어 (Korean)", on_job_completed=None, engine_key="gemini_batch"):
         all_targets = []
         for job in jobs:
             job["tasks_total"] = len(job["targets"])
@@ -1216,7 +1159,7 @@ class TranslationMixin:
             return self.is_cancelled()
 
         def prog_cb(c, t):
-            self.set_status(f"⏳ Gemini 묶음 번역 진행 중... [{c}/{t}]")
+            self.set_status(f"⏳ 묶음 번역 진행 중... [{c}/{t}]")
             self.update_progress(c / t if t > 0 else 1)
 
         glossary_map = self.app_state.glossaries_by_lang.get(target_lang, {}) or getattr(self.app_state, 'glossary', {}) or {}
@@ -1225,7 +1168,7 @@ class TranslationMixin:
         translated_texts = file_processors._run_batch_jobs(
             all_targets,
             extract_text,
-            "gemini_batch",
+            engine_key,
             api_key,
             is_paid,
             log_callback=self.route_log,
@@ -1639,7 +1582,8 @@ class TranslationMixin:
         self.app_state.cancel_requested = False
         translation_memory.reset_session_stats()
         self.after(0, lambda: getattr(self, "show_translate_screen")(force=True))
-        self.toggle_buttons(False)
+        if toggle_ui:
+            self.toggle_buttons(False)
         self.update_progress(0)
 
         from translation_core import TranslationUIContext, run_zip_translation_logic
@@ -1769,6 +1713,7 @@ class TranslationMixin:
             return
 
         auto_apply_enabled = bool(self.auto_apply_rp_var.get()) if hasattr(self, "auto_apply_rp_var") else False
+        append_english_enabled = bool(self.append_english_var.get()) if hasattr(self, "append_english_var") else True
 
         def run_translation_task():
             translation_memory.set_current_modpack(modpack_dir)
@@ -1789,7 +1734,7 @@ class TranslationMixin:
                 self.log("⚠️ 사용자가 번역을 취소했습니다.")
             else:
                 # 3단계: 전체 모드(.lang) 파이프라인 실행
-                lang_map = runner.mod_langs.translate_mod_langs(config, modpack_dir)
+                lang_map = runner.mod_langs.translate_mod_langs(config, modpack_dir, append_english=append_english_enabled)
 
             # 3. Create Combined Pack (취소 시에는 미번역 영문 리소스팩 생성 및 완료 팝업을 건너뜀)
             if getattr(self.app_state, 'cancel_requested', False):
@@ -1807,14 +1752,15 @@ class TranslationMixin:
                 # 번역 대상 언어 추출 (예: "한국어 (Korean)" -> "Korean")
                 lang_match = re.search(r'\((.*?)\)', target_lang)
                 clean_lang = lang_match.group(1).strip() if lang_match else target_lang.strip()
-                pack_filename = f"{modpack_name}[{clean_lang}].zip"
+                pack_suffix = "_원문병기" if append_english_enabled else ""
+                pack_filename = f"{modpack_name}[{clean_lang}{pack_suffix}].zip"
 
                 import temp_session_logger
                 if temp_session_logger.is_debug_mode():
                     temp_rp_dir = os.path.join(temp_session_logger.get_temp_dir(), "resourcepacks")
                     os.makedirs(temp_rp_dir, exist_ok=True)
                     output_zip = os.path.join(temp_rp_dir, pack_filename)
-                    mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map)
+                    mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map, append_english=append_english_enabled)
                     self.log(f"🛡️ [디버그 모드] 원본 모드팩 보호: 실제 resourcepacks 생성을 차단하고 임시 폴더에만 격리 저장했습니다.\n경로: {output_zip}")
                 else:
                     # 마인크래프트 resourcepacks 폴더 자동 생성 보장 및 루트 중복 복제 방지
@@ -1828,7 +1774,7 @@ class TranslationMixin:
                         except Exception:
                             pass
 
-                    mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map)
+                    mod_jar_extractor.create_combined_resource_pack(lang_map, patchouli_map, output_zip, modpack_dir=modpack_dir, custom_map=custom_map, append_english=append_english_enabled)
                     self.log(f"🎉 통합 리소스팩 생성 완료!\n파일명: {pack_filename}\n경로: {output_zip}")
 
                 self.log("\n" + translation_memory.get_cache_stats_summary(target_lang))

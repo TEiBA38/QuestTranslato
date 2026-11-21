@@ -71,6 +71,7 @@ class SessionDiagnosticLogger:
         self.previous_crashed_session_path: Optional[str] = None
         self._fault_fh = None
         self._exited = False
+        self._last_logged_status = ""
         self._hooks_installed = False
         self._orig_sys_excepthook = None
         self._orig_thread_excepthook = None
@@ -156,6 +157,34 @@ class SessionDiagnosticLogger:
         else:
             line = f"[{ts}] {tag} {stage} |\n"
         self._append_raw(line, fsync=(st in ("FAIL", "CRASH")))
+
+    def log_ui(self, message: str):
+        """UI 로그창(log_textbox)에 출력되는 주요 안내/진행 로그를 세션 .txt에 함께 기록합니다."""
+        if not message:
+            return
+        raw = str(message).strip()
+        if not raw or raw.startswith("⏳"):
+            return
+        # 구분선만 있는 장식 줄(===, ---)은 생략
+        if set(raw) <= {"=", "-", "_", " ", "\n", "\r"}:
+            return
+        if "❌" in raw or "🛑" in raw:
+            status = "FAIL"
+        elif "⚠️" in raw:
+            status = "WARN"
+        else:
+            status = "INFO"
+        self.log_event(status, "UI_LOG", raw)
+
+    def log_status(self, status_text: str):
+        """상태바 전환 내역을 기록합니다 (반복 진행 카운터 [n/m] 및 직전과 동일한 문구는 스킵)."""
+        clean = str(status_text or "").replace("\r", " ").replace("\n", " ").strip()
+        if not clean or clean == self._last_logged_status:
+            return
+        if re.search(r"\[\d+\s*/\s*\d+\]", clean):
+            return
+        self._last_logged_status = clean
+        self.log_event("INFO", "UI_STATUS", clean)
 
     def log_crash(self, source: str, exc_type, exc_value, exc_tb):
         """미처리 예외(크래시)와 전체 스택트레이스를 세션 .txt 끝에 즉시 기록·동기화합니다."""
@@ -314,6 +343,19 @@ default_session_logger = SessionDiagnosticLogger()
 
 def log_event(status: str, stage: str, detail: str = ""):
     default_session_logger.log_event(status, stage, detail)
+
+
+def log_ui(message: str):
+    default_session_logger.log_ui(message)
+
+
+def log_status(status_text: str):
+    default_session_logger.log_status(status_text)
+
+
+def log_action(detail: str):
+    """사용자의 UI 조작(화면 진입, 팝업 열기/닫기, 옵션 변경 등)을 세션 로그에 기록합니다."""
+    default_session_logger.log_event("INFO", "USER_ACTION", detail)
 
 
 def log_crash(source: str, exc_type, exc_value, exc_tb):

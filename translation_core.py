@@ -456,55 +456,9 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
         if not jobs:
             context.log("✅ 새로 번역할 파일이 없습니다. 모든 작업이 완료되었습니다.")
         else:
-            try:
-                samples = []
-                for j in jobs:
-                    if j["kind"] == "snbt":
-                        for t in j["targets"]:
-                            samples.append(t[2])
-                    elif j["kind"] == "json":
-                        for t in j["targets"]:
-                            samples.append(t[2])
-                
-                context.set_status("🌐 클라우드 마스터 번역 메모리 확인 중...")
-                translation_memory.load_memory()
-                translation_memory.wait_for_cloud_sync(timeout=6.0)
-
-                import random
-                # 캐시에 없는 텍스트만 추출하여 용어 추출 필요 여부 판단
-                uncached_samples = [s for s in samples if translation_memory.get_cached_translation(s, target_lang) is None]
-                if len(uncached_samples) >= 50:
-                    random.shuffle(uncached_samples)
-                    sample_subset = uncached_samples[:100]
-                    
-                    context.log("🧠 [AI 자동 추출] 번역 시작 전 모드팩 핵심 단어를 추출하여 단어장을 진화시킵니다...")
-                    from translation_engines import auto_extract_glossary
-                    extracted_glossary = auto_extract_glossary(
-                        sample_subset, engine_key, api_key, ai_model, target_lang, custom_url,
-                        is_paid=is_paid, cancel_checker=context.is_cancelled
-                    )
-                    
-                    if extracted_glossary:
-                        clean_extracted = {k.strip(): v.split('#')[0].strip() for k, v in extracted_glossary.items() if k and v}
-                        added_keys = list(clean_extracted.keys())[:5]
-                        context.log(f"✨ 진화 완료! 새로 추가된 단어: {added_keys} 등 총 {len(clean_extracted)}개")
-                        if isinstance(glossary, dict):
-                            glossary.update(clean_extracted)
-                        
-                        if hasattr(context, 'app'):
-                            app = context.app
-                            app.app_state.glossary.update(clean_extracted)
-                            if target_lang not in app.app_state.glossaries_by_lang:
-                                app.app_state.glossaries_by_lang[target_lang] = {}
-                            app.app_state.glossaries_by_lang[target_lang].update(clean_extracted)
-                            if hasattr(app, "save_user_settings"):
-                                app.after(0, app.save_user_settings)
-                elif len(uncached_samples) > 0:
-                    context.log(f"💾 새로 번역할 텍스트가 {len(uncached_samples)}개로 적어 용어 추출을 건너뜁니다.")
-                else:
-                    context.log("💾 모든 텍스트가 캐시에 있어 용어 추출이 필요 없습니다.")
-            except Exception as e:
-                context.log(f"⚠️ 용어 추출 중 오류가 발생했으나 번역은 계속 진행합니다: {e}")
+            context.set_status("🌐 클라우드 마스터 번역 메모리 확인 중...")
+            translation_memory.load_memory()
+            translation_memory.wait_for_cloud_sync(timeout=6.0)
 
             context.set_status(f"총 {len(jobs)}개 파일 번역 중...")
             
@@ -526,8 +480,8 @@ def run_zip_translation_logic(context: TranslationUIContext, zip_path, engine_ke
                 _save_progress(out_dir, completed_set)
 
             if getattr(context.app, "_translate_jobs_parallel", None):
-                if engine_key == "gemini_batch":
-                    context.app._translate_jobs_parallel(jobs, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, on_job_completed=on_job_completed)
+                if engine_key in ("gemini_batch", "openai", "claude", "deepseek"):
+                    context.app._translate_jobs_parallel(jobs, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, on_job_completed=on_job_completed, engine_key=engine_key)
                 else:
                     context.app._translate_jobs_sequential(jobs, engine_key, api_key, is_paid, ai_model=ai_model, target_lang=target_lang, on_job_completed=on_job_completed, custom_url=custom_url)
 

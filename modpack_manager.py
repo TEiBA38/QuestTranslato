@@ -8,6 +8,7 @@ import hashlib
 import urllib.parse
 import urllib.request
 import importlib
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     import customtkinter as ctk
@@ -95,17 +96,31 @@ class ModpackMixin:
             if file_count > 0 or os.path.isdir(os.path.join(instance_root, "mods")):
                 return [(mp_name, instance_root, max(1, file_count), quest_translated, pack_translated)]
 
-        candidates = []
+        dir_entries = []
         for entry in os.scandir(instance_root):
             if not entry.is_dir():
                 continue
             name_lower = entry.name.lower()
             if name_lower in SCAN_IGNORE_DIRS or name_lower in SCAN_EXCLUDE_CANDIDATE_DIRS:
                 continue
-            file_count, quest_translated, pack_translated = self._count_translatable_files(entry.path)
+            dir_entries.append((entry.name, entry.path))
+
+        def _scan_one(item):
+            name, path = item
+            file_count, quest_translated, pack_translated = self._count_translatable_files(path)
             if file_count > 0:
-                candidates.append((entry.name, entry.path, file_count, quest_translated, pack_translated))
+                return (name, path, file_count, quest_translated, pack_translated)
+            return None
+
+        candidates = []
+        if dir_entries:
+            max_w = min(8, len(dir_entries))
+            with ThreadPoolExecutor(max_workers=max_w) as pool:
+                for res in pool.map(_scan_one, dir_entries):
+                    if res is not None:
+                        candidates.append(res)
         candidates.sort(key=lambda item: (-item[2], item[0].lower()))
+        self._last_scanned_root = os.path.normcase(os.path.abspath(instance_root))
         return candidates
 
     def _set_modpack_candidates(self, candidates):
@@ -198,36 +213,60 @@ class ModpackMixin:
         ):
             return
 
-        import mod_jar_extractor
-        q_cnt, j_cnt, p_cnt = mod_jar_extractor.restore_modpack_backups(modpack_dir)
+        # 수백 MB JAR 복원 및 폴더 순회 시 GUI '(응답 없음)' 방지를 위해 백그라운드 스레드에서 실행
+        self.log(f"⏳ [{mp_name}] 원본 백업 복원 및 롤백을 진행 중입니다...")
+        if hasattr(self, "set_status"):
+            self.set_status(f"🔄 '{mp_name}' 원본 롤백 진행 중...")
 
-        if hasattr(self, "app_state") and hasattr(self.app_state, "translated_history"):
-            self.app_state.translated_history.pop(modpack_dir, None)
-            if hasattr(self, "save_user_settings"):
-                self.save_user_settings()
+        def _do_rollback():
+            import mod_jar_extractor
+            try:
+                q_cnt, j_cnt, p_cnt = mod_jar_extractor.restore_modpack_backups(modpack_dir)
+                err = None
+            except Exception as e:
+                q_cnt, j_cnt, p_cnt = 0, 0, 0
+                err = e
 
-        if q_cnt + j_cnt + p_cnt > 0:
-            self.log(
-                f"🔄 [{mp_name}] 원본 롤백 완료! "
-                f"(퀘스트/설정 복원: {q_cnt}개 | 모드 JAR 복원: {j_cnt}개 | 리소스팩 삭제: {p_cnt}개)"
-            )
-            if messagebox:
-                messagebox.showinfo(
-                    "원본 롤백 완료",
-                    f"'{mp_name}' 원본 복구가 완료되었습니다!\n\n"
-                    f"• 퀘스트/설정 원본 복원: {q_cnt}개\n"
-                    f"• 패치된 모드 JAR 복원: {j_cnt}개\n"
-                    f"• 한글 리소스팩 삭제 및 등록 해제: {p_cnt}개"
-                )
-            self.scan_modpacks_from_entry(show_screen=False)
-        else:
-            self.log(f"ℹ️ [{mp_name}] 복원할 백업 파일(.bak) 또는 한글 리소스팩이 없습니다.")
-            if messagebox:
-                messagebox.showinfo(
-                    "롤백 안내",
-                    f"'{mp_name}' 모드팩에서 복원할 백업(.bak) 파일이나 한글 리소스팩을 찾지 못했습니다.\n"
-                    f"(백업 생성 기능 도입 이전에 덮어씌워진 퀘스트는 런처의 '프로필 수리/업데이트'로 초기화할 수 있습니다.)"
-                )
+            def _on_done():
+                if hasattr(self, "set_status"):
+                    self.set_status("대기 중")
+                if err is not None:
+                    self.log(f"❌ [{mp_name}] 롤백 중 오류 발생: {err}")
+                    if messagebox:
+                        messagebox.showerror("롤백 오류", f"'{mp_name}' 롤백 중 오류가 발생했습니다:\n{err}")
+                    return
+
+                if hasattr(self, "app_state") and hasattr(self.app_state, "translated_history"):
+                    self.app_state.translated_history.pop(modpack_dir, None)
+                    if hasattr(self, "save_user_settings"):
+                        self.save_user_settings()
+
+                if q_cnt + j_cnt + p_cnt > 0:
+                    self.log(
+                        f"🔄 [{mp_name}] 원본 롤백 완료! "
+                        f"(퀘스트/설정 복원: {q_cnt}개 | 모드 JAR 복원: {j_cnt}개 | 리소스팩 삭제: {p_cnt}개)"
+                    )
+                    if messagebox:
+                        messagebox.showinfo(
+                            "원본 롤백 완료",
+                            f"'{mp_name}' 원본 복구가 완료되었습니다!\n\n"
+                            f"• 퀘스트/설정 원본 복원: {q_cnt}개\n"
+                            f"• 패치된 모드 JAR 복원: {j_cnt}개\n"
+                            f"• 한글 리소스팩 삭제 및 등록 해제: {p_cnt}개"
+                        )
+                    self.scan_modpacks_from_entry(show_screen=False)
+                else:
+                    self.log(f"ℹ️ [{mp_name}] 복원할 백업 파일(.bak) 또는 한글 리소스팩이 없습니다.")
+                    if messagebox:
+                        messagebox.showinfo(
+                            "롤백 안내",
+                            f"'{mp_name}' 모드팩에서 복원할 백업(.bak) 파일이나 한글 리소스팩을 찾지 못했습니다.\n"
+                            f"(백업 생성 기능 도입 이전에 덮어씌워진 퀘스트는 런처의 '프로필 수리/업데이트'로 초기화할 수 있습니다.)"
+                        )
+
+            self.after(0, _on_done)
+
+        threading.Thread(target=_do_rollback, daemon=True).start()
 
     def _handle_scan_error(self, exc):
         self.app_state.scan_thread_active = False
@@ -352,6 +391,10 @@ class ModpackMixin:
 
     def render_modpack_cards(self, candidates):
         self.current_displayed_candidates = list(candidates) if candidates else []
+        # 세대 토큰으로 이전 청크 렌더링 예약 작업을 즉시 무효화 (검색/재스캔 시 중복 생성 방지)
+        render_gen = getattr(self, "_card_render_gen", 0) + 1
+        self._card_render_gen = render_gen
+
         # 1. [잔상 방지 패치] 스크롤러 내부 캔버스 배경색 강제 지정
         try:
             self.cards_scroller._parent_canvas.configure(bg="#12121a")
@@ -379,131 +422,169 @@ class ModpackMixin:
             ).grid(row=0, column=0, columnspan=columns, sticky="w", padx=8, pady=8)
             return
 
-        for idx, candidate in enumerate(candidates):
-            name = candidate[0]
-            path = candidate[1]
-            file_count = candidate[2]
-            quest_translated = candidate[3] if len(candidate) > 3 else False
-            pack_translated = candidate[4] if len(candidate) > 4 else False
+        # 3. 8개 단위 청크 비동기 렌더링: 첫 화면이 0.1초 만에 즉시 뜨고 메인 스레드 프리징 방지
+        cand_list = list(candidates)
+        batch_size = 8
 
-            # 앱 히스토리에 퀘스트 번역 완료 기록이 있는 경우
-            if path in getattr(self.app_state, 'translated_history', {}):
-                quest_translated = True
+        def _render_chunk(start_idx):
+            if getattr(self, "_card_render_gen", 0) != render_gen:
+                return
+            end_idx = min(start_idx + batch_size, len(cand_list))
+            for idx in range(start_idx, end_idx):
+                candidate = cand_list[idx]
+                name = candidate[0]
+                path = candidate[1]
+                file_count = candidate[2]
+                quest_translated = candidate[3] if len(candidate) > 3 else False
+                pack_translated = candidate[4] if len(candidate) > 4 else False
 
-            selected = (self.selected_modpack_path == path)
-            
-            # [잔상 방지 패치] bg_color를 부모 배경색과 동일하게 지정
-            card = ctk.CTkFrame(
-                self.cards_scroller,
-                fg_color="#25252b",
-                bg_color="#12121a", # 부모(스크롤러) 배경색
-                corner_radius=10,
-                border_width=2 if selected else 1,
-                border_color="#f97316" if selected else "#3f3f46"
-            )
-            card.grid(row=idx // columns, column=idx % columns, sticky="nsew", padx=5, pady=5)
-            self.modpack_cards_by_path[path] = card
-            if selected:
-                self.selected_card_widget = card
+                # 앱 히스토리에 퀘스트 번역 완료 기록이 있는 경우
+                if path in getattr(self.app_state, 'translated_history', {}):
+                    quest_translated = True
 
-            thumbnail_wrap = ctk.CTkFrame(
-                card, 
-                fg_color="transparent",
-                bg_color="transparent"
-            )
-            thumbnail_wrap.pack(fill="x", padx=8, pady=(8, 4))
+                selected = (self.selected_modpack_path == path)
+                
+                # [잔상 방지 패치] bg_color를 부모 배경색과 동일하게 지정
+                card = ctk.CTkFrame(
+                    self.cards_scroller,
+                    fg_color="#25252b",
+                    bg_color="#12121a", # 부모(스크롤러) 배경색
+                    corner_radius=10,
+                    border_width=2 if selected else 1,
+                    border_color="#f97316" if selected else "#3f3f46"
+                )
+                card.grid(row=idx // columns, column=idx % columns, sticky="nsew", padx=5, pady=5)
+                self.modpack_cards_by_path[path] = card
+                if selected:
+                    self.selected_card_widget = card
 
-            thumb_label = ctk.CTkLabel(thumbnail_wrap, text="⏳", justify="center",
-                                       font=ctk.CTkFont(family=FONT_NAME, size=14),
-                                       text_color="#a1a1aa")
-            thumb_label.pack(expand=True, pady=4)
+                thumbnail_wrap = ctk.CTkFrame(
+                    card, 
+                    fg_color="transparent",
+                    bg_color="transparent"
+                )
+                thumbnail_wrap.pack(fill="x", padx=8, pady=(8, 4))
 
-            self._load_thumbnail_async(path, thumb_label)
+                thumb_label = ctk.CTkLabel(thumbnail_wrap, text="⏳", justify="center",
+                                           font=ctk.CTkFont(family=FONT_NAME, size=14),
+                                           text_color="#a1a1aa")
+                thumb_label.pack(expand=True, pady=4)
 
-            ctk.CTkLabel(thumbnail_wrap, text=f"{file_count} FILES",
-                         font=ctk.CTkFont(family=FONT_NAME, size=9, weight="bold"),
-                         fg_color="#ea580c", text_color="#fff7ed",
-                         corner_radius=6, padx=6, pady=1).place(relx=0.98, rely=0.08, anchor="ne")
+                self._load_thumbnail_async(path, thumb_label)
 
-            # 퀘스트 번역 및 전체 한글화(리소스팩) 상태별 뱃지 & 서브타이틀
-            if quest_translated and pack_translated:
-                badge_text = "🎉 전체 한글화 완료"
-                badge_color = "#16a34a"  # 에메랄드 그린
-                subtitle_text = "퀘스트: 완료 · 리소스팩: 생성됨"
-                subtitle_color = "#34d399"
-            elif quest_translated:
-                badge_text = "📜 퀘스트 번역됨"
-                badge_color = "#0284c7"  # 청명한 블루
-                subtitle_text = "퀘스트: 완료 · 리소스팩: 미생성"
-                subtitle_color = "#38bdf8"
-            elif pack_translated:
-                badge_text = "📦 리소스팩 생성됨"
-                badge_color = "#8b5cf6"  # 퍼플
-                subtitle_text = "퀘스트: 미번역 · 리소스팩: 생성됨"
-                subtitle_color = "#a78bfa"
-            else:
-                badge_text = None
-                badge_color = None
-                subtitle_text = "퀘스트: 미번역 · 리소스팩: 미생성"
-                subtitle_color = "#9ca3af"
+                ctk.CTkLabel(thumbnail_wrap, text=f"{file_count} FILES",
+                             font=ctk.CTkFont(family=FONT_NAME, size=9, weight="bold"),
+                             fg_color="#ea580c", text_color="#fff7ed",
+                             corner_radius=6, padx=6, pady=1).place(relx=0.98, rely=0.08, anchor="ne")
 
-            if badge_text:
-                ctk.CTkLabel(thumbnail_wrap, text=badge_text,
-                             font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
-                             fg_color=badge_color, text_color="#f0fdf4",
-                             corner_radius=6, padx=6, pady=1).place(relx=0.02, rely=0.08, anchor="nw")
+                # 퀘스트 번역 및 전체 한글화(리소스팩) 상태별 뱃지 & 서브타이틀
+                if quest_translated and pack_translated:
+                    badge_text = "🎉 전체 한글화 완료"
+                    badge_color = "#16a34a"  # 에메랄드 그린
+                    subtitle_text = "퀘스트: 완료 · 리소스팩: 생성됨"
+                    subtitle_color = "#34d399"
+                elif quest_translated:
+                    badge_text = "📜 퀘스트 번역됨"
+                    badge_color = "#0284c7"  # 청명한 블루
+                    subtitle_text = "퀘스트: 완료 · 리소스팩: 미생성"
+                    subtitle_color = "#38bdf8"
+                elif pack_translated:
+                    badge_text = "📦 리소스팩 생성됨"
+                    badge_color = "#8b5cf6"  # 퍼플
+                    subtitle_text = "퀘스트: 미번역 · 리소스팩: 생성됨"
+                    subtitle_color = "#a78bfa"
+                else:
+                    badge_text = None
+                    badge_color = None
+                    subtitle_text = "퀘스트: 미번역 · 리소스팩: 미생성"
+                    subtitle_color = "#9ca3af"
 
-            ctk.CTkLabel(card,
-                         text=(name[:22] + "...") if len(name) > 22 else name,
-                         anchor="w", font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold")
-                         ).pack(fill="x", padx=8)
-            ctk.CTkLabel(card, text=subtitle_text, anchor="w",
-                         font=ctk.CTkFont(family=FONT_NAME, size=9),
-                         text_color=subtitle_color).pack(fill="x", padx=8, pady=(1, 0))
+                if badge_text:
+                    ctk.CTkLabel(thumbnail_wrap, text=badge_text,
+                                 font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
+                                 fg_color=badge_color, text_color="#f0fdf4",
+                                 corner_radius=6, padx=6, pady=1).place(relx=0.02, rely=0.08, anchor="nw")
 
-            def select_this(p=path, n=name):
-                if self.selected_card_widget is not None:
-                    self.selected_card_widget.configure(border_color="#3f3f46", border_width=1)
-                self.selected_modpack_path = p
-                self.selected_modpack_label.configure(text=f"선택된 모드팩: {n}")
-                self.translate_selected_label.configure(text=f"선택 모드팩: {n}")
-                self.btn_go_translate.configure(state="normal")
-                self.log(f"✅ 모드팩 선택됨: {n}")
-                target_card = self.modpack_cards_by_path.get(p)
-                if target_card:
-                    target_card.configure(border_color="#f97316", border_width=2)
-                    self.selected_card_widget = target_card
+                ctk.CTkLabel(card,
+                             text=(name[:22] + "...") if len(name) > 22 else name,
+                             anchor="w", font=ctk.CTkFont(family=FONT_NAME, size=11, weight="bold")
+                             ).pack(fill="x", padx=8)
+                ctk.CTkLabel(card, text=subtitle_text, anchor="w",
+                             font=ctk.CTkFont(family=FONT_NAME, size=9),
+                             text_color=subtitle_color).pack(fill="x", padx=8, pady=(1, 0))
 
-            btn_row = ctk.CTkFrame(card, fg_color="transparent")
-            btn_row.pack(fill="x", padx=8, pady=(6, 8))
+                def select_this(p=path, n=name):
+                    if self.selected_card_widget is not None and self.selected_card_widget.winfo_exists():
+                        self.selected_card_widget.configure(border_color="#3f3f46", border_width=1)
+                    self.selected_modpack_path = p
+                    self.selected_modpack_label.configure(text=f"선택된 모드팩: {n}")
+                    self.translate_selected_label.configure(text=f"선택 모드팩: {n}")
+                    self.btn_go_translate.configure(state="normal")
+                    self.log(f"✅ 모드팩 선택됨: {n}")
+                    target_card = self.modpack_cards_by_path.get(p)
+                    if target_card and target_card.winfo_exists():
+                        target_card.configure(border_color="#f97316", border_width=2)
+                        self.selected_card_widget = target_card
 
-            ctk.CTkButton(btn_row, text="🔄 원본 롤백", width=76, height=24,
-                          fg_color="#3f3f46" if (quest_translated or pack_translated) else "#27272a",
-                          hover_color="#dc2626",
-                          text_color="#f4f4f5" if (quest_translated or pack_translated) else "#71717a",
-                          font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
-                          command=lambda p=path, n=name: self.rollback_modpack(p, n)).pack(side="left")
+                btn_row = ctk.CTkFrame(card, fg_color="transparent")
+                btn_row.pack(fill="x", padx=8, pady=(6, 8))
 
-            ctk.CTkButton(btn_row, text="선택", width=64, height=24,
-                          fg_color="#ea580c", hover_color="#c2410c",
-                          font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
-                          command=select_this).pack(side="right")
+                ctk.CTkButton(btn_row, text="🔄 원본 롤백", width=76, height=24,
+                              fg_color="#3f3f46" if (quest_translated or pack_translated) else "#27272a",
+                              hover_color="#dc2626",
+                              text_color="#f4f4f5" if (quest_translated or pack_translated) else "#71717a",
+                              font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
+                              command=lambda p=path, n=name: self.rollback_modpack(p, n)).pack(side="left")
+
+                ctk.CTkButton(btn_row, text="선택", width=64, height=24,
+                              fg_color="#ea580c", hover_color="#c2410c",
+                              font=ctk.CTkFont(family=FONT_NAME, size=10, weight="bold"),
+                              command=select_this).pack(side="right")
+
+            if end_idx < len(cand_list):
+                self.after(10, lambda: _render_chunk(end_idx))
+
+        _render_chunk(0)
     # ====================================================================
     # 썸네일 & 이미지 로직 (사용자님의 유연한 로직 100% 통합)
     # ====================================================================
 
     def _load_thumbnail_async(self, path, thumb_label):
+        # 인메모리 썸네일 캐시 적중 시 스레드/디스크 I/O 없이 0ms 즉시 표시
+        if not hasattr(self, "_thumb_mem_cache"):
+            self._thumb_mem_cache = {}
+        if path in self._thumb_mem_cache:
+            cached_img = self._thumb_mem_cache[path]
+            if thumb_label.winfo_exists():
+                if cached_img is not None:
+                    thumb_label.configure(image=cached_img, text="")
+                else:
+                    thumb_label.configure(text="No Image")
+            return
+
+        if not hasattr(self, "_thumb_executor") or self._thumb_executor is None:
+            self._thumb_executor = ThreadPoolExecutor(max_workers=4)
+
         def worker():
             cache_val = self._get_thumbnail_path(path)
-            if cache_val:
-                img = self._load_thumbnail_image(cache_val, max_size=140)
-                if img:
-                    self.after(0, lambda: thumb_label.configure(image=img, text=""))
-                else:
-                    self.after(0, lambda: thumb_label.configure(text="No Image"))
-            else:
-                self.after(0, lambda: thumb_label.configure(text="No Image"))
-        threading.Thread(target=worker, daemon=True).start()
+            img = self._load_thumbnail_image(cache_val, max_size=140) if cache_val else None
+            self._thumb_mem_cache[path] = img
+
+            def _apply():
+                try:
+                    if not thumb_label.winfo_exists():
+                        return
+                    if img is not None:
+                        self.modpack_thumbnail_cache.append(img)
+                        thumb_label.configure(image=img, text="")
+                    else:
+                        thumb_label.configure(text="No Image")
+                except Exception:
+                    pass
+
+            self.after(0, _apply)
+
+        self._thumb_executor.submit(worker)
 
     def _apply_thumbnail(self, label_widget, image):
         if not label_widget.winfo_exists():

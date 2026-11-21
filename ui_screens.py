@@ -28,6 +28,8 @@ from constants import (
     MODELS_OPENAI,
     MODELS_CLAUDE,
     MODELS_DEEPSEEK,
+    PAID_TIER_PLANS,
+    parse_paid_tier,
     normalize_model_name,
     has_hangul,
 )
@@ -38,12 +40,34 @@ class UIScreensMixin:
     # 화면 전환
     # ====================================================================
 
+    def _log_user_action(self, detail: str):
+        try:
+            import session_logger
+            session_logger.log_action(detail)
+        except Exception:
+            pass
+
+    def _bind_window_close_log(self, win, label: str):
+        """팝업 창이 닫힐 때 세션 로그에 닫힘 이벤트를 1회만 기록합니다."""
+        closed = {"done": False}
+        def _on_destroy(event=None):
+            if event is not None and getattr(event, "widget", None) is not win:
+                return
+            if not closed["done"]:
+                closed["done"] = True
+                self._log_user_action(f"{label} 창 닫기")
+        try:
+            win.bind("<Destroy>", _on_destroy, add="+")
+        except Exception:
+            pass
+
     def show_home_screen(self):
         self.phase_label.configure(text="START · 작업 선택")
         self.select_screen.grid_remove()
         self.quick_translate_screen.grid_remove()
         self.translate_screen.grid_remove()
         self.home_screen.grid()
+        self._log_user_action("화면 진입: 홈 (작업 선택)")
 
     def show_select_screen(self):
         self.phase_label.configure(text="STEP 1/2 · 모드팩 선택")
@@ -52,10 +76,17 @@ class UIScreensMixin:
         self.translate_screen.grid_remove()
         self.select_screen.grid()
         self._apply_responsive_layout()
+        self._log_user_action("화면 진입: 모드팩 선택")
 
         saved_root = self.instance_path_entry.get().strip()
         if saved_root and os.path.isdir(saved_root) and not self.app_state.scan_thread_active and not getattr(self, "_suppress_auto_scan", False):
-            self.scan_modpacks_from_entry(show_screen=False)
+            norm_root = os.path.normcase(os.path.abspath(saved_root))
+            already_scanned = (
+                bool(getattr(self, "modpack_entries", None))
+                and getattr(self, "_last_scanned_root", None) == norm_root
+            )
+            if not already_scanned:
+                self.scan_modpacks_from_entry(show_screen=False)
 
     def show_quick_translate_screen(self):
         self.phase_label.configure(text="STEP 1-A/2 · 파일/ZIP 번역")
@@ -64,6 +95,7 @@ class UIScreensMixin:
         self.translate_screen.grid_remove()
         self.quick_translate_screen.grid()
         self._apply_responsive_layout()
+        self._log_user_action("화면 진입: 파일/ZIP 단독 번역")
 
     def show_translate_screen(self, force=False):
         if not force and not self.selected_modpack_path:
@@ -75,6 +107,8 @@ class UIScreensMixin:
         self.quick_translate_screen.grid_remove()
         self.translate_screen.grid()
         self._apply_responsive_layout()
+        mp_name = os.path.basename(str(self.selected_modpack_path or "").rstrip(os.sep)) or "없음"
+        self._log_user_action(f"화면 진입: 번역 설정 및 진행 (모드팩={mp_name})")
 
     # 하위 호환 별칭
     def show_launcher_setup_screen(self):
@@ -130,6 +164,7 @@ class UIScreensMixin:
         if hasattr(self, "startup_overlay") and self.startup_overlay is not None:
             self.startup_overlay.destroy()
             self.startup_overlay = None
+        self._log_user_action("초기 로딩 완료 → 메인 화면 진입")
         self.load_user_settings()
         self.show_home_screen()
         self.log("[안내] 원하는 작업을 선택한 뒤 이어서 진행하세요.")
@@ -219,6 +254,11 @@ class UIScreensMixin:
             return
         if not message.startswith("⏳"):
             logging.info(message)
+            try:
+                import session_logger
+                session_logger.log_ui(message)
+            except Exception:
+                pass
 
         if not hasattr(self, '_log_queue'):
             self._log_queue = []
@@ -267,6 +307,11 @@ class UIScreensMixin:
             self.after(0, lambda: self.set_status(text))
             return
         self._last_status_base = text
+        try:
+            import session_logger
+            session_logger.log_status(text)
+        except Exception:
+            pass
         eta = getattr(self, "_current_eta", "")
         if eta and ("번역" in text or "처리" in text or "진행" in text):
             self.status_label.configure(text=f"{text} (남은 시간: 약 {eta})")
@@ -424,6 +469,36 @@ class UIScreensMixin:
     # 설정 & 입력 검증
     # ====================================================================
 
+    def _update_long_text_upgrade_checkbox_state(self):
+        """무료 Gemini 계정 선택 시에만 '장문 상위 모델 번역' 체크박스를 활성화합니다 (유료 시 회색 + 체크 해제 + 비활성화)."""
+        if not hasattr(self, "chk_long_text_upgrade"):
+            return
+        engine = self.engine_combo.get() if hasattr(self, "engine_combo") else ""
+        plan = self.plan_combo.get() if hasattr(self, "plan_combo") else ""
+        is_gemini_free = ("Gemini" in engine) and ("무료 계정" in plan)
+        import translation_engines
+        if is_gemini_free:
+            restored = getattr(self, "_saved_free_long_text_upgrade", True)
+            self.long_text_upgrade_var.set(bool(restored))
+            self.chk_long_text_upgrade.configure(
+                state="normal",
+                text_color="#e4e4e7",
+                fg_color="#a855f7",
+                hover_color="#9333ea",
+                border_color="#a855f7",
+            )
+            translation_engines.set_free_long_text_upgrade(bool(restored))
+        else:
+            self.long_text_upgrade_var.set(False)
+            self.chk_long_text_upgrade.configure(
+                state="disabled",
+                text_color="#71717a",
+                fg_color="#3f3f46",
+                hover_color="#3f3f46",
+                border_color="#52525b",
+            )
+            translation_engines.set_free_long_text_upgrade(False)
+
     def on_plan_change(self, choice=None):
         if choice is None:
             choice = self.plan_combo.get()
@@ -444,11 +519,20 @@ class UIScreensMixin:
                 self.model_combo.configure(values=MODELS_GEMINI_FREE)
                 matched = next((m for m in MODELS_GEMINI_FREE if normalize_model_name(m) == current_raw), None)
                 self.model_combo.set(matched or MODELS_GEMINI_FREE[0])
+        elif "OpenAI" in engine or "Claude" in engine:
+            if choice in PAID_TIER_PLANS:
+                self._last_paid_tier_plan = choice
+            import translation_engines
+            translation_engines.set_paid_api_tier(parse_paid_tier(choice))
+        self._log_user_action(f"요금제/티어 변경: {engine} / {choice}")
+        self._update_long_text_upgrade_checkbox_state()
 
     def on_engine_change(self, choice):
+        self._log_user_action(f"번역 엔진 변경: {choice}")
         if "Custom API" in choice or "Local AI" in choice:
             self.standard_api_frame.pack_forget()
             self.local_api_frame.pack(fill="x", before=self.btn_translate_selected_modpack)
+            self._update_long_text_upgrade_checkbox_state()
             self.log("💡 커스텀 호환 API 주소와 모델명(필요시 API 키 포함)을 입력해주세요. '🔍 모델 감지' 버튼으로 실행 중인 모델을 자동 검색할 수 있습니다.")
             return
 
@@ -471,6 +555,8 @@ class UIScreensMixin:
             current_plan = self.plan_combo.get()
             if current_plan in gemini_plans:
                 self._last_gemini_plan = current_plan
+            elif current_plan in PAID_TIER_PLANS:
+                self._last_paid_tier_plan = current_plan
 
             current_raw = normalize_model_name(self.model_combo.get())
             if "Gemini" in choice:
@@ -484,19 +570,27 @@ class UIScreensMixin:
                 self.on_plan_change(self.plan_combo.get())
                 self.log("💡 Google AI (Gemini) API 키를 입력하고 계정 상태(무료/유료)를 선택해주세요.")
             elif "OpenAI" in choice:
-                self.plan_combo.set("유료 전용 (선불 크레딧 충전 필수)")
-                self.plan_combo.configure(state="disabled")
+                restored_tier = getattr(self, "_last_paid_tier_plan", PAID_TIER_PLANS[0])
+                if restored_tier not in PAID_TIER_PLANS:
+                    restored_tier = PAID_TIER_PLANS[0]
+                self.plan_combo.configure(state="normal", values=PAID_TIER_PLANS)
+                self.plan_combo.set(restored_tier)
+                self.on_plan_change(restored_tier)
                 self.model_combo.configure(state="normal", values=MODELS_OPENAI)
                 matched = next((m for m in MODELS_OPENAI if normalize_model_name(m) == current_raw), None)
                 self.model_combo.set(matched or MODELS_OPENAI[0])
-                self.log("💡 OpenAI (ChatGPT) API 키와 모델을 선택해주세요. (선불 충전 계정 필요)")
+                self.log("💡 OpenAI (ChatGPT) API 키와 계정 티어(기본: 유료 Tier 1)를 선택해주세요.")
             elif "Claude" in choice:
-                self.plan_combo.set("유료 전용 (선불 크레딧 충전 필수)")
-                self.plan_combo.configure(state="disabled")
+                restored_tier = getattr(self, "_last_paid_tier_plan", PAID_TIER_PLANS[0])
+                if restored_tier not in PAID_TIER_PLANS:
+                    restored_tier = PAID_TIER_PLANS[0]
+                self.plan_combo.configure(state="normal", values=PAID_TIER_PLANS)
+                self.plan_combo.set(restored_tier)
+                self.on_plan_change(restored_tier)
                 self.model_combo.configure(state="normal", values=MODELS_CLAUDE)
                 matched = next((m for m in MODELS_CLAUDE if normalize_model_name(m) == current_raw), None)
                 self.model_combo.set(matched or MODELS_CLAUDE[0])
-                self.log("💡 Anthropic (Claude) API 키와 모델을 선택해주세요. (선불 충전 계정 필요)")
+                self.log("💡 Anthropic (Claude) API 키와 계정 티어(기본: 유료 Tier 1)를 선택해주세요.")
             elif "DeepSeek" in choice:
                 self.plan_combo.set("유료 전용 (선불 크레딧 충전 필수)")
                 self.plan_combo.configure(state="disabled")
@@ -504,6 +598,7 @@ class UIScreensMixin:
                 matched = next((m for m in MODELS_DEEPSEEK if normalize_model_name(m) == current_raw), None)
                 self.model_combo.set(matched or MODELS_DEEPSEEK[0])
                 self.log("💡 DeepSeek (딥시크) API 키와 모델을 선택해주세요. (선불 충전 계정 필요)")
+        self._update_long_text_upgrade_checkbox_state()
 
     def on_target_lang_change(self, choice):
         if hasattr(self, "_sync_glossary_to_current_lang"):
@@ -511,7 +606,9 @@ class UIScreensMixin:
         self.log(f"🌍 타겟 언어가 '{choice}'(으)로 변경되었습니다. (해당 언어 용어집 적용)")
 
     def open_glossary_editor(self):
+        self._log_user_action("용어집 편집 창 열기")
         editor = ctk.CTkToplevel(self)
+        self._bind_window_close_log(editor, "용어집 편집")
         editor.title("용어집 편집 (Glossary)")
         editor.geometry("460x550")
         editor.minsize(400, 450)
@@ -615,11 +712,17 @@ class UIScreensMixin:
                 "btn_single", "btn_zip", "btn_pick_instance_root", "btn_auto_detect_root",
                 "btn_rescan_modpacks", "btn_open_translate_options",
                 "btn_translate_selected_modpack", "btn_translate_all_guidebooks",
-                "chk_auto_apply_rp", "btn_edit_glossary",
+                "chk_auto_apply_rp", "chk_append_english", "btn_edit_glossary",
                 "btn_back_to_select", "btn_back_from_select", "btn_back_from_quick"
             ):
                 if hasattr(self, attr):
                     getattr(self, attr).configure(state=btn_state)
+
+            if hasattr(self, "chk_long_text_upgrade"):
+                if state:
+                    self._update_long_text_upgrade_checkbox_state()
+                else:
+                    self.chk_long_text_upgrade.configure(state="disabled")
 
             if hasattr(self, "btn_go_translate"):
                 if state and getattr(self, "selected_modpack_path", None) is None:
@@ -673,8 +776,17 @@ class UIScreensMixin:
                 self.plan_combo.set(gemini_free_label)
                 current_plan = gemini_free_label
             is_paid = (current_plan == gemini_paid_label)
+            translation_engines.set_free_long_text_upgrade((not is_paid) and bool(self.long_text_upgrade_var.get()) if hasattr(self, "long_text_upgrade_var") else False)
         else:
             is_paid = True
+            translation_engines.set_free_long_text_upgrade(False)
+            if engine_key in ("openai", "claude"):
+                current_tier = self.plan_combo.get()
+                if current_tier not in PAID_TIER_PLANS:
+                    current_tier = PAID_TIER_PLANS[0]
+                    self.plan_combo.set(current_tier)
+                self._last_paid_tier_plan = current_tier
+                translation_engines.set_paid_api_tier(parse_paid_tier(current_tier))
         ai_model = normalize_model_name(self.model_combo.get())
         target_lang = self.target_lang_combo.get()
         return engine_key, api_key, is_paid, ai_model, target_lang, None
@@ -696,12 +808,17 @@ class UIScreensMixin:
         return self.app_state.cancel_requested
 
     def open_memory_editor(self):
+        self._log_user_action("오역 수정기 창 열기")
         from memory_editor_window import MemoryEditorWindow
-        return MemoryEditorWindow(self)
+        win = MemoryEditorWindow(self)
+        self._bind_window_close_log(win, "오역 수정기")
+        return win
 
     def open_ai_model_info_modal(self):
         """AI 모델별 무료/유료 구분, 회사별 스펙, 1,000개 항목당 예상 비용 및 RPD 가이드 모달"""
+        self._log_user_action("AI 모델 정보 창 열기")
         info_win = ctk.CTkToplevel(self)
+        self._bind_window_close_log(info_win, "AI 모델 정보")
         info_win.title("ℹ️ AI 모델 정보 (무료 vs 유료 · 회사별 요금 · 1,000개 항목당 예상 비용)")
         info_win.geometry("820x720")
         info_win.minsize(700, 540)

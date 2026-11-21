@@ -1,5 +1,5 @@
 FONT_NAME = "Malgun Gothic"
-APP_VERSION = "v1.7.1"
+APP_VERSION = "v1.8.0"
 TARGET_EXTENSIONS = ('.snbt', '.json', '.lang', '.hqm')
 SCAN_IGNORE_DIRS = {
     '.git', '.venv', '__pycache__',
@@ -199,6 +199,23 @@ MODELS_DEEPSEEK = [
     "deepseek-flash (가성비 추천)",
     "deepseek-v4-pro (고품질 추천)",
 ]
+
+# OpenAI / Claude 유료 API 계정 티어 선택지 (기본값: "유료 Tier 1")
+PAID_TIER_PLANS = [
+    "유료 Tier 1",
+    "유료 Tier 2",
+    "유료 Tier 3+",
+]
+
+
+def parse_paid_tier(plan_label: str) -> int:
+    """유료 티어 라벨 문자열에서 정수 티어(1, 2, 3)를 추출합니다. 기본값은 1."""
+    s = str(plan_label or "")
+    if "Tier 3" in s or "3" in s:
+        return 3
+    if "Tier 2" in s or "2" in s:
+        return 2
+    return 1
 
 
 def normalize_model_name(model_name: str) -> str:

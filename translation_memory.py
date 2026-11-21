@@ -350,15 +350,48 @@ _session_hit_texts = set()
 _session_miss_texts = set()
 _session_start_time = None
 _session_api_calls = 0
+_session_input_tokens = 0
+_session_output_tokens = 0
+_session_model_name = ""
+_session_is_paid = False
+
+# 모델별 1M(100만) 토큰당 (입력 USD, 출력 USD) 공식 단가표 (환율 1,400원 기준 추정)
+_MODEL_PRICE_PER_1M_USD = (
+    ("gemini-3.1-flash-lite", (0.20, 1.50)),
+    ("gemini-3.5-flash-lite", (0.30, 2.50)),
+    ("gemini-3.6-flash", (0.50, 3.00)),
+    ("gemini-3.8-flash", (0.75, 3.75)),
+    ("gemini-4-hydrogen", (1.50, 7.50)),
+    ("gemini-4-argon", (2.00, 10.00)),
+    ("gpt-6-luna", (0.10, 0.50)),
+    ("gpt-6.1-terra", (1.00, 5.00)),
+    ("gpt-6.1-sol", (1.25, 10.00)),
+    ("gpt-6-astra", (1.25, 10.00)),
+    ("gpt-5-mini", (0.25, 2.00)),
+    ("gpt-5", (1.25, 10.00)),
+    ("gpt-4.1-mini", (0.40, 1.60)),
+    ("gpt-4.1", (2.00, 8.00)),
+    ("gpt-4o-mini", (0.15, 0.60)),
+    ("claude-haiku", (1.00, 5.00)),
+    ("claude-sonnet", (3.00, 15.00)),
+    ("claude-opus", (5.00, 25.00)),
+    ("claude-fable", (3.00, 15.00)),
+    ("deepseek-flash", (0.14, 0.28)),
+    ("deepseek-v4-pro", (0.28, 0.42)),
+)
 
 
 def reset_session_stats():
-    """번역 작업 시작 시 세션 통계(캐시 적중/미적중, API 호출량, 시작 시간)를 초기화합니다."""
-    global _session_start_time, _session_api_calls
+    """번역 작업 시작 시 세션 통계(캐시 적중/미적중, API 호출량, 토큰, 시작 시간)를 초기화합니다."""
+    global _session_start_time, _session_api_calls, _session_input_tokens, _session_output_tokens, _session_model_name, _session_is_paid
     with _lock:
         _session_hit_texts.clear()
         _session_miss_texts.clear()
         _session_api_calls = 0
+        _session_input_tokens = 0
+        _session_output_tokens = 0
+        _session_model_name = ""
+        _session_is_paid = False
         _session_start_time = time.time()
 
 
@@ -367,6 +400,41 @@ def record_api_call(count=1):
     global _session_api_calls
     with _lock:
         _session_api_calls += count
+
+
+def record_token_usage(input_tokens=0, output_tokens=0, model_name="", is_paid=False):
+    """실제 API 응답의 입력/출력(추론 포함) 토큰 사용량을 누적 기록합니다."""
+    global _session_input_tokens, _session_output_tokens, _session_model_name, _session_is_paid
+    with _lock:
+        _session_input_tokens += max(0, int(input_tokens or 0))
+        _session_output_tokens += max(0, int(output_tokens or 0))
+        if model_name:
+            _session_model_name = str(model_name)
+        if is_paid:
+            _session_is_paid = True
+
+
+def get_session_estimated_cost_krw():
+    """누적된 실제 토큰 수 기반 예상 지출 금액(원)을 계산해 (center_krw, low_krw, high_krw, is_paid) 반환."""
+    with _lock:
+        in_tok = _session_input_tokens
+        out_tok = _session_output_tokens
+        model_low = str(_session_model_name or "").lower()
+        paid = _session_is_paid
+
+    if not paid or (in_tok == 0 and out_tok == 0):
+        return 0, 0, 0, paid
+
+    in_rate, out_rate = 0.75, 3.75  # 미등록 유료 모델 안전 기본 단가
+    for prefix, rates in _MODEL_PRICE_PER_1M_USD:
+        if prefix in model_low:
+            in_rate, out_rate = rates
+            break
+
+    usd = (in_tok / 1_000_000.0) * in_rate + (out_tok / 1_000_000.0) * out_rate
+    krw = int(round(usd * 1400.0))
+    margin = 100 if krw >= 150 else max(20, int(round(krw * 0.25)))
+    return krw, max(0, krw - margin), krw + margin, True
 
 
 def _record_cache_lookup(text, is_hit):
@@ -399,12 +467,36 @@ def get_cache_stats_summary(target_lang="한국어 (Korean)"):
     else:
         rpd_info = "0회 (100% 캐시 및 로컬 단어 조립 처리로 API 소모 0회)"
 
+    with _lock:
+        in_tok = _session_input_tokens
+        out_tok = _session_output_tokens
+        used_model = _session_model_name or "기본 모델"
+    tot_tok = in_tok + out_tok
+    est_krw, low_krw, high_krw, paid_flag = get_session_estimated_cost_krw()
+
+    if paid_flag and tot_tok > 0:
+        cost_line = f"  • 예상 지출 금액: 약 {est_krw:,}원 (범위 {low_krw:,}원 ~ {high_krw:,}원 | 토큰: 입력 {in_tok:,} / 출력 {out_tok:,} | {used_model})"
+    elif tot_tok > 0:
+        cost_line = f"  • 예상 지출 금액: 0원 (무료/로컬 | 토큰: 입력 {in_tok:,} / 출력 {out_tok:,} | {used_model})"
+    else:
+        cost_line = "  • 예상 지출 금액: 0원 (API 토큰 소모 없음)"
+
+    try:
+        import session_logger
+        session_logger.log_event(
+            "OK", "SESSION_COST",
+            f"model={used_model}, paid={paid_flag}, in_tok={in_tok}, out_tok={out_tok}, est_krw={est_krw} ({low_krw}~{high_krw})"
+        )
+    except Exception:
+        pass
+
     lines = [
         "==========================================",
         "📊 [번역 통계 요약]",
         f"  • 캐시 적용률: {hit_rate:.1f}% (전체 고유 문장 {total_queries:,}개 중 캐시 적용 {hits:,}개 / 신규 번역 {misses:,}개)",
         f"  • 번역 소요 시간: {elapsed_str}",
         f"  • API 호출량 (RPD): {rpd_info}",
+        cost_line,
         "==========================================",
     ]
     return "\n".join(lines)
