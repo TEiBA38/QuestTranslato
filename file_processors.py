@@ -494,8 +494,10 @@ def extract_snbt_targets(content):
     targets = []
 
     kv_pattern = re.compile(r'^\s*("ftbquests\.[^"]+"\s*:\s*)"((?:[^"\\]|\\.)*)"(.*)$')
-    array_start_pattern = re.compile(r'^(.*?\b(text|description|hover|quest_desc|desc|subtitle|chapter_subtitle|quest_subtitle)\s*:\s*\[\s*)(.*)$')
-    key_pattern = re.compile(r'^(.*?\b(title|subtitle|description|text|hover|quest_desc|desc|chapter_subtitle|quest_subtitle)\s*:\s*)"((?:[^"\\]|\\.)*)"(.*)$')
+    array_start_pattern = re.compile(
+        r'^(.*?(?:\b(?:title|text|description|hover|quest_desc|desc|subtitle|chapter_subtitle|quest_subtitle)"?|"ftbquests\.[^"]+")\s*:\s*\[\s*)(.*)$'
+    )
+    key_pattern = re.compile(r'^(.*?\b(title|subtitle|description|text|hover|quest_desc|desc|chapter_subtitle|quest_subtitle)"?\s*:\s*)"((?:[^"\\]|\\.)*)"(.*)$')
     array_text_pattern = re.compile(r'^(\s*)"((?:[^"\\]|\\.)*)"(.*)$')
 
     for idx, line in enumerate(lines):
@@ -512,11 +514,11 @@ def extract_snbt_targets(content):
                 targets.append((idx, prefix, orig_text, suffix))
             continue
 
-        # 2. 배열 시작 감지 (description: [, text: [, hover: [ 등 띄어쓰기 유무 무관)
+        # 2. 배열 시작 감지 (description: [, text: [, hover: [, title: [, "ftbquests.xxx": [ 등)
         arr_match = array_start_pattern.search(line)
         if arr_match:
             in_text_block = True
-            line_rem = arr_match.group(3)
+            line_rem = arr_match.group(2)
             # 같은 줄에 따옴표 문자열이 즉시 있는 경우 (예: description: [ "Line 1" ])
             match = re.search(r'^(.*?)"((?:[^"\\]|\\.)*)"(.*)$', line_rem)
             if match:

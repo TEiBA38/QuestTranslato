@@ -45,5 +45,19 @@ class TestFileProcessors(unittest.TestCase):
         self.assertNotIn("minecraft:grass_block", extracted_texts) # icon
         self.assertNotIn("minecraft:dirt", extracted_texts) # item
 
+    def test_extract_snbt_lang_single_line_arrays(self):
+        sample = '''{
+            quest.070CAEAD.quest_desc: ["Single line quest desc"]
+            "quest.070CAEAD.quest_desc": ["Quoted key quest desc"]
+            "ftbquests.chapter.1.description": ["FTB quoted array desc"]
+            title: ["Array title value"]
+        }'''
+        _, targets = extract_snbt_targets(sample)
+        extracted = [t[2] for t in targets]
+        self.assertIn("Single line quest desc", extracted)
+        self.assertIn("Quoted key quest desc", extracted)
+        self.assertIn("FTB quoted array desc", extracted)
+        self.assertIn("Array title value", extracted)
+
 if __name__ == '__main__':
     unittest.main()
